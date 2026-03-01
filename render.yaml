@@ -1,0 +1,32 @@
+databases:
+  - name: buchungssystem-db
+    plan: starter
+    databaseName: buchungssystem
+    user: buchungssystem_admin
+    region: frankfurt
+
+services:
+  - type: worker
+    name: buchungssystem-control-node
+    runtime: node
+    region: frankfurt
+    plan: starter
+    buildCommand: cd control-node && npm install && npm run build
+    startCommand: cd control-node && npm start
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: buchungssystem-db
+          property: connectionString
+      - key: REGIONDO_PUBLIC_KEY
+        sync: false
+      - key: REGIONDO_PRIVATE_KEY
+        sync: false
+      - key: REGIONDO_BASE_URL
+        value: https://api.regiondo.com/v1/
+      - key: REGIONDO_LANGUAGE
+        value: de-DE
+      - key: NODE_ENV
+        value: production
+      - key: SYNC_INTERVAL_MINUTES
+        value: "5"
