@@ -77,7 +77,7 @@ export async function fetchCustomers(
 export async function fetchProducts(
   params: Record<string, string> = {}
 ): Promise<unknown[]> {
-  const data = await regiondoGet<{ data: unknown[] }>("products", params);
+  const data = await regiondoGet<{ data: unknown[] }>("supplier/products", params);
   return data.data ?? [];
 }
 
