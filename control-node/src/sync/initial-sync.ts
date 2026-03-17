@@ -26,8 +26,8 @@ async function main(): Promise<void> {
 
   console.log("");
   console.log("=== Initial Sync Complete ===");
-  console.log(`  Customers: ${customerCount}`);
-  console.log(`  Products:  ${productCount}`);
+  //console.log(`  Customers: ${customerCount}`);
+  //console.log(`  Products:  ${productCount}`);
   console.log(`  Bookings:  ${bookingCount}`);
 
   await pool.end();
