@@ -15,11 +15,11 @@ async function main(): Promise<void> {
 
   await testConnection();
 
-  console.log("[1/3] Syncing all customers ...");
-  const customerCount = await syncCustomers();
+  //console.log("[1/3] Syncing all customers ...");
+  //const customerCount = await syncCustomers();
 
-  console.log("[2/3] Syncing all products ...");
-  const productCount = await syncProducts();
+  //console.log("[2/3] Syncing all products ...");
+  //const productCount = await syncProducts();
 
   console.log("[3/3] Syncing all bookings ...");
   const bookingCount = await syncBookings();
