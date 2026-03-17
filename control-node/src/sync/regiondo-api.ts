@@ -84,6 +84,6 @@ export async function fetchProducts(
 export async function fetchBookings(
   params: Record<string, string> = {}
 ): Promise<unknown[]> {
-  const data = await regiondoGet<{ data: unknown[] }>("bookings", params);
+  const data = await regiondoGet<{ data: unknown[] }>("supplier/bookings", params);
   return data.data ?? [];
 }
