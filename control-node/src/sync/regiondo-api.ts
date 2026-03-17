@@ -26,6 +26,9 @@ export async function regiondoGet<T = unknown>(
 
   let lastError: Error | null = null;
 
+  console.log(endpoint)
+  console.log(headers)
+
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       const response = await fetch(url.toString(), {
