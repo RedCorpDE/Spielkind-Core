@@ -245,8 +245,8 @@ export async function runIncrementalSync(): Promise<void> {
   const productsSince = await getLastSyncTime("products");
   const bookingsSince = await getLastSyncTime("bookings");
 
-  await syncCustomers(customersSince);
-  await syncProducts(productsSince);
+  //await syncCustomers(customersSince);
+  //await syncProducts(productsSince);
   await syncBookings(bookingsSince);
 
   console.log("[Sync] Incremental sync complete.");
