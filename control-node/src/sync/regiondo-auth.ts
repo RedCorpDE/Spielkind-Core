@@ -12,7 +12,7 @@ export interface RegionalHeaders {
 export function buildRegionalHeaders(
   queryParams: Record<string, string> = {}
 ): RegionalHeaders {
-  const time = Math.floor(Date.now() / 1000).toString();
+  const time = Math.floor(Date.now()).toString();
   const { publicKey, privateKey, language } = config.regiondo;
 
   const queryString = new URLSearchParams(queryParams).toString();
