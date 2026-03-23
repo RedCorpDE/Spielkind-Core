@@ -24,10 +24,28 @@ const schema = z
     WEBHOOK_BOOKINGS_PATH: z.string().default('/webhooks/regiondo/bookings'),
     WEBHOOK_AUTH_HEADER_NAME: z.string().optional(),
     WEBHOOK_AUTH_HEADER_VALUE: z.string().optional(),
-    WEBHOOK_AUTH_QUERY_TOKEN: z.string().optional(),
     PRODUCT_SYNC_CRON: z.string().default('0 3 * * *')
   })
   .superRefine((value, ctx) => {
+    const hasHeaderName = Boolean(value.WEBHOOK_AUTH_HEADER_NAME);
+    const hasHeaderValue = Boolean(value.WEBHOOK_AUTH_HEADER_VALUE);
+    const hasSignatureSecret = Boolean(value.REGIONDO_WEBHOOK_SECRET);
+
+    if (hasHeaderName !== hasHeaderValue) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'WEBHOOK_AUTH_HEADER_NAME and WEBHOOK_AUTH_HEADER_VALUE must either both be set or both be empty.'
+      });
+    }
+
+    if (value.NODE_ENV === 'production' && !hasSignatureSecret && !hasHeaderValue) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'At least one webhook auth mechanism is required in production: REGIONDO_WEBHOOK_SECRET or WEBHOOK_AUTH_HEADER_NAME+WEBHOOK_AUTH_HEADER_VALUE.'
+      });
+    }
+
     try {
       const url = new URL(value.DATABASE_URL);
       const host = url.hostname.toLowerCase();
