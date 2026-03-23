@@ -1,21 +1,5 @@
-# Environment
+node_modules
+dist
 .env
-
-# Node.js
-node_modules/
-dist/
-
-# TypeScript
-*.tsbuildinfo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-!.vscode/settings.json
-.idea/
-
-# Logs
-*.log
+npm-debug.log*
+package-lock.json
