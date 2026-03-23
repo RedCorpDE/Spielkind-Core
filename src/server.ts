@@ -23,6 +23,10 @@ export function createServer() {
     res.status(200).json({ ok: true });
   });
 
+  app.get(appConfig.WEBHOOK_BOOKINGS_PATH, (_req, res) => {
+    res.status(200).json({ ok: true });
+  });
+
   app.post(appConfig.WEBHOOK_BOOKINGS_PATH, async (req, res) => {
     try {
       const headerAuthConfigured = Boolean(appConfig.WEBHOOK_AUTH_HEADER_NAME && appConfig.WEBHOOK_AUTH_HEADER_VALUE);
