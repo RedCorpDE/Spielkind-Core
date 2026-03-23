@@ -24,6 +24,7 @@ const schema = z
     WEBHOOK_BOOKINGS_PATH: z.string().default('/webhooks/regiondo/bookings'),
     WEBHOOK_AUTH_HEADER_NAME: z.string().optional(),
     WEBHOOK_AUTH_HEADER_VALUE: z.string().optional(),
+    WEBHOOK_AUTH_QUERY_TOKEN: z.string().optional(),
     PRODUCT_SYNC_CRON: z.string().default('0 3 * * *')
   })
   .superRefine((value, ctx) => {
