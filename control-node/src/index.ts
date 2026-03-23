@@ -1,31 +1,18 @@
 import { config } from "./config.js";
 import { testConnection, pool } from "./db/client.js";
-import { runIncrementalSync } from "./sync/sync-service.js";
-
-const INTERVAL_MS = config.syncIntervalMinutes * 60 * 1_000;
+import { startWebhookServer } from "./webhook/server.js";
 
 async function main(): Promise<void> {
   console.log("=== Buchungssystem Control Node ===");
   console.log(`  Environment:    ${config.nodeEnv}`);
-  console.log(`  Sync interval:  ${config.syncIntervalMinutes} min`);
   console.log(`  Regiondo URL:   ${config.regiondo.baseUrl}`);
+  console.log(`  Webhook port:   ${config.webhook.port}`);
   console.log("");
 
   await testConnection();
+  await startWebhookServer();
 
-  console.log("[Control Node] Running initial sync ...");
-  await runIncrementalSync();
-
-  console.log(
-    `[Control Node] Scheduling sync every ${config.syncIntervalMinutes} min`
-  );
-  setInterval(async () => {
-    try {
-      await runIncrementalSync();
-    } catch (err) {
-      console.error("[Control Node] Sync cycle failed:", err);
-    }
-  }, INTERVAL_MS);
+  console.log("[Control Node] Ready — waiting for webhook events.");
 }
 
 process.on("SIGTERM", async () => {
