@@ -25,6 +25,14 @@ export function createServer() {
 
   app.post(appConfig.WEBHOOK_BOOKINGS_PATH, async (req, res) => {
     try {
+      if (appConfig.WEBHOOK_AUTH_HEADER_NAME && appConfig.WEBHOOK_AUTH_HEADER_VALUE) {
+        const received = req.header(appConfig.WEBHOOK_AUTH_HEADER_NAME);
+        if (received !== appConfig.WEBHOOK_AUTH_HEADER_VALUE) {
+          res.status(401).json({ error: 'Invalid webhook auth header' });
+          return;
+        }
+      }
+
       if (appConfig.REGIONDO_WEBHOOK_SECRET) {
         const signature = req.header('x-regiondo-signature');
         const valid = verifyWebhookSignature(getRawBody(req), signature, appConfig.REGIONDO_WEBHOOK_SECRET);

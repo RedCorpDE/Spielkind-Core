@@ -21,6 +21,8 @@ const schema = z.object({
   REGIONDO_LANGUAGE: z.string().default('de-DE'),
   REGIONDO_WEBHOOK_SECRET: z.string().optional(),
   WEBHOOK_BOOKINGS_PATH: z.string().default('/webhooks/regiondo/bookings'),
+  WEBHOOK_AUTH_HEADER_NAME: z.string().optional(),
+  WEBHOOK_AUTH_HEADER_VALUE: z.string().optional(),
   PRODUCT_SYNC_CRON: z.string().default('0 3 * * *')
 });
 

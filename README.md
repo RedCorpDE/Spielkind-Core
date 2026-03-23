@@ -24,6 +24,9 @@ Use these exact steps after your Render service is live:
    - `DATABASE_URL` (linked from Render PostgreSQL)
    - Optional: `REGIONDO_WEBHOOK_SECRET` (only if your Regiondo webhook can sign payloads)
    - Optional: change `WEBHOOK_BOOKINGS_PATH` to a long random path (recommended for extra protection)
+   - Recommended for Regiondo webhook auth:
+     - `WEBHOOK_AUTH_HEADER_NAME=x-webhook-token`
+     - `WEBHOOK_AUTH_HEADER_VALUE=<long-random-token>`
 
 2. **Run DB migrations once**
    - Locally against Render DB:
@@ -47,6 +50,9 @@ Use these exact steps after your Render service is live:
    - Set method to `POST`.
    - Set target URL to the URL from step 3.
    - Content type should be JSON.
+   - Add custom header in Regiondo:
+     - Header **Key** = value of `WEBHOOK_AUTH_HEADER_NAME` (example: `x-webhook-token`)
+     - Header **Value** = value of `WEBHOOK_AUTH_HEADER_VALUE` (the same long random token)
    - If Regiondo supports signing shared secrets, use the same secret as `REGIONDO_WEBHOOK_SECRET`.
 
 5. **Test end-to-end**
@@ -75,6 +81,7 @@ Required:
 Optional:
 - `REGIONDO_WEBHOOK_SECRET` (if webhook signature validation should be enforced)
 - `WEBHOOK_BOOKINGS_PATH` (defaults to `/webhooks/regiondo/bookings`)
+- `WEBHOOK_AUTH_HEADER_NAME` + `WEBHOOK_AUTH_HEADER_VALUE` (recommended static webhook auth)
 - `PRODUCT_SYNC_CRON` (default daily at 03:00 UTC)
 
 ## Flow
