@@ -8,6 +8,8 @@ export async function syncProductsAndVariants(): Promise<number> {
   try {
     const products = await regiondoClient.getCollection<RegiondoProduct>('/products');
 
+    console.log(products.length);
+
     for (const product of products) {
       await upsertProductWithDetails(product);
     }
