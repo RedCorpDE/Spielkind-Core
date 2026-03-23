@@ -36,13 +36,16 @@ Use these exact steps after your Render service is live:
 1. **Set env vars in Render**
    - `REGIONDO_PUBLIC_KEY`, `REGIONDO_PRIVATE_KEY`, `REGIONDO_BASE_URL`
    - `DATABASE_URL` (linked from Render PostgreSQL)
-   - Optional: `REGIONDO_WEBHOOK_SECRET` (only if your Regiondo webhook can sign payloads)
+   - Recommended: `REGIONDO_WEBHOOK_SECRET` (if Regiondo can sign payloads, this is the strongest option)
    - Optional: change `WEBHOOK_BOOKINGS_PATH` to a long random path (recommended for extra protection)
-   - Recommended for Regiondo webhook auth:
+   - Configure at least one webhook auth method (required in production):
+     - Signature secret: `REGIONDO_WEBHOOK_SECRET`
+     - Header token:
+       - `WEBHOOK_AUTH_HEADER_NAME=x-webhook-token`
+       - `WEBHOOK_AUTH_HEADER_VALUE=<long-random-token>`
+   - Recommended for Regiondo webhook auth (header token):
      - `WEBHOOK_AUTH_HEADER_NAME=x-webhook-token`
      - `WEBHOOK_AUTH_HEADER_VALUE=<long-random-token>`
-     - Optional fallback if Regiondo header validation is unreliable:
-       - `WEBHOOK_AUTH_QUERY_TOKEN=<long-random-token>`
 
 2. **Run DB migrations once**
    - Locally against Render DB:
@@ -69,7 +72,6 @@ Use these exact steps after your Render service is live:
    - Add custom header in Regiondo:
      - Header **Key** = value of `WEBHOOK_AUTH_HEADER_NAME` (example: `x-webhook-token`)
      - Header **Value** = value of `WEBHOOK_AUTH_HEADER_VALUE` (the same long random token)
-   - Alternative auth: append `?token=<WEBHOOK_AUTH_QUERY_TOKEN>` to webhook URL.
    - If Regiondo supports signing shared secrets, use the same secret as `REGIONDO_WEBHOOK_SECRET`.
 
 5. **Test end-to-end**
@@ -96,11 +98,13 @@ Required:
 - `REGIONDO_BASE_URL`
 
 Optional:
-- `REGIONDO_WEBHOOK_SECRET` (if webhook signature validation should be enforced)
+- `REGIONDO_WEBHOOK_SECRET` (recommended if Regiondo supports webhook signature validation)
 - `WEBHOOK_BOOKINGS_PATH` (defaults to `/webhooks/regiondo/bookings`)
-- `WEBHOOK_AUTH_HEADER_NAME` + `WEBHOOK_AUTH_HEADER_VALUE` (recommended static webhook auth)
-- `WEBHOOK_AUTH_QUERY_TOKEN` (optional URL-token auth fallback)
+- `WEBHOOK_AUTH_HEADER_NAME` + `WEBHOOK_AUTH_HEADER_VALUE` (recommended static webhook auth; must be set together)
 - `PRODUCT_SYNC_CRON` (default daily at 03:00 UTC)
+
+In `production`, the service now requires at least one webhook auth mechanism:
+`REGIONDO_WEBHOOK_SECRET` **or** `WEBHOOK_AUTH_HEADER_NAME`+`WEBHOOK_AUTH_HEADER_VALUE`.
 
 ## Flow
 

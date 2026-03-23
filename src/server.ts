@@ -26,17 +26,13 @@ export function createServer() {
   app.post(appConfig.WEBHOOK_BOOKINGS_PATH, async (req, res) => {
     try {
       const headerAuthConfigured = Boolean(appConfig.WEBHOOK_AUTH_HEADER_NAME && appConfig.WEBHOOK_AUTH_HEADER_VALUE);
-      const queryAuthConfigured = Boolean(appConfig.WEBHOOK_AUTH_QUERY_TOKEN);
 
-      if (headerAuthConfigured || queryAuthConfigured) {
+      if (headerAuthConfigured) {
         const headerMatches =
           headerAuthConfigured &&
           req.header(appConfig.WEBHOOK_AUTH_HEADER_NAME as string) === appConfig.WEBHOOK_AUTH_HEADER_VALUE;
 
-        const queryToken = typeof req.query.token === 'string' ? req.query.token : undefined;
-        const queryMatches = queryAuthConfigured && queryToken === appConfig.WEBHOOK_AUTH_QUERY_TOKEN;
-
-        if (!headerMatches && !queryMatches) {
+        if (!headerMatches) {
           res.status(401).json({ error: 'Invalid webhook authentication' });
           return;
         }
