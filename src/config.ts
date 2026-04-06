@@ -24,7 +24,22 @@ const schema = z
     WEBHOOK_BOOKINGS_PATH: z.string().default('/webhooks/regiondo/bookings'),
     WEBHOOK_AUTH_HEADER_NAME: z.string().optional(),
     WEBHOOK_AUTH_HEADER_VALUE: z.string().optional(),
-    PRODUCT_SYNC_CRON: z.string().default('0 3 * * *')
+    PRODUCT_SYNC_CRON: z.string().default('0 3 * * *'),
+
+    // Outbound (Retool webhooks)
+    RETOOL_WEBHOOK_CLIENT_MESSAGE: z.string().url().optional(),
+    RETOOL_WEBHOOK_CHECK_OUT: z.string().url().optional(),
+    CHECKOUT_GOODBYE_TEXT: z
+      .string()
+      .default('Danke fuer euren Besuch! Wir freuen uns, euch bald wieder begruessen zu duerfen.'),
+    OUTBOUND_ENABLED: z
+      .string()
+      .optional()
+      .transform((v) => (v ?? 'false') === 'true'),
+    OUTBOUND_STARTUP_CATCHUP_MINUTES: z
+      .string()
+      .optional()
+      .transform((v) => (v !== undefined && v !== '' ? Number(v) : 60)),
   })
   .superRefine((value, ctx) => {
     const hasHeaderName = Boolean(value.WEBHOOK_AUTH_HEADER_NAME);

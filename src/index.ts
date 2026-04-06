@@ -1,6 +1,7 @@
 import { appConfig } from './config.js';
 import { pool } from './db/client.js';
-import { startDailyProductSync } from './scheduler.js';
+import { startDailyProductSync, registerOutboundJobs } from './scheduler.js';
+import { runStartupCatchup } from './outbound/startup-catchup.js';
 import { createServer } from './server.js';
 
 async function bootstrap(): Promise<void> {
@@ -13,6 +14,10 @@ async function bootstrap(): Promise<void> {
   });
 
   startDailyProductSync();
+  registerOutboundJobs();
+
+  // Run once at startup to recover any events missed during downtime
+  await runStartupCatchup();
 }
 
 bootstrap().catch((error) => {
