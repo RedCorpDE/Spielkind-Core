@@ -24,7 +24,8 @@ const schema = z
     WEBHOOK_BOOKINGS_PATH: z.string().default('/webhooks/regiondo/bookings'),
     WEBHOOK_AUTH_HEADER_NAME: z.string().optional(),
     WEBHOOK_AUTH_HEADER_VALUE: z.string().optional(),
-    PRODUCT_SYNC_CRON: z.string().default('0 3 * * *')
+    PRODUCT_SYNC_CRON: z.string().default('0 3 * * *'),
+    HEALTHCHECKS_PING_URL: z.string().url().optional()
   })
   .superRefine((value, ctx) => {
     const hasHeaderName = Boolean(value.WEBHOOK_AUTH_HEADER_NAME);

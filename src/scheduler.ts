@@ -7,6 +7,12 @@ export function startDailyProductSync(): void {
     try {
       const count = await syncProductsAndVariants();
       console.log(`[scheduler] Synced ${count} products.`);
+
+      if (appConfig.HEALTHCHECKS_PING_URL) {
+        fetch(appConfig.HEALTHCHECKS_PING_URL).catch((err: unknown) => {
+          console.error('[scheduler] Healthcheck ping failed:', err);
+        });
+      }
     } catch (error) {
       console.error('[scheduler] Product sync failed:', error);
     }
