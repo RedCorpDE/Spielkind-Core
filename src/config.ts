@@ -25,7 +25,9 @@ const schema = z
     WEBHOOK_AUTH_HEADER_NAME: z.string().optional(),
     WEBHOOK_AUTH_HEADER_VALUE: z.string().optional(),
     PRODUCT_SYNC_CRON: z.string().default('0 3 * * *'),
-    HEALTHCHECKS_PING_URL: z.string().url().optional()
+    HEALTHCHECKS_PING_URL: z.string().url().optional(),
+    ALERT_SLACK_WEBHOOK_URL: z.string().url().optional(),
+    ALERTING_ENABLED: boolFromEnv.default('false')
   })
   .superRefine((value, ctx) => {
     const hasHeaderName = Boolean(value.WEBHOOK_AUTH_HEADER_NAME);

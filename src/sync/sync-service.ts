@@ -1,3 +1,4 @@
+import { sendAlert } from '../alerts/slack-notifier.js';
 import { regiondoClient } from '../regiondo/client.js';
 import { upsertBookingFromWebhook, upsertProductWithDetails } from './repository.js';
 import { failSync, finishSync, startSync } from './sync-log.js';
@@ -19,6 +20,8 @@ export async function syncProductsAndVariants(): Promise<number> {
     return products.length;
   } catch (error) {
     await failSync(syncId, error);
+    const message = error instanceof Error ? error.message : String(error);
+    await sendAlert('error', `Product sync failed: ${message}`, { syncId });
     throw error;
   }
 }
@@ -30,6 +33,8 @@ export async function processBookingWebhook(payload: RegiondoBooking): Promise<v
     await finishSync(syncId, 1);
   } catch (error) {
     await failSync(syncId, error);
+    const message = error instanceof Error ? error.message : String(error);
+    await sendAlert('error', `Booking webhook processing failed: ${message}`, { syncId, bookingId: payload.id });
     throw error;
   }
 }
