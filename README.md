@@ -1,10 +1,35 @@
-# Spielkind Regiondo Sync (TypeScript + Render)
+# Spielkind Core
 
-TypeScript service with:
-- Regiondo booking webhook endpoint (`POST /webhooks/regiondo/bookings`)
-- Daily product/variant/option synchronization job
-- PostgreSQL upserts based on existing SQL table files
-- Render-ready deployment via `render.yaml`
+Core is a TypeScript Node.js backend for:
+- Regiondo webhook ingestion
+- Regiondo catalog sync
+- internal resource occupancy via `consumptions`
+- reminder delivery dispatch through an external provider webhook
+- admin APIs for products, bookings, resources, clients, groups, and reminders
+
+The runtime is built around:
+- Fastify
+- Zod
+- PostgreSQL via `pg`
+- Pino
+- Vitest
+- `node-cron` only as a thin embedded scheduler wrapper
+
+## Structure
+
+Key runtime entrypoints:
+- `src/app.ts`
+- `src/server.ts`
+
+Core folders:
+- `src/config`: env validation and logging
+- `src/db`: pool, transactions, advisory locks, migrations
+- `src/http`: Fastify route wiring, auth helpers, error handling
+- `src/modules`: Regiondo, bookings, resources, reminders, products, clients, groups
+- `src/jobs`: reusable job wrappers and job-run tracking
+- `src/scripts`: CLI entrypoints for jobs
+- `src/scheduler`: embedded scheduler
+- `db/migrations`: additive SQL migrations
 
 ## Setup
 
@@ -15,126 +40,159 @@ npm run migrate
 npm run dev
 ```
 
-## Docker
-
-Build:
+Create an admin user:
 
 ```bash
-docker build -t spielkind-regiondo-sync .
+npm run admin:create -- --email admin@example.com --name "Admin User" --password "use-a-long-random-password"
 ```
 
-Run:
+## Scripts
 
 ```bash
-docker run --rm -p 3000:3000 --env-file .env spielkind-regiondo-sync
+npm run dev
+npm run build
+npm test
+npm run migrate
+npm run job:regiondo-webhooks
+npm run job:sync-regiondo-catalog
+npm run job:dispatch-reminders
+npm run job:reconcile-regiondo-bookings
 ```
 
-## Regiondo webhook setup (bookings)
-
-Use these exact steps after your Render service is live:
-
-1. **Set env vars in Render**
-   - `REGIONDO_PUBLIC_KEY`, `REGIONDO_PRIVATE_KEY`, `REGIONDO_BASE_URL`
-   - `DATABASE_URL` (linked from Render PostgreSQL)
-   - Recommended: `REGIONDO_WEBHOOK_SECRET` (if Regiondo can sign payloads, this is the strongest option)
-   - Optional: change `WEBHOOK_BOOKINGS_PATH` to a long random path (recommended for extra protection)
-   - Configure at least one webhook auth method (required in production):
-     - Signature secret: `REGIONDO_WEBHOOK_SECRET`
-     - Header token:
-       - `WEBHOOK_AUTH_HEADER_NAME=x-webhook-token`
-       - `WEBHOOK_AUTH_HEADER_VALUE=<long-random-token>`
-   - Recommended for Regiondo webhook auth (header token):
-     - `WEBHOOK_AUTH_HEADER_NAME=x-webhook-token`
-     - `WEBHOOK_AUTH_HEADER_VALUE=<long-random-token>`
-
-2. **Run DB migrations once**
-   - Locally against Render DB:
-     ```bash
-     npm run migrate
-     ```
-
-3. **Create webhook URL**
-   - URL format:
-     ```text
-     https://<your-render-service>.onrender.com<WEBHOOK_BOOKINGS_PATH>
-     ```
-   - Example:
-     ```text
-     https://spielkind-regiondo-sync.onrender.com/webhooks/regiondo/bookings
-     ```
-
-4. **Configure in Regiondo**
-   - Open Regiondo admin → webhook/event settings.
-   - Add event for **booking created/updated/cancelled** (naming depends on Regiondo UI).
-   - Set method to `POST`.
-   - Set target URL to the URL from step 3.
-   - Content type should be JSON.
-   - Add custom header in Regiondo:
-     - Header **Key** = value of `WEBHOOK_AUTH_HEADER_NAME` (example: `x-webhook-token`)
-     - Header **Value** = value of `WEBHOOK_AUTH_HEADER_VALUE` (the same long random token)
-   - If Regiondo supports signing shared secrets, use the same secret as `REGIONDO_WEBHOOK_SECRET`.
-
-5. **Test end-to-end**
-   - In Regiondo, trigger webhook test (or create/update/cancel a booking).
-   - Check Render logs for HTTP `202`.
-   - Verify DB rows in `bookings`, `booking_products`, and `sync_log`.
-
-## Manual product sync (first import)
-
-Run this once right after deploying/migrating, then rely on the daily cron:
-
-```bash
-npm run sync:products
-```
-
-## Environment Variables
+## Required Environment
 
 See `.env.example`.
 
-Required:
+Important variables:
 - `DATABASE_URL`
-- `REGIONDO_PUBLIC_KEY`
-- `REGIONDO_PRIVATE_KEY`
+- `PORT`
 - `REGIONDO_BASE_URL`
+- `REGIONDO_PUBLIC_KEY`
+- `REGIONDO_SECRET_KEY`
+- `REGIONDO_PRODUCT_SUPPLIER_ID`
+- `REMINDER_PROVIDER_WEBHOOK_URL`
+- `REMINDER_PROVIDER_SECRET`
+- `CRON_SECRET`
+- `ENABLE_EMBEDDED_SCHEDULER`
 
-Optional:
-- `REGIONDO_WEBHOOK_SECRET` (recommended if Regiondo supports webhook signature validation)
-- `WEBHOOK_BOOKINGS_PATH` (defaults to `/webhooks/regiondo/bookings`)
-- `WEBHOOK_AUTH_HEADER_NAME` + `WEBHOOK_AUTH_HEADER_VALUE` (recommended static webhook auth; must be set together)
-- `PRODUCT_SYNC_CRON` (default daily at 03:00 UTC)
+Important operational variables:
+- `REGIONDO_WEBHOOK_SECRET`
+- `WEBHOOK_AUTH_HEADER_NAME`
+- `WEBHOOK_AUTH_HEADER_VALUE`
+- `SCHEDULER_TIMEZONE`
+- `REGIONDO_CATALOG_SYNC_CRON`
+- `REGIONDO_WEBHOOK_CRON`
+- `REMINDER_DISPATCH_CRON`
+- `DASHBOARD_ALLOWED_ORIGIN`
+- `ADMIN_ACCESS_TOKEN_SECRET`
 
-In `production`, the service now requires at least one webhook auth mechanism:
-`REGIONDO_WEBHOOK_SECRET` **or** `WEBHOOK_AUTH_HEADER_NAME`+`WEBHOOK_AUTH_HEADER_VALUE`.
+## HTTP Surface
 
-## Flow
+System:
+- `GET /healthz`
+- `GET /readyz`
+- `GET /version`
 
-### Booking webhook
-1. Receive webhook payload from Regiondo.
-2. Optionally verify HMAC signature.
-3. Upsert booking and `booking_products`.
-4. Write status to `sync_log`.
+Regiondo webhook:
+- `POST /webhooks/regiondo`
 
-### Daily product sync
-1. Cron triggers once per day.
-2. Fetch `/products` from Regiondo.
-3. Upsert `products` table.
-4. Refresh related `product_variants` + `product_options` tables.
-5. Write status to `sync_log`.
+Internal jobs:
+- `POST /internal/jobs/process-regiondo-webhooks`
+- `POST /internal/jobs/sync-regiondo-catalog`
+- `POST /internal/jobs/dispatch-reminders`
+- `POST /internal/jobs/reconcile-regiondo-bookings`
 
-## Notes / Open Questions
+Admin auth:
+- `POST /api/admin/auth/login`
+- `POST /api/admin/auth/refresh`
+- `POST /api/admin/auth/logout`
+- `GET /api/admin/auth/me`
 
-- This implementation assumes Regiondo booking payloads include enough fields for status, time and product references.
-- If Regiondo webhook signatures use a different header or format than `x-regiondo-signature` + raw-hex HMAC, adapt `verifyWebhookSignature`.
-- If products/variants/options come from separate Regiondo endpoints in your account, update `syncProductsAndVariants` accordingly.
+Admin APIs:
+- `GET /api/admin/products`
+- `GET /api/admin/products/:productId`
+- `PATCH /api/admin/products/:productId`
+- `POST /api/admin/products/:productId/resources`
+- `DELETE /api/admin/products/:productId/resources/:resourceId`
+- `GET /api/admin/regiondo/products`
+- `POST /api/admin/regiondo/sync-products`
+- `GET /api/admin/resources`
+- `GET /api/admin/resources/:resourceId`
+- `GET /api/admin/availability`
+- `GET /api/admin/bookings`
+- `GET /api/admin/bookings/:bookingId`
+- `PATCH /api/admin/bookings/:bookingId/admin-metadata`
+- `POST /api/admin/bookings/:bookingId/rebuild-consumptions`
+- `POST /api/admin/bookings/:bookingId/cancel-local`
+- `GET /api/admin/clients`
+- `GET /api/admin/clients/:clientId`
+- `PATCH /api/admin/clients/:clientId`
+- `GET /api/admin/client-groups`
+- `POST /api/admin/client-groups`
+- `PATCH /api/admin/client-groups/:groupId`
+- `DELETE /api/admin/client-groups/:groupId`
+- `POST /api/admin/client-groups/:groupId/members/:clientId`
+- `DELETE /api/admin/client-groups/:groupId/members/:clientId`
+- `GET /api/admin/reminder-rules`
+- `POST /api/admin/reminder-rules`
+- `GET /api/admin/reminder-rules/:ruleId`
+- `PATCH /api/admin/reminder-rules/:ruleId`
+- `DELETE /api/admin/reminder-rules/:ruleId`
+- `GET /api/admin/reminder-deliveries`
+- `POST /api/admin/reminder-deliveries/:deliveryId/retry`
+- `GET /api/admin/regiondo/sync-summary`
+- `GET /api/admin/regiondo/webhook-events`
+- `GET /api/admin/regiondo/webhook-events/:eventId`
+- `POST /api/admin/regiondo/webhook-events/:eventId/retry`
 
-## Troubleshooting (Render deploy)
+## Job Model
 
-### `ECONNREFUSED 127.0.0.1:5432` or `::1:5432`
+Business logic lives in reusable job functions and can be invoked from:
+- embedded scheduler
+- internal authenticated HTTP endpoints
+- CLI scripts
 
-This means `DATABASE_URL` is pointing to localhost (from local dev), not your Render Postgres.
+Current embedded jobs:
+- Regiondo webhook inbox processing
+- weekly Regiondo catalog sync for products, variations, and options
+- reminder dispatch
+- periodic Regiondo reconciliation
 
-Fix:
-1. In Render, open your web service → **Environment**.
-2. Set `DATABASE_URL` to the Render Postgres connection string (or link it via Blueprint `fromDatabase`).
-3. Ensure `NODE_ENV=production`.
-4. Redeploy.
+Each job uses PostgreSQL advisory locking and records `job_runs`.
+
+The Regiondo catalog sync now defaults to `REGIONDO_CATALOG_SYNC_CRON=0 3 * * 1`, which runs every Monday at 03:00 in `SCHEDULER_TIMEZONE` (default `Europe/Berlin`).
+
+For later external cron jobs, keep using the same internal job handler instead of duplicating logic:
+- `POST /internal/jobs/sync-regiondo-catalog`
+- Header: `Authorization: Bearer <CRON_SECRET>`
+
+## Database Notes
+
+Do not rewrite applied migrations. Add new ones.
+
+Recent architecture-specific migration:
+- `db/migrations/026_core_jobs_reminders_contact_methods.sql`
+
+That migration adds:
+- `client_contact_methods`
+- `reminder_rules`
+- `reminder_deliveries`
+- `sync_state`
+- `job_runs`
+
+## Deployment
+
+Core is designed for:
+1. an always-on Render web service with `ENABLE_EMBEDDED_SCHEDULER=true`
+2. a later move to Render Cron Jobs without rewriting business logic
+
+See `render.yaml`.
+
+## Verification
+
+Current verification commands:
+
+```bash
+npm run build
+npm test
+```

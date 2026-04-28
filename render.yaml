@@ -1,20 +1,48 @@
 services:
   - type: web
-    name: spielkind-regiondo-sync
+    name: spielkind-core
     env: node
     plan: starter
     buildCommand: npm ci && npm run build
-    startCommand: npm start
+    startCommand: node dist/server.js
     autoDeploy: true
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PRODUCT_SYNC_CRON
-        value: 0 3 * * *
+      - key: ENABLE_EMBEDDED_SCHEDULER
+        value: true
+      - key: SCHEDULER_TIMEZONE
+        value: Europe/Berlin
+      - key: REGIONDO_WEBHOOK_CRON
+        value: "*/1 * * * *"
+      - key: REGIONDO_CATALOG_SYNC_CRON
+        value: 0 3 * * 1
+      - key: REMINDER_DISPATCH_CRON
+        value: "*/5 * * * *"
       - key: DATABASE_URL
         fromDatabase:
           name: spielkind-db
           property: connectionString
+
+  # Render cron jobs (use when ENABLE_EMBEDDED_SCHEDULER=false):
+  # - type: cron
+  #   name: spielkind-core-regiondo-webhooks
+  #   env: node
+  #   schedule: "*/5 * * * *"
+  #   buildCommand: npm ci && npm run build
+  #   startCommand: node dist/scripts/job-regiondo-webhooks.js
+  # - type: cron
+  #   name: spielkind-core-regiondo-catalog
+  #   env: node
+  #   schedule: "0 3 * * 1"
+  #   buildCommand: npm ci && npm run build
+  #   startCommand: node dist/scripts/job-sync-regiondo-catalog.js
+  # - type: cron
+  #   name: spielkind-core-reminders
+  #   env: node
+  #   schedule: "*/5 * * * *"
+  #   buildCommand: npm ci && npm run build
+  #   startCommand: node dist/scripts/job-dispatch-reminders.js
 
 databases:
   - name: spielkind-db

@@ -7,24 +7,32 @@
     "node": ">=20.0.0"
   },
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/index.js",
+    "start": "node dist/server.js",
+    "test": "vitest run",
     "migrate": "tsx src/db/migrate.ts",
-    "sync:products": "tsx src/sync/run-product-sync.ts"
+    "admin:create": "tsx src/auth/create-admin-user.ts",
+    "sync:products": "tsx src/sync/run-product-sync.ts",
+    "job:regiondo-webhooks": "tsx src/scripts/job-regiondo-webhooks.ts",
+    "job:sync-regiondo-catalog": "tsx src/scripts/job-sync-regiondo-catalog.ts",
+    "job:dispatch-reminders": "tsx src/scripts/job-dispatch-reminders.ts",
+    "job:reconcile-regiondo-bookings": "tsx src/scripts/job-reconcile-regiondo-bookings.ts"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.2",
     "dotenv": "^16.4.5",
-    "express": "^4.21.2",
+    "fastify": "^5.3.2",
     "node-cron": "^4.2.1",
+    "pino": "^9.7.0",
     "pg": "^8.13.1",
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@types/express": "^4.17.21",
     "@types/node": "^22.10.2",
     "@types/pg": "^8.20.0",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.4"
   }
 }
