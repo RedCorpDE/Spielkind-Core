@@ -12,7 +12,7 @@ vi.mock('../../src/db/client.js', () => ({
 }));
 
 import { getDashboardSummary } from '../../src/dashboard/repository/summary.js';
-import { resolveTaskColumnReorderOrder } from '../../src/dashboard/repository/core.js';
+import { mapTaskRow, resolveTaskColumnReorderOrder } from '../../src/dashboard/repository/core.js';
 import { listTasks } from '../../src/dashboard/repository/tasks.js';
 
 describe('dashboard repository queries', () => {
@@ -53,6 +53,40 @@ describe('dashboard repository queries', () => {
     expect(taskQuery).toContain("COALESCE(t.raw_json ->> 'site', '') ILIKE");
     expect(taskQuery).not.toContain("raw_json -> 'tags'");
     expect(taskValues).toEqual(['%berlin%']);
+  });
+
+  it('preserves extra task raw_json fields in dashboard task responses', () => {
+    const task = mapTaskRow({
+      id: '11111111-1111-1111-1111-111111111111',
+      title: 'Task',
+      description: 'Description',
+      created_at: '2026-04-28T12:00:00.000Z',
+      updated_at: '2026-04-28T12:00:00.000Z',
+      connected_booking_key: null,
+      update_log: [],
+      raw_json: {
+        site: 'Berlin',
+        payment_method: 'per_invoice',
+        blocker_1_selection: ['alpha', 'beta']
+      },
+      event_date_time: '2026-04-29T10:00:00.000Z',
+      reminder_date: null,
+      reserved_capacity_date: null,
+      column_id: null,
+      column_title: null,
+      column_position: null,
+      booking_related: null,
+      assignee_user_id: null,
+      owner_name: null,
+      owner_role: null
+    });
+
+    expect(task.site).toBe('Berlin');
+    expect(task.rawJson).toMatchObject({
+      site: 'Berlin',
+      payment_method: 'per_invoice',
+      blocker_1_selection: ['alpha', 'beta']
+    });
   });
 
   it('validates task column reorders against the complete current set', () => {

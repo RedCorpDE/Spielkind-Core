@@ -36,6 +36,14 @@ import {
 } from '../../dashboard/repository/core.js';
 
 const taskColumnIdSchema = z.union([z.string().uuid(), z.literal('none')]);
+const taskRawJsonValueSchema = z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.null(),
+  z.array(z.string())
+]);
+const taskRawJsonSchema = z.record(taskRawJsonValueSchema);
 
 const createTaskSchema = z.object({
   title: z.string().min(1),
@@ -44,6 +52,7 @@ const createTaskSchema = z.object({
   reminderDate: z.string().nullable().optional(),
   reservedCapacityDate: z.string().nullable().optional(),
   ownerId: z.string().uuid().nullable().optional(),
+  rawJson: taskRawJsonSchema.optional(),
   site: z.string().default(''),
   columnId: taskColumnIdSchema.nullable().optional(),
   connectedBookingId: z.string().uuid().nullable().optional()
@@ -56,6 +65,7 @@ const updateTaskSchema = z.object({
   reminderDate: z.string().nullable().optional(),
   reservedCapacityDate: z.string().nullable().optional(),
   ownerId: z.string().uuid().nullable().optional(),
+  rawJson: taskRawJsonSchema.optional(),
   site: z.string().default(''),
   columnId: taskColumnIdSchema.nullable(),
   connectedBookingId: z.string().uuid().nullable().optional()

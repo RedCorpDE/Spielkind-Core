@@ -1,9 +1,11 @@
 import { appConfig } from '../../config/env.js';
 import { signRegiondoRequest } from './regiondo.auth.js';
+import { RegiondoCatalogSyncError } from './regiondo-catalog.errors.js';
 import {
+  regiondoCatalogProductsSchema,
   regiondoPurchaseDataSchema,
   regiondoSupplierBookingsSchema,
-  type RegiondoProduct,
+  type RegiondoCatalogProduct,
   type RegiondoPurchaseData,
   type RegiondoSupplierBooking
 } from './regiondo.types.js';
@@ -11,6 +13,14 @@ import {
 type RegiondoCollectionResponse<T> = {
   data?: T[];
   items?: T[];
+  page?: {
+    current?: number | string;
+    last?: number | string;
+    next?: number | string;
+    total_pages?: number | string;
+    total_items?: number | string;
+    limit?: number | string;
+  };
 };
 
 type RegiondoObjectResponse<T> = {
@@ -20,6 +30,7 @@ type RegiondoObjectResponse<T> = {
 
 interface RegiondoClientOptions {
   baseUrl: string;
+  catalogPageSize: number;
   publicKey: string;
   secretKey: string;
   language: string;
@@ -30,6 +41,8 @@ interface RegiondoClientOptions {
   fetchImplementation: typeof fetch;
   sleep: (delayMs: number) => Promise<void>;
 }
+
+const DEFAULT_REGIONDO_CATALOG_PAGE_SIZE = 250;
 
 export class RegiondoApiError extends Error {
   constructor(
@@ -98,6 +111,7 @@ export function getRegiondoRetryDelayMs(attemptNumber: number, baseDelayMs: numb
 
 export class RegiondoClient {
   private readonly baseUrl: URL;
+  private readonly catalogPageSize: number;
   private readonly publicKey: string;
   private readonly secretKey: string;
   private readonly language: string;
@@ -111,6 +125,7 @@ export class RegiondoClient {
   constructor(options: Partial<RegiondoClientOptions> = {}) {
     const baseUrl = options.baseUrl ?? appConfig.REGIONDO_BASE_URL;
     this.baseUrl = new URL(baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`);
+    this.catalogPageSize = options.catalogPageSize ?? DEFAULT_REGIONDO_CATALOG_PAGE_SIZE;
     this.publicKey = options.publicKey ?? appConfig.REGIONDO_PUBLIC_KEY;
     this.secretKey = options.secretKey ?? appConfig.REGIONDO_SECRET_KEY;
     this.language = options.language ?? appConfig.REGIONDO_LANGUAGE;
@@ -186,10 +201,52 @@ export class RegiondoClient {
     return body as T;
   }
 
-  async getCatalogProducts(): Promise<RegiondoProduct[]> {
-    return this.getCollection<RegiondoProduct>('/products', {
-      supplier_id: this.supplierId
-    });
+  async getCatalogProducts(): Promise<RegiondoCatalogProduct[]> {
+    const productsRaw: unknown[] = [];
+    let offset = 0;
+
+    while (true) {
+      const response = await this.requestJson<RegiondoCollectionResponse<unknown>>('/products', {
+        supplier_id: this.supplierId,
+        limit: `${this.catalogPageSize}`,
+        ...(offset > 0 ? { offset: `${offset}` } : {})
+      });
+      const pageItems = response.data ?? response.items ?? [];
+      const currentPage = normalizePositiveInteger(response.page?.current);
+      const lastPage = normalizePositiveInteger(response.page?.last ?? response.page?.total_pages);
+      const pageSize = normalizePositiveInteger(response.page?.limit) ?? this.catalogPageSize;
+
+      productsRaw.push(...pageItems);
+
+      if (pageItems.length === 0) {
+        break;
+      }
+
+      if (currentPage !== null && lastPage !== null) {
+        if (currentPage >= lastPage) {
+          break;
+        }
+      } else if (pageItems.length < pageSize) {
+        break;
+      }
+
+      offset += pageSize;
+    }
+
+    const parsed = regiondoCatalogProductsSchema.safeParse(productsRaw);
+    if (!parsed.success) {
+      const details = parsed.error.issues
+        .map((issue) => `${issue.path.join('.') || 'catalog'}: ${issue.message}`)
+        .join('; ');
+
+      throw new RegiondoCatalogSyncError(
+        'Regiondo catalog payload did not match the expected product shape.',
+        502,
+        details
+      );
+    }
+
+    return parsed.data;
   }
 
   async hydrateBookingOrder(input: {
@@ -219,3 +276,18 @@ export class RegiondoClient {
 }
 
 export const regiondoClient = new RegiondoClient();
+
+function normalizePositiveInteger(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    if (Number.isInteger(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return null;
+}

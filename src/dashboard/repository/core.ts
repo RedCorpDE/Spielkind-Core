@@ -11,6 +11,8 @@ import type {
   DashboardTaskColumn,
   DashboardTaskMutationActor,
   DashboardTaskOwner,
+  DashboardTaskRawJson,
+  DashboardTaskRawJsonValue,
   UpdateDashboardTaskInput
 } from '../types.js';
 import {
@@ -114,6 +116,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function isTaskRawJsonValue(value: unknown): value is DashboardTaskRawJsonValue {
+  return (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    (Array.isArray(value) && value.every((entry) => typeof entry === 'string'))
+  );
+}
+
 export function toIsoString(value: Date | string | null | undefined): string | null {
   if (!value) {
     return null;
@@ -192,12 +204,22 @@ function normalizeActivityLog(value: unknown, createdAt: string, updatedAt: stri
   return Array.isArray(value) ? (value as DashboardTaskActivityEntry[]) : createInitialActivityLog(createdAt, updatedAt);
 }
 
-function parseTaskRawJson(rawJson: unknown) {
+function parseTaskRawJson(rawJson: unknown): DashboardTaskRawJson {
   const raw = isRecord(rawJson) ? rawJson : {};
+  const normalized = Object.entries(raw).reduce<DashboardTaskRawJson>((result, [key, value]) => {
+    if (!isTaskRawJsonValue(value)) {
+      return result;
+    }
 
-  return {
-    site: typeof raw.site === 'string' ? raw.site : ''
-  };
+    result[key] = Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : value;
+    return result;
+  }, {});
+
+  if (typeof normalized.site !== 'string') {
+    normalized.site = '';
+  }
+
+  return normalized;
 }
 
 function mapTaskColumnFromTaskRow(row: TaskRow): TaskColumnRow {
@@ -234,7 +256,8 @@ export function mapTaskRow(row: TaskRow): DashboardTask {
           role: row.owner_role ?? DEFAULT_TASK_OWNER.role
         }
       : { ...DEFAULT_TASK_OWNER },
-    site: raw.site,
+    rawJson: raw,
+    site: typeof raw.site === 'string' ? raw.site : '',
     createdAt,
     updatedAt,
     activityLog: normalizeActivityLog(row.update_log, createdAt, updatedAt),

@@ -1,6 +1,5 @@
 import type {
   LegacyRegiondoBooking,
-  RegiondoProduct,
   RegiondoPurchaseDataPush,
   RegiondoSupplierBooking,
   RegiondoWebhookPayload
@@ -24,17 +23,6 @@ const confirmedStatuses = new Set(['approved', 'confirmed', 'checked_in']);
 const completedStatuses = new Set(['completed']);
 const rejectedStatuses = new Set(['rejected']);
 const canceledStatuses = new Set(['canceled', 'cancelled', 'no_show']);
-
-export function mapProductForDb(product: RegiondoProduct) {
-  return {
-    regiondoProductId: String(product.id),
-    title: product.title ?? 'Untitled Product',
-    description: product.description ?? null,
-    imageUrl: product.image_url ?? null,
-    baseAmount: Number(product.price ?? 0),
-    raw: product
-  };
-}
 
 export function stringifyRegiondoId(value: string | number | null | undefined): string | null {
   if (value === null || value === undefined) {

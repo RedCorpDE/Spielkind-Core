@@ -2,7 +2,7 @@ import { JOB_TYPES } from '../../jobs/job-types.js';
 import { runJobWithLock } from '../../jobs/run-job.js';
 import { startSync, finishSync, failSync } from '../../sync/sync-log.js';
 import { regiondoClient } from './regiondo.client.js';
-import { upsertRegiondoCatalogProduct, upsertSyncState } from './regiondo-catalog.repository.js';
+import { syncRegiondoCatalogProducts } from './regiondo-catalog.repository.js';
 
 export async function runRegiondoCatalogSyncJob() {
   return runJobWithLock({
@@ -12,17 +12,7 @@ export async function runRegiondoCatalogSyncJob() {
 
       try {
         const products = await regiondoClient.getCatalogProducts();
-
-        for (const product of products) {
-          await upsertRegiondoCatalogProduct(product);
-        }
-
-        await upsertSyncState({
-          syncType: 'regiondo_catalog',
-          metadata: {
-            productCount: products.length
-          }
-        });
+        await syncRegiondoCatalogProducts(products);
         await finishSync(syncId, products.length);
 
         return {

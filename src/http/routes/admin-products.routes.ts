@@ -12,6 +12,13 @@ import {
   upsertProductResourceMapping
 } from '../../modules/products/product-admin.repository.js';
 import { runRegiondoCatalogSyncJob } from '../../modules/regiondo/regiondo-catalog-sync.job.js';
+import {
+  RegiondoApiError,
+  RegiondoAuthError,
+  RegiondoRateLimitError,
+  RegiondoTransientError
+} from '../../modules/regiondo/regiondo.client.js';
+import { RegiondoCatalogSyncError } from '../../modules/regiondo/regiondo-catalog.errors.js';
 
 const updateProductSchema = z
   .object({
@@ -28,6 +35,22 @@ const productResourceSchema = z.object({
   resourceId: z.string().uuid(),
   quantity: z.number().int().positive()
 });
+
+function getRegiondoSyncStatusCode(error: RegiondoApiError): number {
+  if (error instanceof RegiondoRateLimitError) {
+    return 429;
+  }
+
+  if (error instanceof RegiondoTransientError) {
+    return 503;
+  }
+
+  if (error instanceof RegiondoAuthError) {
+    return 502;
+  }
+
+  return 502;
+}
 
 export async function registerAdminProductRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/admin/products', async (request) => {
@@ -127,18 +150,41 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
     return { ok: true, items: await listRegiondoCatalogProducts() };
   });
 
-  app.post('/api/admin/regiondo/sync-products', async (request) => {
+  app.post('/api/admin/regiondo/sync-products', async (request, reply) => {
     const auth = await requireAdminAuth(request as AdminFastifyRequest);
-    const result = await runRegiondoCatalogSyncJob();
 
-    await recordAdminWriteAudit({
-      request,
-      auth,
-      action: 'admin.regiondo.sync_products',
-      entityType: 'sync',
-      details: result.metadata
-    });
+    try {
+      const result = await runRegiondoCatalogSyncJob();
 
-    return { ok: true, job: result };
+      await recordAdminWriteAudit({
+        request,
+        auth,
+        action: 'admin.regiondo.sync_products',
+        entityType: 'sync',
+        details: result.metadata
+      });
+
+      return { ok: true, job: result };
+    } catch (error) {
+      if (error instanceof RegiondoCatalogSyncError) {
+        return reply.status(error.statusCode).send({
+          ok: false,
+          error: error.message,
+          ...(error.details ? { details: error.details } : {})
+        });
+      }
+
+      if (error instanceof RegiondoApiError) {
+        const details = error.responseBody?.trim();
+
+        return reply.status(getRegiondoSyncStatusCode(error)).send({
+          ok: false,
+          error: error.message,
+          ...(details ? { details } : {})
+        });
+      }
+
+      throw error;
+    }
   });
 }

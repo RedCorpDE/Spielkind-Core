@@ -83,6 +83,8 @@ export interface ReorderDashboardTaskColumnsInput {
 }
 
 export type DashboardTaskStatus = string;
+export type DashboardTaskRawJsonValue = string | number | boolean | null | string[];
+export type DashboardTaskRawJson = Record<string, DashboardTaskRawJsonValue | undefined>;
 
 export interface DashboardTaskActivityActor {
   name: string;
@@ -120,6 +122,7 @@ export interface DashboardTask {
   reminderDate: string | null;
   reservedCapacityDate: string | null;
   owner: DashboardTaskOwner;
+  rawJson: DashboardTaskRawJson;
   site: string;
   createdAt: string;
   updatedAt: string;
@@ -276,6 +279,7 @@ export interface CreateDashboardTaskInput {
   reminderDate?: string | null;
   reservedCapacityDate?: string | null;
   ownerId?: string | null;
+  rawJson?: DashboardTaskRawJson;
   site: string;
   columnId?: string | null;
   connectedBookingId?: string | null;
@@ -288,6 +292,7 @@ export interface UpdateDashboardTaskInput {
   reminderDate?: string | null;
   reservedCapacityDate?: string | null;
   ownerId?: string | null;
+  rawJson?: DashboardTaskRawJson;
   site: string;
   columnId: string | null;
   connectedBookingId?: string | null;

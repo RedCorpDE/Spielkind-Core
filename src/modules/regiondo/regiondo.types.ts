@@ -1,18 +1,79 @@
 import { z } from 'zod';
 
-export type RegiondoProduct = {
-  id: string | number;
-  title?: string;
-  product_name?: string;
-  description?: string;
-  image_url?: string;
-  price?: number;
-  variants?: Array<{ id: string | number; title?: string; price?: number }>;
-  options?: Array<{ id: string | number; title?: string; values?: unknown }>;
-  [key: string]: unknown;
-};
-
 const regiondoIdentifierSchema = z.union([z.string(), z.number()]);
+const invalidRegiondoCatalogIdentifierValues = new Set(['null', 'undefined']);
+const requiredRegiondoIdentifierSchema = z.preprocess((value) => {
+  if (typeof value === 'number') {
+    return String(value);
+  }
+
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+
+  return value;
+}, z.string().min(1).refine((value) => !invalidRegiondoCatalogIdentifierValues.has(value.toLowerCase()), {
+  message: 'Expected a usable Regiondo identifier.'
+}));
+const optionalTrimmedStringSchema = z.preprocess((value) => {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== 'string') {
+    return value;
+  }
+
+  const normalized = value.trim();
+  return normalized ? normalized : undefined;
+}, z.string().min(1).optional());
+const optionalRegiondoNumberSchema = z.preprocess((value) => {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (typeof value === 'string' && value.trim() === '') {
+    return undefined;
+  }
+
+  return value;
+}, z.coerce.number().finite().optional());
+
+export const regiondoCatalogVariationOptionSchema = z
+  .object({
+    option_id: requiredRegiondoIdentifierSchema,
+    title: optionalTrimmedStringSchema,
+    values: z.unknown().optional()
+  })
+  .passthrough();
+
+export const regiondoCatalogVariationSchema = z
+  .object({
+    variation_id: requiredRegiondoIdentifierSchema,
+    title: optionalTrimmedStringSchema,
+    price: optionalRegiondoNumberSchema,
+    base_price: optionalRegiondoNumberSchema,
+    original_price: optionalRegiondoNumberSchema,
+    values: z.unknown().optional(),
+    options: z.array(regiondoCatalogVariationOptionSchema).optional()
+  })
+  .passthrough();
+
+export const regiondoCatalogProductSchema = z
+  .object({
+    product_id: requiredRegiondoIdentifierSchema,
+    name: optionalTrimmedStringSchema,
+    default_name: optionalTrimmedStringSchema,
+    short_description: optionalTrimmedStringSchema,
+    image: optionalTrimmedStringSchema,
+    thumbnail: optionalTrimmedStringSchema,
+    base_price: optionalRegiondoNumberSchema,
+    original_price: optionalRegiondoNumberSchema,
+    variations: z.array(regiondoCatalogVariationSchema).optional()
+  })
+  .passthrough();
+
+export const regiondoCatalogProductsSchema = z.array(regiondoCatalogProductSchema);
 
 const regiondoContactDataSchema = z
   .object({
@@ -152,6 +213,9 @@ export const regiondoSupplierBookingSchema = z
 
 export const regiondoSupplierBookingsSchema = z.array(regiondoSupplierBookingSchema);
 
+export type RegiondoCatalogVariationOption = z.infer<typeof regiondoCatalogVariationOptionSchema>;
+export type RegiondoCatalogVariation = z.infer<typeof regiondoCatalogVariationSchema>;
+export type RegiondoCatalogProduct = z.infer<typeof regiondoCatalogProductSchema>;
 export type RegiondoPurchaseDataPush = z.infer<typeof regiondoPurchaseDataPushSchema>;
 export type LegacyRegiondoBooking = z.infer<typeof legacyRegiondoBookingSchema>;
 export type RegiondoWebhookPayload = z.infer<typeof regiondoWebhookPayloadSchema>;

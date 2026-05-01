@@ -13,7 +13,6 @@
     "test": "vitest run",
     "migrate": "tsx src/db/migrate.ts",
     "admin:create": "tsx src/auth/create-admin-user.ts",
-    "sync:products": "tsx src/sync/run-product-sync.ts",
     "job:regiondo-webhooks": "tsx src/scripts/job-regiondo-webhooks.ts",
     "job:sync-regiondo-catalog": "tsx src/scripts/job-sync-regiondo-catalog.ts",
     "job:dispatch-reminders": "tsx src/scripts/job-dispatch-reminders.ts",

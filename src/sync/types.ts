@@ -1,16 +1,5 @@
 import { z } from 'zod';
 
-export type RegiondoProduct = {
-  id: string;
-  title?: string;
-  description?: string;
-  image_url?: string;
-  price?: number;
-  variants?: Array<{ id: string; title?: string; price?: number }>;
-  options?: Array<{ id: string; title?: string; values?: unknown }>;
-  [key: string]: unknown;
-};
-
 const regiondoIdentifierSchema = z.union([z.string(), z.number()]);
 
 const regiondoContactDataSchema = z

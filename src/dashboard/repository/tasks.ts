@@ -4,6 +4,8 @@ import type {
   DashboardTask,
   DashboardTaskMutationActor,
   DashboardTaskOwner,
+  DashboardTaskRawJson,
+  DashboardTaskRawJsonValue,
   ListDashboardTasksFilters,
   UpdateDashboardTaskInput
 } from '../types.js';
@@ -48,6 +50,54 @@ const TASK_ORDER_BY = `ORDER BY
    CASE WHEN t.column_key IS NULL THEN 1 ELSE 0 END ASC,
    c.position ASC NULLS LAST,
    t.updated_at DESC`;
+const RESERVED_TASK_RAW_JSON_KEYS = new Set([
+  'columnId',
+  'connectedBookingId',
+  'description',
+  'eventDateTime',
+  'ownerId',
+  'reminderDate',
+  'reservedCapacityDate',
+  'site',
+  'title'
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isTaskRawJsonValue(value: unknown): value is DashboardTaskRawJsonValue {
+  return (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    (Array.isArray(value) && value.every((entry) => typeof entry === 'string'))
+  );
+}
+
+function sanitizeTaskRawJson(rawJson: unknown): DashboardTaskRawJson {
+  if (!isRecord(rawJson)) {
+    return {};
+  }
+
+  return Object.entries(rawJson).reduce<DashboardTaskRawJson>((result, [key, value]) => {
+    if (RESERVED_TASK_RAW_JSON_KEYS.has(key) || !isTaskRawJsonValue(value)) {
+      return result;
+    }
+
+    result[key] = Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : value;
+    return result;
+  }, {});
+}
+
+function buildTaskRawJson(site: string, rawJson: unknown, existingRawJson?: unknown): DashboardTaskRawJson {
+  return {
+    ...sanitizeTaskRawJson(existingRawJson),
+    ...sanitizeTaskRawJson(rawJson),
+    site: site.trim()
+  };
+}
 
 async function ensureOwner(client: Queryable, ownerId?: string | null): Promise<DashboardTaskOwner | null> {
   if (!ownerId) {
@@ -159,12 +209,7 @@ export async function createTask(input: CreateDashboardTaskInput, actor?: Dashbo
     const column = await resolveTaskColumnForCreate(client, input.columnId);
     const owner = await ensureOwner(client, input.ownerId);
     const eventDateTime = toIsoStringOrThrow(input.eventDateTime, 'eventDateTime');
-    const rawJson = {
-      eventDateTime,
-      reminderDate: input.reminderDate ? toIsoStringOrThrow(input.reminderDate, 'reminderDate') : null,
-      reservedCapacityDate: input.reservedCapacityDate ? toIsoStringOrThrow(input.reservedCapacityDate, 'reservedCapacityDate') : null,
-      site: input.site.trim()
-    };
+    const rawJson = buildTaskRawJson(input.site, input.rawJson);
 
     const created = await client.query<{ id: string }>(
       `INSERT INTO tasks (
@@ -224,12 +269,7 @@ export async function updateTask(
     const existingTask = mapTaskRow(existingRow);
     const column = await resolveTaskColumnForUpdate(client, input.columnId);
     const owner = await ensureOwner(client, input.ownerId);
-    const rawJson = {
-      eventDateTime: toIsoStringOrThrow(input.eventDateTime, 'eventDateTime'),
-      reminderDate: input.reminderDate ? toIsoStringOrThrow(input.reminderDate, 'reminderDate') : null,
-      reservedCapacityDate: input.reservedCapacityDate ? toIsoStringOrThrow(input.reservedCapacityDate, 'reservedCapacityDate') : null,
-      site: input.site.trim()
-    };
+    const rawJson = buildTaskRawJson(input.site, input.rawJson, existingRow.raw_json);
 
     await client.query(
       `UPDATE tasks

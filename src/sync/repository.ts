@@ -8,12 +8,10 @@ import {
   calculateBookingRange,
   extractLegacyCustomerId,
   extractLegacyLocation,
-  mapProductForDb,
   normalizeStoredBookingStatus,
   stringifyRegiondoId
 } from './mappers.js';
 import type {
-  RegiondoProduct,
   RegiondoPurchaseData,
   RegiondoSoldItem,
   RegiondoSupplierBooking,
@@ -402,54 +400,6 @@ function sumBookingTotals(items: RegiondoSoldItem[]) {
     },
     { totalAmount: 0, paidAmount: 0, guestCount: 0 }
   );
-}
-
-export async function upsertProductWithDetails(input: RegiondoProduct): Promise<void> {
-  const mapped = mapProductForDb(input);
-
-  await pool.query(
-    `INSERT INTO products (title, description, image_url, base_amount, regiondo_product_id, regiondo_raw)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (regiondo_product_id)
-     DO UPDATE SET title = EXCLUDED.title,
-                   description = EXCLUDED.description,
-                   image_url = EXCLUDED.image_url,
-                   base_amount = EXCLUDED.base_amount,
-                   regiondo_raw = EXCLUDED.regiondo_raw,
-                   updated_at = now()`,
-    [mapped.title, mapped.description, mapped.imageUrl, mapped.baseAmount, mapped.regiondoProductId, JSON.stringify(mapped.raw)]
-  );
-
-  await pool.query('DELETE FROM product_variants WHERE regiondo_product_id = $1', [mapped.regiondoProductId]);
-  await pool.query('DELETE FROM product_options WHERE regiondo_product_id = $1', [mapped.regiondoProductId]);
-
-  const variants = Array.isArray(input.variants) ? input.variants : [];
-  for (const variant of variants) {
-    await pool.query(
-      `INSERT INTO product_variants (regiondo_variant_id, regiondo_product_id, title, price, regiondo_raw)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (regiondo_variant_id)
-       DO UPDATE SET title = EXCLUDED.title,
-                     price = EXCLUDED.price,
-                     regiondo_raw = EXCLUDED.regiondo_raw,
-                     updated_at = now()`,
-      [String(variant.id), mapped.regiondoProductId, variant.title ?? null, Number(variant.price ?? 0), JSON.stringify(variant)]
-    );
-  }
-
-  const options = Array.isArray(input.options) ? input.options : [];
-  for (const option of options) {
-    await pool.query(
-      `INSERT INTO product_options (regiondo_option_id, regiondo_product_id, title, values_json, regiondo_raw)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (regiondo_option_id)
-       DO UPDATE SET title = EXCLUDED.title,
-                     values_json = EXCLUDED.values_json,
-                     regiondo_raw = EXCLUDED.regiondo_raw,
-                     updated_at = now()`,
-      [String(option.id), mapped.regiondoProductId, option.title ?? null, JSON.stringify(option.values ?? null), JSON.stringify(option)]
-    );
-  }
 }
 
 export async function enqueueRegiondoWebhookEvents(input: {
