@@ -1,4 +1,10 @@
 import { pool } from '../../db/pool.js';
+import type {
+  RegiondoCatalogOptionRowSummaryInput,
+  RegiondoCatalogVariationRowSummaryInput,
+  RegiondoProductCatalogSummary
+} from '../regiondo/regiondo-product-catalog.js';
+import { summarizeRegiondoProductCatalogFromRows } from '../regiondo/regiondo-product-catalog.js';
 
 export interface AdminProductResourceMapping {
   resourceId: string;
@@ -13,6 +19,7 @@ export interface AdminProduct {
   imageUrl: string | null;
   baseAmount: number;
   regiondoProductId: string | null;
+  regiondoCatalog: RegiondoProductCatalogSummary;
   rawJson: unknown;
   resources: AdminProductResourceMapping[];
 }
@@ -28,7 +35,29 @@ interface ProductRow {
   resources: AdminProductResourceMapping[] | null;
 }
 
-function mapProductRow(row: ProductRow): AdminProduct {
+interface ProductVariantRow {
+  price: string | number | null;
+  regiondo_product_id: string;
+  regiondo_raw: unknown;
+  regiondo_variant_id: string;
+  title: string | null;
+}
+
+interface ProductOptionRow {
+  regiondo_option_id: string;
+  regiondo_product_id: string;
+  regiondo_raw: unknown;
+  regiondo_variant_id: string | null;
+  title: string | null;
+  values_json: unknown;
+}
+
+const EMPTY_REGIONDO_PRODUCT_CATALOG_SUMMARY: RegiondoProductCatalogSummary = {
+  options: [],
+  variations: []
+};
+
+function mapProductRow(row: ProductRow, regiondoCatalog: RegiondoProductCatalogSummary): AdminProduct {
   return {
     productId: row.product_id,
     title: row.title,
@@ -36,6 +65,7 @@ function mapProductRow(row: ProductRow): AdminProduct {
     imageUrl: row.image_url,
     baseAmount: Number(row.base_amount),
     regiondoProductId: row.regiondo_product_id,
+    regiondoCatalog,
     rawJson: row.regiondo_raw,
     resources: row.resources ?? []
   };
@@ -63,6 +93,90 @@ const productSelect = `SELECT
  LEFT JOIN product_resources pr ON pr.product_id = p.product_id
  LEFT JOIN resources r ON r.resource_id = pr.resource_id`;
 
+async function loadRegiondoCatalogByProductId(
+  regiondoProductIds: string[]
+): Promise<Map<string, RegiondoProductCatalogSummary>> {
+  if (!regiondoProductIds.length) {
+    return new Map();
+  }
+
+  const [variationResult, optionResult] = await Promise.all([
+    pool.query<ProductVariantRow>(
+      `SELECT regiondo_product_id, regiondo_variant_id, title, price, regiondo_raw
+       FROM product_variants
+       WHERE regiondo_product_id = ANY($1::text[])
+       ORDER BY regiondo_product_id ASC, regiondo_variant_id ASC`,
+      [regiondoProductIds]
+    ),
+    pool.query<ProductOptionRow>(
+      `SELECT regiondo_product_id, regiondo_variant_id, regiondo_option_id, title, values_json, regiondo_raw
+       FROM product_options
+       WHERE regiondo_product_id = ANY($1::text[])
+       ORDER BY regiondo_product_id ASC, regiondo_variant_id ASC NULLS LAST, regiondo_option_id ASC`,
+      [regiondoProductIds]
+    )
+  ]);
+
+  const variationsByProductId = new Map<string, RegiondoCatalogVariationRowSummaryInput[]>();
+  const optionsByProductId = new Map<string, RegiondoCatalogOptionRowSummaryInput[]>();
+
+  variationResult.rows.forEach((row) => {
+    const variations = variationsByProductId.get(row.regiondo_product_id) ?? [];
+    variations.push({
+      price:
+        row.price === null || row.price === undefined
+          ? null
+          : typeof row.price === 'number'
+            ? row.price
+            : Number(row.price),
+      rawJson: row.regiondo_raw,
+      regiondoVariantId: row.regiondo_variant_id,
+      title: row.title
+    });
+    variationsByProductId.set(row.regiondo_product_id, variations);
+  });
+
+  optionResult.rows.forEach((row) => {
+    const options = optionsByProductId.get(row.regiondo_product_id) ?? [];
+    options.push({
+      rawJson: row.regiondo_raw,
+      regiondoOptionId: row.regiondo_option_id,
+      regiondoVariantId: row.regiondo_variant_id,
+      title: row.title,
+      valuesJson: row.values_json
+    });
+    optionsByProductId.set(row.regiondo_product_id, options);
+  });
+
+  return regiondoProductIds.reduce((result, regiondoProductId) => {
+    result.set(
+      regiondoProductId,
+      summarizeRegiondoProductCatalogFromRows({
+        options: optionsByProductId.get(regiondoProductId) ?? [],
+        variations: variationsByProductId.get(regiondoProductId) ?? []
+      })
+    );
+    return result;
+  }, new Map<string, RegiondoProductCatalogSummary>());
+}
+
+async function mapAdminProducts(rows: ProductRow[]): Promise<AdminProduct[]> {
+  const regiondoCatalogByProductId = await loadRegiondoCatalogByProductId(
+    rows
+      .map((row) => row.regiondo_product_id)
+      .filter((regiondoProductId): regiondoProductId is string => Boolean(regiondoProductId))
+  );
+
+  return rows.map((row) =>
+    mapProductRow(
+      row,
+      row.regiondo_product_id
+        ? regiondoCatalogByProductId.get(row.regiondo_product_id) ?? EMPTY_REGIONDO_PRODUCT_CATALOG_SUMMARY
+        : EMPTY_REGIONDO_PRODUCT_CATALOG_SUMMARY
+    )
+  );
+}
+
 export async function listAdminProducts(): Promise<AdminProduct[]> {
   const result = await pool.query<ProductRow>(
     `${productSelect}
@@ -70,7 +184,7 @@ export async function listAdminProducts(): Promise<AdminProduct[]> {
      ORDER BY p.title ASC`
   );
 
-  return result.rows.map(mapProductRow);
+  return mapAdminProducts(result.rows);
 }
 
 export async function listRegiondoCatalogProducts(): Promise<AdminProduct[]> {
@@ -81,7 +195,7 @@ export async function listRegiondoCatalogProducts(): Promise<AdminProduct[]> {
      ORDER BY p.title ASC`
   );
 
-  return result.rows.map(mapProductRow);
+  return mapAdminProducts(result.rows);
 }
 
 export async function getAdminProduct(productId: string): Promise<AdminProduct | null> {
@@ -93,7 +207,12 @@ export async function getAdminProduct(productId: string): Promise<AdminProduct |
     [productId]
   );
 
-  return result.rowCount ? mapProductRow(result.rows[0]) : null;
+  if (!result.rowCount) {
+    return null;
+  }
+
+  const [product] = await mapAdminProducts(result.rows);
+  return product ?? null;
 }
 
 export async function updateAdminProduct(

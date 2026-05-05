@@ -1,43 +1,12 @@
 import type { PoolClient } from 'pg';
 import { withTransaction } from '../../db/transaction.js';
 import { RegiondoCatalogSyncError } from './regiondo-catalog.errors.js';
-import type {
-  RegiondoCatalogProduct,
-  RegiondoCatalogVariation,
-  RegiondoCatalogVariationOption
-} from './regiondo.types.js';
-
-interface RegiondoCatalogVariantRecord {
-  price: number;
-  raw: RegiondoCatalogVariation;
-  regiondoProductId: string;
-  regiondoVariantId: string;
-  title: string | null;
-}
-
-interface RegiondoCatalogOptionRecord {
-  raw: RegiondoCatalogVariationOption;
-  regiondoOptionId: string;
-  regiondoProductId: string;
-  title: string | null;
-  valuesJson: unknown;
-}
-
-interface RegiondoCatalogProductRecordForTest {
-  baseAmount: number;
-  description: string | null;
-  imageUrl: string | null;
-  options: RegiondoCatalogOptionRecord[];
-  raw: RegiondoCatalogProduct;
-  regiondoProductId: string;
-  title: string;
-  variations: RegiondoCatalogVariantRecord[];
-}
+import type { RegiondoCatalogProductRecord } from './regiondo-catalog-normalizer.js';
 
 interface RegiondoCatalogCleanupCandidateRow {
+  booking_count: string | number;
   product_id: string;
   regiondo_product_id: string | null;
-  booking_count: string | number;
 }
 
 export interface RegiondoCatalogCleanupCandidateForTest {
@@ -77,63 +46,6 @@ export function planRegiondoCatalogCleanupForTest(
     },
     { blockedRows: [], deletableProductIds: [] }
   );
-}
-
-function mapRegiondoCatalogVariation(
-  regiondoProductId: string,
-  variation: RegiondoCatalogVariation
-): RegiondoCatalogVariantRecord {
-  return {
-    price: variation.price ?? variation.base_price ?? variation.original_price ?? 0,
-    raw: variation,
-    regiondoProductId,
-    regiondoVariantId: variation.variation_id,
-    title: variation.title ?? null
-  };
-}
-
-function mergeRegiondoCatalogOption(
-  current: RegiondoCatalogOptionRecord | undefined,
-  input: RegiondoCatalogVariationOption,
-  regiondoProductId: string
-): RegiondoCatalogOptionRecord {
-  return {
-    raw: input,
-    regiondoOptionId: input.option_id,
-    regiondoProductId,
-    title: current?.title ?? input.title ?? null,
-    valuesJson: current?.valuesJson ?? input.values ?? null
-  };
-}
-
-export function mapRegiondoCatalogProductForTest(
-  product: RegiondoCatalogProduct
-): RegiondoCatalogProductRecordForTest {
-  const regiondoProductId = product.product_id;
-  const variations = (product.variations ?? []).map((variation) =>
-    mapRegiondoCatalogVariation(regiondoProductId, variation)
-  );
-  const optionById = new Map<string, RegiondoCatalogOptionRecord>();
-
-  for (const variation of product.variations ?? []) {
-    for (const option of variation.options ?? []) {
-      optionById.set(
-        option.option_id,
-        mergeRegiondoCatalogOption(optionById.get(option.option_id), option, regiondoProductId)
-      );
-    }
-  }
-
-  return {
-    baseAmount: product.base_price ?? product.original_price ?? 0,
-    description: product.short_description ?? null,
-    imageUrl: product.image ?? product.thumbnail ?? null,
-    options: [...optionById.values()],
-    raw: product,
-    regiondoProductId,
-    title: product.name ?? product.default_name ?? 'Untitled Product',
-    variations
-  };
 }
 
 function formatBlockedCleanupRows(rows: RegiondoCatalogCleanupCandidateForTest[]): string {
@@ -177,7 +89,7 @@ async function deleteMalformedRegiondoCatalogRows(client: PoolClient, productIds
 
 async function upsertRegiondoCatalogProduct(
   client: PoolClient,
-  product: RegiondoCatalogProductRecordForTest
+  product: RegiondoCatalogProductRecord
 ): Promise<void> {
   await client.query(
     `INSERT INTO products (title, description, image_url, base_amount, regiondo_product_id, regiondo_raw)
@@ -199,16 +111,29 @@ async function upsertRegiondoCatalogProduct(
     ]
   );
 
-  await client.query(`DELETE FROM product_variants WHERE regiondo_product_id = $1`, [product.regiondoProductId]);
   await client.query(`DELETE FROM product_options WHERE regiondo_product_id = $1`, [product.regiondoProductId]);
+  await client.query(`DELETE FROM product_variants WHERE regiondo_product_id = $1`, [product.regiondoProductId]);
 
   for (const variation of product.variations) {
     await client.query(
-      `INSERT INTO product_variants (regiondo_variant_id, regiondo_product_id, title, price, regiondo_raw)
-       VALUES ($1, $2, $3, $4, $5::jsonb)
+      `INSERT INTO product_variants (
+         regiondo_variant_id,
+         regiondo_product_id,
+         title,
+         price,
+         appointment_type,
+         date_from,
+         date_to,
+         regiondo_raw
+       )
+       VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8::jsonb)
        ON CONFLICT (regiondo_variant_id)
-       DO UPDATE SET title = EXCLUDED.title,
+       DO UPDATE SET regiondo_product_id = EXCLUDED.regiondo_product_id,
+                     title = EXCLUDED.title,
                      price = EXCLUDED.price,
+                     appointment_type = EXCLUDED.appointment_type,
+                     date_from = EXCLUDED.date_from,
+                     date_to = EXCLUDED.date_to,
                      regiondo_raw = EXCLUDED.regiondo_raw,
                      updated_at = now()`,
       [
@@ -216,6 +141,9 @@ async function upsertRegiondoCatalogProduct(
         variation.regiondoProductId,
         variation.title,
         variation.price,
+        variation.appointmentType,
+        variation.dateFrom,
+        variation.dateTo,
         JSON.stringify(variation.raw)
       ]
     );
@@ -223,9 +151,16 @@ async function upsertRegiondoCatalogProduct(
 
   for (const option of product.options) {
     await client.query(
-      `INSERT INTO product_options (regiondo_option_id, regiondo_product_id, title, values_json, regiondo_raw)
-       VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
-       ON CONFLICT (regiondo_option_id)
+      `INSERT INTO product_options (
+         regiondo_option_id,
+         regiondo_product_id,
+         regiondo_variant_id,
+         title,
+         values_json,
+         regiondo_raw
+       )
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
+       ON CONFLICT (regiondo_product_id, regiondo_variant_id, regiondo_option_id)
        DO UPDATE SET title = EXCLUDED.title,
                      values_json = EXCLUDED.values_json,
                      regiondo_raw = EXCLUDED.regiondo_raw,
@@ -233,6 +168,7 @@ async function upsertRegiondoCatalogProduct(
       [
         option.regiondoOptionId,
         option.regiondoProductId,
+        option.regiondoVariantId,
         option.title,
         JSON.stringify(option.valuesJson ?? null),
         JSON.stringify(option.raw)
@@ -244,9 +180,9 @@ async function upsertRegiondoCatalogProduct(
 async function upsertSyncState(
   client: PoolClient,
   input: {
-    syncType: string;
     cursorValue?: string | null;
     metadata?: Record<string, unknown>;
+    syncType: string;
   }
 ): Promise<void> {
   await client.query(
@@ -262,9 +198,10 @@ async function upsertSyncState(
   );
 }
 
-export async function syncRegiondoCatalogProducts(products: RegiondoCatalogProduct[]): Promise<void> {
-  const mappedProducts = products.map(mapRegiondoCatalogProductForTest);
-
+export async function syncRegiondoCatalogProducts(
+  products: RegiondoCatalogProductRecord[],
+  metadata: Record<string, unknown> = {}
+): Promise<void> {
   await withTransaction(async (client) => {
     const cleanupPlan = planRegiondoCatalogCleanupForTest(await listMalformedRegiondoCatalogRows(client));
 
@@ -278,14 +215,15 @@ export async function syncRegiondoCatalogProducts(products: RegiondoCatalogProdu
 
     await deleteMalformedRegiondoCatalogRows(client, cleanupPlan.deletableProductIds);
 
-    for (const product of mappedProducts) {
+    for (const product of products) {
       await upsertRegiondoCatalogProduct(client, product);
     }
 
     await upsertSyncState(client, {
       syncType: 'regiondo_catalog',
       metadata: {
-        productCount: mappedProducts.length
+        productCount: products.length,
+        ...metadata
       }
     });
   });

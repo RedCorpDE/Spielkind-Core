@@ -184,9 +184,40 @@ export interface DashboardBooking {
 
 export interface DashboardBookingProduct {
   productId: string;
+  regiondoProductId: string | null;
   title: string;
   quantity: number;
   unitPrice: number;
+}
+
+export interface DashboardBookingContactDetails {
+  firstName: string | null;
+  lastName: string | null;
+  email: string | null;
+  phoneNumber: string | null;
+}
+
+export interface DashboardBookingPaymentDetails {
+  amountToPay: number;
+  amountPaid: number;
+  amountOutstanding: number;
+  paymentMethod: string | null;
+}
+
+export interface DashboardBookingRegiondoSelection {
+  id: string;
+  quantity: number;
+  productId: string | null;
+  regiondoProductId: string | null;
+  productTitle: string;
+  variationLabel: string | null;
+  optionValueLabel: string | null;
+}
+
+export interface DashboardBookingDrawerData {
+  contact: DashboardBookingContactDetails;
+  payment: DashboardBookingPaymentDetails;
+  regiondoSelections: DashboardBookingRegiondoSelection[];
 }
 
 export interface DashboardBookingSyncInfo {
@@ -207,6 +238,7 @@ export interface DashboardBookingSyncInfo {
 
 export interface DashboardBookingDetail extends DashboardBooking {
   products: DashboardBookingProduct[];
+  drawerData: DashboardBookingDrawerData;
   sync: DashboardBookingSyncInfo;
 }
 

@@ -34,9 +34,11 @@ interface RegiondoClientOptions {
   publicKey: string;
   secretKey: string;
   language: string;
+  currency: string;
   requestTimeoutMs: number;
   maxRetries: number;
   retryBaseDelayMs: number;
+  requestThrottleMs: number;
   supplierId: string;
   fetchImplementation: typeof fetch;
   sleep: (delayMs: number) => Promise<void>;
@@ -115,12 +117,15 @@ export class RegiondoClient {
   private readonly publicKey: string;
   private readonly secretKey: string;
   private readonly language: string;
+  private readonly currency: string;
   private readonly requestTimeoutMs: number;
   private readonly maxRetries: number;
   private readonly retryBaseDelayMs: number;
+  private readonly requestThrottleMs: number;
   private readonly supplierId: string;
   private readonly fetchImplementation: typeof fetch;
   private readonly sleepImplementation: (delayMs: number) => Promise<void>;
+  private nextRequestAt = Date.now();
 
   constructor(options: Partial<RegiondoClientOptions> = {}) {
     const baseUrl = options.baseUrl ?? appConfig.REGIONDO_BASE_URL;
@@ -129,22 +134,54 @@ export class RegiondoClient {
     this.publicKey = options.publicKey ?? appConfig.REGIONDO_PUBLIC_KEY;
     this.secretKey = options.secretKey ?? appConfig.REGIONDO_SECRET_KEY;
     this.language = options.language ?? appConfig.REGIONDO_LANGUAGE;
+    this.currency = options.currency ?? appConfig.REGIONDO_CURRENCY;
     this.requestTimeoutMs = options.requestTimeoutMs ?? appConfig.REGIONDO_REQUEST_TIMEOUT_MS;
     this.maxRetries = options.maxRetries ?? appConfig.REGIONDO_REQUEST_MAX_RETRIES;
     this.retryBaseDelayMs = options.retryBaseDelayMs ?? appConfig.REGIONDO_REQUEST_RETRY_BASE_DELAY_MS;
+    this.requestThrottleMs = options.requestThrottleMs ?? appConfig.REGIONDO_REQUEST_THROTTLE_MS;
     this.supplierId = options.supplierId ?? appConfig.REGIONDO_PRODUCT_SUPPLIER_ID;
     this.fetchImplementation = options.fetchImplementation ?? fetch;
     this.sleepImplementation = options.sleep ?? sleep;
   }
 
+  private buildQueryParams(params: Record<string, string>): URLSearchParams {
+    const queryParams = new URLSearchParams();
+
+    Object.entries(params)
+      .filter(([, value]) => value !== '')
+      .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
+      .forEach(([key, value]) => {
+        queryParams.set(key, value);
+      });
+
+    return queryParams;
+  }
+
+  private async throttleRequest(): Promise<void> {
+    if (this.requestThrottleMs <= 0) {
+      return;
+    }
+
+    const now = Date.now();
+    const scheduledAt = Math.max(now, this.nextRequestAt);
+    this.nextRequestAt = scheduledAt + this.requestThrottleMs;
+    const delayMs = scheduledAt - now;
+
+    if (delayMs > 0) {
+      await this.sleepImplementation(delayMs);
+    }
+  }
+
   private async requestJson<T>(pathname: string, params: Record<string, string> = {}): Promise<T> {
-    const queryParams = new URLSearchParams(params);
+    const queryParams = this.buildQueryParams(params);
     const url = new URL(pathname.replace(/^\//, ''), this.baseUrl);
     url.search = queryParams.toString();
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
       try {
-        const timestamp = Math.floor(Date.now() / 1000);
+        await this.throttleRequest();
+
+        const timestamp = Date.now();
         const hash = signRegiondoRequest({
           timestamp,
           publicKey: this.publicKey,
@@ -196,6 +233,14 @@ export class RegiondoClient {
       if ('item' in body && body.item !== undefined) {
         return body.item;
       }
+
+      if ('result' in body && body.result !== undefined) {
+        return body.result as T;
+      }
+
+      if ('product' in body && body.product !== undefined) {
+        return body.product as T;
+      }
     }
 
     return body as T;
@@ -207,9 +252,11 @@ export class RegiondoClient {
 
     while (true) {
       const response = await this.requestJson<RegiondoCollectionResponse<unknown>>('/products', {
-        supplier_id: this.supplierId,
+        currency: this.currency,
         limit: `${this.catalogPageSize}`,
-        ...(offset > 0 ? { offset: `${offset}` } : {})
+        ...(offset > 0 ? { offset: `${offset}` } : {}),
+        store_locale: this.language,
+        supplier_id: this.supplierId
       });
       const pageItems = response.data ?? response.items ?? [];
       const currentPage = normalizePositiveInteger(response.page?.current);
@@ -247,6 +294,37 @@ export class RegiondoClient {
     }
 
     return parsed.data;
+  }
+
+  async getProductDetail(productId: string): Promise<unknown> {
+    return this.getObject<unknown>(`/products/${encodeURIComponent(productId)}`, {
+      currency: this.currency,
+      store_locale: this.language
+    });
+  }
+
+  async getVariationAvailability(input: {
+    variationId: string;
+    from: string;
+    to: string;
+  }): Promise<unknown> {
+    return this.requestJson<unknown>(`/products/availabilities/${encodeURIComponent(input.variationId)}`, {
+      dt_from: input.from,
+      dt_to: input.to,
+      store_locale: this.language
+    });
+  }
+
+  async getAvailableOptions(input: {
+    variationId: string;
+    date?: string;
+    time?: string;
+  }): Promise<unknown> {
+    return this.requestJson<unknown>(`/products/availoptions/${encodeURIComponent(input.variationId)}`, {
+      ...(input.date ? { date: input.date } : {}),
+      ...(input.time ? { time: input.time } : {}),
+      store_locale: this.language
+    });
   }
 
   async hydrateBookingOrder(input: {

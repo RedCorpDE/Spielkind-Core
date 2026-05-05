@@ -82,6 +82,7 @@ export interface BookingRow {
   first_name: string | null;
   last_name: string | null;
   email: string | null;
+  phone_number: string | null;
   product_title: string | null;
   regiondo_booking_id: string | null;
   regiondo_order_number: string | null;
@@ -330,6 +331,15 @@ function getPurchaseDataRaw(rawValue: unknown): Record<string, unknown> | null {
   return isRecord(purchaseData) ? purchaseData : null;
 }
 
+function getManualRawSection(rawValue: unknown): Record<string, unknown> | null {
+  if (!isRecord(rawValue)) {
+    return null;
+  }
+
+  const manual = rawValue.manual;
+  return isRecord(manual) ? manual : null;
+}
+
 function getFirstSupplierBookingRaw(rawValue: unknown): Record<string, unknown> | null {
   const provider = getProviderRawSection(rawValue);
   if (!provider) {
@@ -345,6 +355,19 @@ function getFirstSupplierBookingRaw(rawValue: unknown): Record<string, unknown> 
 }
 
 function extractPurchaseContactField(rawValue: unknown, field: 'email' | 'firstname' | 'lastname'): string | null {
+  const manual = getManualRawSection(rawValue);
+  if (manual) {
+    const contact = manual.contact;
+    if (isRecord(contact)) {
+      const manualField =
+        field === 'firstname' ? 'firstName' : field === 'lastname' ? 'lastName' : 'email';
+      const manualValue = contact[manualField];
+      if (typeof manualValue === 'string' && manualValue.trim()) {
+        return manualValue.trim();
+      }
+    }
+  }
+
   const purchaseData = getPurchaseDataRaw(rawValue);
   if (!purchaseData) {
     return null;
@@ -360,6 +383,20 @@ function extractPurchaseContactField(rawValue: unknown, field: 'email' | 'firstn
 }
 
 function extractBookingProductTitle(rawValue: unknown): string | null {
+  const manual = getManualRawSection(rawValue);
+  if (manual && Array.isArray(manual.regiondoSelections)) {
+    for (const selection of manual.regiondoSelections) {
+      if (!isRecord(selection)) {
+        continue;
+      }
+
+      const productTitle = selection.productTitle;
+      if (typeof productTitle === 'string' && productTitle.trim()) {
+        return productTitle.trim();
+      }
+    }
+  }
+
   const purchaseData = getPurchaseDataRaw(rawValue);
   if (purchaseData) {
     const items = purchaseData.items;
@@ -397,6 +434,17 @@ function extractBookingProductTitle(rawValue: unknown): string | null {
 }
 
 function extractBookingSource(rawValue: unknown): string {
+  if (isRecord(rawValue) && typeof rawValue.source === 'string') {
+    switch (rawValue.source.trim()) {
+      case 'manual_task':
+        return 'Manual task';
+      case 'manual':
+        return 'Manual';
+      default:
+        return rawValue.source.trim();
+    }
+  }
+
   const purchaseData = getPurchaseDataRaw(rawValue);
   if (purchaseData) {
     const salesChannel = purchaseData.sales_channel;

@@ -1,9 +1,16 @@
+import { randomUUID } from 'node:crypto';
 import { pool } from '../../db/client.js';
+import { SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID } from '../../sync/mappers.js';
 import type {
   DashboardBooking,
   DashboardBookingActivityEntry,
   DashboardBookingDetail,
+  DashboardBookingDrawerData,
   DashboardBookingProduct,
+  DashboardTask,
+  DashboardTaskActivityEntry,
+  DashboardTaskMutationActor,
+  DashboardBookingRegiondoSelection,
   DashboardBookingSort,
   DashboardBookingSyncInfo,
   DashboardPaginatedBookingsResponse,
@@ -16,9 +23,11 @@ import {
   type BookingRow,
   type ExistingBookingRow,
   type Queryable,
+  type TaskRow,
   DashboardNotFoundError,
   DashboardValidationError,
   mapBookingRow,
+  mapTaskRow,
   mapDashboardExternalStatusToDb,
   requireIsoString,
   toIsoString,
@@ -29,6 +38,7 @@ const DEFAULT_BOOKINGS_PAGE_SIZE = 50;
 
 interface BookingProductRow {
   product_id: string;
+  regiondo_product_id: string | null;
   title: string;
   quantity: number;
   unit_price: string | number;
@@ -75,6 +85,65 @@ interface BookingSyncActivityRow {
   order_number: string | null;
 }
 
+interface TaskBookingLocationRow {
+  location_id: string;
+  title: string;
+  regiondo_location_id: string | null;
+}
+
+interface TaskBookingProductRow {
+  product_id: string;
+  title: string;
+  base_amount: string | number;
+  regiondo_product_id: string | null;
+}
+
+interface TaskBookingVariantRow {
+  title: string | null;
+  price: string | number | null;
+}
+
+interface TaskBookingOptionRow {
+  title: string | null;
+  values_json: unknown;
+}
+
+interface TaskBookingResolvedSelection {
+  productId: string;
+  productTitle: string;
+  quantity: number;
+  regiondoProductId: string | null;
+  unitPrice: number;
+  valuePath: string[];
+  variationLabel: string | null;
+  optionValueLabel: string | null;
+}
+
+const TASK_SELECT_QUERY = `SELECT
+   t.id,
+   t.title,
+   t.description,
+   t.created_at,
+   t.updated_at,
+   t.connected_booking_key,
+   t.update_log,
+   t.raw_json,
+   t.event_date_time,
+   t.reminder_date,
+   t.reserved_capacity_date,
+   c.id AS column_id,
+   c.title AS column_title,
+   c.position AS column_position,
+   c.booking_related,
+   u.id AS assignee_user_id,
+   u.display_name AS owner_name,
+   u.role AS owner_role
+  FROM tasks t
+  LEFT JOIN task_kanban_columns c ON c.id = t.column_key
+  LEFT JOIN users u ON u.id = t.assignee_user_id`;
+
+const TASK_BOOKING_ALLOWED_COLUMN_POSITIONS = new Set([3, 4, 5]);
+
 interface BookingListCursor {
   sort: DashboardBookingSort;
   direction: DashboardSortDirection;
@@ -84,6 +153,532 @@ interface BookingListCursor {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeText(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+  return normalized ? normalized : null;
+}
+
+function stringifyIdentifier(value: unknown): string | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return `${value}`;
+  }
+
+  return normalizeText(value);
+}
+
+function getProviderRecord(rawValue: unknown): Record<string, unknown> | null {
+  if (!isRecord(rawValue)) {
+    return null;
+  }
+
+  const provider = rawValue.provider;
+  return isRecord(provider) ? provider : null;
+}
+
+function getPurchaseDataRecord(rawValue: unknown): Record<string, unknown> | null {
+  const provider = getProviderRecord(rawValue);
+  if (!provider) {
+    return null;
+  }
+
+  const purchaseData = provider.purchaseData;
+  return isRecord(purchaseData) ? purchaseData : null;
+}
+
+function getManualRecord(rawValue: unknown): Record<string, unknown> | null {
+  if (!isRecord(rawValue)) {
+    return null;
+  }
+
+  const manual = rawValue.manual;
+  return isRecord(manual) ? manual : null;
+}
+
+function canCreateBookingFromTaskColumnPosition(value: number): boolean {
+  return TASK_BOOKING_ALLOWED_COLUMN_POSITIONS.has(value);
+}
+
+function readTaskRawText(task: DashboardTask, key: string): string | null {
+  const value = task.rawJson[key];
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return `${value}`;
+  }
+
+  return null;
+}
+
+function readTaskRawSelection(task: DashboardTask, key: string): string[] {
+  const value = task.rawJson[key];
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0) : [];
+}
+
+function readTaskSelectionPaths(task: DashboardTask): string[][] {
+  return ['blocker_1_selection', 'blocker_2_selection']
+    .map((key) => readTaskRawSelection(task, key))
+    .filter((valuePath) => valuePath.length > 0);
+}
+
+function parseTaskBookingAmount(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.replace(',', '.').trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function readTaskAttendees(task: DashboardTask): number {
+  const value = task.rawJson.attendees;
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.max(1, Math.floor(value));
+  }
+
+  if (typeof value === 'string') {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed)) {
+      return Math.max(1, Math.floor(parsed));
+    }
+  }
+
+  return 1;
+}
+
+function decodeSelectionNodeValue(value: string): string[] {
+  return value.split(':').map((segment) => decodeURIComponent(segment));
+}
+
+function normalizeManualContactField(manual: Record<string, unknown> | null, field: 'email' | 'firstName' | 'lastName' | 'phoneNumber'): string | null {
+  if (!manual) {
+    return null;
+  }
+
+  const contact = manual.contact;
+  if (!isRecord(contact)) {
+    return null;
+  }
+
+  return normalizeText(contact[field]);
+}
+
+function normalizeManualSelections(manual: Record<string, unknown> | null): DashboardBookingRegiondoSelection[] {
+  if (!manual || !Array.isArray(manual.regiondoSelections)) {
+    return [];
+  }
+
+  return manual.regiondoSelections.flatMap((selection, index) => {
+    if (!isRecord(selection)) {
+      return [];
+    }
+
+    const productTitle = normalizeText(selection.productTitle) ?? 'Product';
+    const quantityValue = selection.quantity;
+    const quantity =
+      typeof quantityValue === 'number'
+        ? quantityValue
+        : typeof quantityValue === 'string'
+          ? Number(quantityValue)
+          : NaN;
+
+    return [
+      {
+        id: stringifyIdentifier(selection.id) ?? `manual-selection-${index + 1}`,
+        quantity: Number.isFinite(quantity) && quantity > 0 ? Math.floor(quantity) : 1,
+        productId: stringifyIdentifier(selection.productId),
+        regiondoProductId: stringifyIdentifier(selection.regiondoProductId),
+        productTitle,
+        variationLabel: normalizeText(selection.variationLabel),
+        optionValueLabel: normalizeText(selection.optionValueLabel)
+      }
+    ] satisfies DashboardBookingRegiondoSelection[];
+  });
+}
+
+function resolveTaskBookingEndDateTime(task: DashboardTask): string {
+  const eventDateTime = task.eventDateTime;
+  if (!eventDateTime) {
+    throw new DashboardValidationError('Task event date/time is required before creating a booking.');
+  }
+
+  const start = new Date(eventDateTime);
+  if (Number.isNaN(start.getTime())) {
+    throw new DashboardValidationError('Task event date/time is invalid.');
+  }
+
+  const secondaryEventTime = readTaskRawText(task, 'secondary_event_time');
+  if (secondaryEventTime && /^\d{2}:\d{2}$/.test(secondaryEventTime)) {
+    const [hours, minutes] = secondaryEventTime.split(':').map((value) => Number(value));
+    const end = new Date(start);
+    end.setHours(hours, minutes, 0, 0);
+
+    if (end.getTime() <= start.getTime()) {
+      end.setDate(end.getDate() + 1);
+    }
+
+    return end.toISOString();
+  }
+
+  const end = new Date(start);
+  end.setHours(end.getHours() + 2);
+  return end.toISOString();
+}
+
+function createTaskBookingActivityLog(
+  task: DashboardTask,
+  bookingId: string,
+  actor?: DashboardTaskMutationActor
+): DashboardTaskActivityEntry[] {
+  return [
+    {
+      id: `task-activity-${randomUUID()}`,
+      actor:
+        actor?.name && actor.role
+          ? { name: actor.name, role: actor.role, source: actor.source ?? 'user' }
+          : { name: 'System', role: 'Operations', source: 'system' },
+      changes: [
+        {
+          field: 'connectedBookingId',
+          ...(task.connectedBookingId ? { from: task.connectedBookingId } : {}),
+          to: bookingId
+        }
+      ],
+      occurredAt: new Date().toISOString(),
+      type: 'updated'
+    },
+    ...task.activityLog
+  ];
+}
+
+async function queryTaskForBookingCreation(executor: Queryable, taskId: string, forUpdate = false): Promise<TaskRow | null> {
+  const result = await executor.query<TaskRow>(
+    `${TASK_SELECT_QUERY}
+     WHERE t.id = $1 AND t.is_deleted = false
+     LIMIT 1
+     ${forUpdate ? 'FOR UPDATE OF t' : ''}`,
+    [taskId]
+  );
+
+  return result.rowCount ? result.rows[0] : null;
+}
+
+async function resolveTaskBookingLocation(executor: Queryable, site: string): Promise<TaskBookingLocationRow> {
+  const normalizedSite = site.trim();
+  if (!normalizedSite) {
+    throw new DashboardValidationError('Task location is required before creating a booking.');
+  }
+
+  const result = await executor.query<TaskBookingLocationRow>(
+    `SELECT location_id, title, regiondo_location_id
+     FROM locations
+     WHERE LOWER(title) = LOWER($1)
+     ORDER BY created_at ASC
+     LIMIT 1`,
+    [normalizedSite]
+  );
+
+  if (!result.rowCount) {
+    throw new DashboardValidationError('Task location must match an internal location before creating a booking.');
+  }
+
+  if (result.rows[0].regiondo_location_id === SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID) {
+    throw new DashboardValidationError('Task location must use an internal location before creating a booking.');
+  }
+
+  return result.rows[0];
+}
+
+async function upsertTaskBookingClient(executor: Queryable, task: DashboardTask): Promise<string> {
+  const firstName = readTaskRawText(task, 'first_name') ?? 'Unknown';
+  const lastName = readTaskRawText(task, 'last_name') ?? 'Client';
+  const email = readTaskRawText(task, 'email');
+  const phoneNumber = readTaskRawText(task, 'phone_number');
+  const raw = JSON.stringify({
+    source: 'manual_task',
+    taskId: task.id,
+    contact: {
+      email,
+      firstName,
+      lastName,
+      phoneNumber
+    }
+  });
+
+  if (email) {
+    const result = await executor.query<{ client_id: string }>(
+      `INSERT INTO clients (first_name, last_name, email, phone_number, regiondo_raw)
+       VALUES ($1, $2, $3, $4, $5::jsonb)
+       ON CONFLICT (email)
+       DO UPDATE SET first_name = EXCLUDED.first_name,
+                     last_name = EXCLUDED.last_name,
+                     phone_number = COALESCE(EXCLUDED.phone_number, clients.phone_number),
+                     regiondo_raw = EXCLUDED.regiondo_raw,
+                     updated_at = now()
+       RETURNING client_id`,
+      [firstName, lastName, email, phoneNumber, raw]
+    );
+
+    return result.rows[0].client_id;
+  }
+
+  const result = await executor.query<{ client_id: string }>(
+    `INSERT INTO clients (first_name, last_name, phone_number, regiondo_raw)
+     VALUES ($1, $2, $3, $4::jsonb)
+     RETURNING client_id`,
+    [firstName, lastName, phoneNumber, raw]
+  );
+
+  return result.rows[0].client_id;
+}
+
+async function resolveTaskBookingSelection(
+  executor: Queryable,
+  valuePath: string[]
+): Promise<TaskBookingResolvedSelection | null> {
+  if (!valuePath.length) {
+    return null;
+  }
+
+  const [productNode, optionNode, optionValueNode] = valuePath;
+  const [productKind, productKey] = decodeSelectionNodeValue(productNode);
+
+  if (productKind !== 'product' || !productKey) {
+    return null;
+  }
+
+  const productResult = await executor.query<TaskBookingProductRow>(
+    `SELECT product_id, title, base_amount, regiondo_product_id
+     FROM products
+     WHERE product_id::text = $1 OR regiondo_product_id = $1
+     LIMIT 1`,
+    [productKey]
+  );
+
+  if (!productResult.rowCount) {
+    return null;
+  }
+
+  const product = productResult.rows[0];
+  let unitPrice = Number(product.base_amount);
+  let variationLabel: string | null = null;
+  let optionValueLabel: string | null = null;
+
+  if (optionNode) {
+    const [nodeKind, , nodeId] = decodeSelectionNodeValue(optionNode);
+
+    if (nodeKind === 'variant' && nodeId) {
+      const variationResult = await executor.query<TaskBookingVariantRow>(
+        `SELECT title, price
+         FROM product_variants
+         WHERE regiondo_variant_id = $1
+         LIMIT 1`,
+        [nodeId]
+      );
+
+      if (variationResult.rowCount) {
+        variationLabel = normalizeText(variationResult.rows[0].title) ?? nodeId;
+        const variantPrice = variationResult.rows[0].price;
+        const parsedVariantPrice =
+          typeof variantPrice === 'number'
+            ? variantPrice
+            : typeof variantPrice === 'string'
+              ? Number(variantPrice)
+              : NaN;
+
+        if (Number.isFinite(parsedVariantPrice)) {
+          unitPrice = parsedVariantPrice;
+        }
+      } else {
+        variationLabel = nodeId;
+      }
+    }
+
+    if (nodeKind === 'option' && nodeId) {
+      const optionResult = await executor.query<TaskBookingOptionRow>(
+        `SELECT title, values_json
+         FROM product_options
+         WHERE regiondo_option_id = $1
+         LIMIT 1`,
+        [nodeId]
+      );
+
+      const optionTitle = optionResult.rowCount ? normalizeText(optionResult.rows[0].title) ?? nodeId : nodeId;
+
+      if (!optionValueNode) {
+        optionValueLabel = optionTitle;
+      } else {
+        const [valueKind, , , valueId] = decodeSelectionNodeValue(optionValueNode);
+        if (valueKind === 'option-value' && valueId) {
+          if (optionResult.rowCount && Array.isArray(optionResult.rows[0].values_json)) {
+            const matchingValue = optionResult.rows[0].values_json.find((entry) => {
+              if (!isRecord(entry)) {
+                return false;
+              }
+
+              return normalizeText(entry.id) === valueId || normalizeText(entry.label) === valueId;
+            });
+
+            if (isRecord(matchingValue)) {
+              optionValueLabel = normalizeText(matchingValue.label) ?? normalizeText(matchingValue.id) ?? valueId;
+            } else {
+              optionValueLabel = valueId;
+            }
+          } else {
+            optionValueLabel = valueId;
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    productId: product.product_id,
+    productTitle: product.title,
+    quantity: 1,
+    regiondoProductId: product.regiondo_product_id,
+    unitPrice: Number.isFinite(unitPrice) ? unitPrice : 0,
+    valuePath,
+    variationLabel,
+    optionValueLabel
+  };
+}
+
+function findMatchingBookingProduct(
+  products: DashboardBookingProduct[],
+  input: { regiondoProductId: string | null; productTitle: string | null }
+): DashboardBookingProduct | null {
+  if (input.regiondoProductId) {
+    const matchByRegiondoId = products.find((product) => product.regiondoProductId === input.regiondoProductId);
+    if (matchByRegiondoId) {
+      return matchByRegiondoId;
+    }
+  }
+
+  if (input.productTitle) {
+    const lookupTitle = input.productTitle.trim().toLowerCase();
+    const matchByTitle = products.find((product) => product.title.trim().toLowerCase() === lookupTitle);
+    if (matchByTitle) {
+      return matchByTitle;
+    }
+  }
+
+  return null;
+}
+
+function extractPhoneNumber(rawValue: unknown, fallbackPhoneNumber: string | null): string | null {
+  const manual = getManualRecord(rawValue);
+  const purchaseData = getPurchaseDataRecord(rawValue);
+  const purchaseContactData = purchaseData && isRecord(purchaseData.contact_data) ? purchaseData.contact_data : null;
+
+  return (
+    normalizeManualContactField(manual, 'phoneNumber') ??
+    normalizeText(purchaseContactData?.telephone) ??
+    normalizeText(purchaseContactData?.phone_number) ??
+    fallbackPhoneNumber
+  );
+}
+
+function extractPaymentMethod(rawValue: unknown): string | null {
+  const manual = getManualRecord(rawValue);
+  if (manual) {
+    const payment = manual.payment;
+    if (isRecord(payment)) {
+      const manualPaymentMethod = normalizeText(payment.paymentMethod);
+      if (manualPaymentMethod) {
+        return manualPaymentMethod;
+      }
+    }
+  }
+
+  const purchaseData = getPurchaseDataRecord(rawValue);
+  return purchaseData ? normalizeText(purchaseData.payment_method) : null;
+}
+
+function extractRegiondoSelections(
+  rawValue: unknown,
+  products: DashboardBookingProduct[]
+): DashboardBookingRegiondoSelection[] {
+  const manualSelections = normalizeManualSelections(getManualRecord(rawValue));
+  if (manualSelections.length) {
+    return manualSelections;
+  }
+
+  const purchaseData = getPurchaseDataRecord(rawValue);
+  if (!purchaseData || !Array.isArray(purchaseData.items)) {
+    return [];
+  }
+
+  return purchaseData.items.flatMap((item, index) => {
+    if (!isRecord(item)) {
+      return [];
+    }
+
+    const regiondoProductId = stringifyIdentifier(item.product_id);
+    const productTitle =
+      normalizeText(item.product_name) ??
+      normalizeText(item.ticket_name) ??
+      normalizeText(item.external_id) ??
+      "Product";
+    const matchedProduct = findMatchingBookingProduct(products, {
+      regiondoProductId,
+      productTitle
+    });
+    const quantityValue =
+      typeof item.ticket_qty === "number"
+        ? item.ticket_qty
+        : typeof item.ticket_qty === "string"
+          ? Number(item.ticket_qty)
+          : NaN;
+
+    return [
+      {
+        id: `regiondo-selection-${index + 1}`,
+        quantity: Number.isFinite(quantityValue) && quantityValue > 0 ? Math.floor(quantityValue) : 1,
+        productId: matchedProduct?.productId ?? null,
+        regiondoProductId: regiondoProductId ?? matchedProduct?.regiondoProductId ?? null,
+        productTitle: matchedProduct?.title ?? productTitle,
+        variationLabel: normalizeText(item.ticket_variation),
+        optionValueLabel: normalizeText(item.ticket_option)
+      }
+    ] satisfies DashboardBookingRegiondoSelection[];
+  });
+}
+
+function buildBookingDrawerData(row: BookingRow, products: DashboardBookingProduct[]): DashboardBookingDrawerData {
+  const amountToPay = Number(row.total_amount);
+  const amountPaid = Number(row.paid_amount);
+
+  return {
+    contact: {
+      email: row.email,
+      firstName: row.first_name,
+      lastName: row.last_name,
+      phoneNumber: extractPhoneNumber(row.booking_raw, row.phone_number)
+    },
+    payment: {
+      amountOutstanding: Math.max(0, amountToPay - amountPaid),
+      amountPaid,
+      amountToPay,
+      paymentMethod: extractPaymentMethod(row.booking_raw)
+    },
+    regiondoSelections: extractRegiondoSelections(row.booking_raw, products)
+  };
 }
 
 function buildBookingBaseQuery() {
@@ -114,6 +709,12 @@ function buildBookingBaseQuery() {
          NULLIF(b.regiondo_raw #>> '{provider,supplierBookings,0,email}', ''),
          c.email::text
        ) AS email,
+       COALESCE(
+         NULLIF(b.regiondo_raw #>> '{provider,purchaseData,contact_data,telephone}', ''),
+         NULLIF(b.regiondo_raw #>> '{provider,supplierBookings,0,contact_data,telephone}', ''),
+         NULLIF(b.regiondo_raw #>> '{provider,supplierBookings,0,phone_number}', ''),
+         c.phone_number
+       ) AS phone_number,
        product_lookup.primary_product_title AS product_title,
        b.regiondo_booking_id,
        b.regiondo_order_number,
@@ -299,6 +900,7 @@ async function queryBookingProducts(executor: Queryable, bookingId: string): Pro
   const result = await executor.query<BookingProductRow>(
     `SELECT
        p.product_id,
+       p.regiondo_product_id,
        p.title,
        bp.quantity,
        bp.unit_price
@@ -311,6 +913,7 @@ async function queryBookingProducts(executor: Queryable, bookingId: string): Pro
 
   return result.rows.map((row) => ({
     productId: row.product_id,
+    regiondoProductId: row.regiondo_product_id,
     title: row.title,
     quantity: row.quantity,
     unitPrice: Number(row.unit_price)
@@ -505,6 +1108,160 @@ function mapBookingSyncActivityRow(row: BookingSyncActivityRow): DashboardBookin
   };
 }
 
+export async function createBookingFromTask(
+  taskId: string,
+  actor?: DashboardTaskMutationActor
+): Promise<{ bookingId: string }> {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+    const taskRow = await queryTaskForBookingCreation(client, taskId, true);
+
+    if (!taskRow) {
+      throw new DashboardNotFoundError('Task not found.');
+    }
+
+    const task = mapTaskRow(taskRow);
+
+    if (task.connectedBookingId) {
+      throw new DashboardValidationError('Task is already linked to a booking.');
+    }
+
+    if (!canCreateBookingFromTaskColumnPosition(task.columnPosition)) {
+      throw new DashboardValidationError('Bookings can only be created from the configured confirmation columns.');
+    }
+
+    const selectionPaths = readTaskSelectionPaths(task);
+    if (!selectionPaths.length) {
+      throw new DashboardValidationError('Select at least one product before creating a booking.');
+    }
+
+    const resolvedSelections = (
+      await Promise.all(selectionPaths.map((valuePath) => resolveTaskBookingSelection(client, valuePath)))
+    ).filter((selection): selection is TaskBookingResolvedSelection => Boolean(selection));
+
+    if (!resolvedSelections.length) {
+      throw new DashboardValidationError('Selected task products could not be resolved to internal products.');
+    }
+
+    const location = await resolveTaskBookingLocation(client, task.site);
+    const clientId = await upsertTaskBookingClient(client, task);
+    const totalAmount =
+      parseTaskBookingAmount(readTaskRawText(task, 'price')) ??
+      resolvedSelections.reduce((sum, selection) => sum + selection.unitPrice * selection.quantity, 0);
+    const paidAmount = 0;
+    const bookingRaw = {
+      source: 'manual_task',
+      notes: task.description.trim(),
+      manual: {
+        columnTitle: task.columnTitle,
+        contact: {
+          email: readTaskRawText(task, 'email'),
+          firstName: readTaskRawText(task, 'first_name'),
+          lastName: readTaskRawText(task, 'last_name'),
+          phoneNumber: readTaskRawText(task, 'phone_number')
+        },
+        payment: {
+          amountOutstanding: totalAmount,
+          amountPaid: paidAmount,
+          amountToPay: totalAmount,
+          fixedPrice: readTaskRawText(task, 'fixed_price'),
+          paymentMethod: readTaskRawText(task, 'payment_method'),
+          priceCalculation: readTaskRawText(task, 'price_calculation'),
+          taxation: readTaskRawText(task, 'taxation')
+        },
+        regiondoSelections: resolvedSelections.map((selection, index) => ({
+          id: `manual-selection-${index + 1}`,
+          quantity: selection.quantity,
+          productId: selection.productId,
+          regiondoProductId: selection.regiondoProductId,
+          productTitle: selection.productTitle,
+          variationLabel: selection.variationLabel,
+          optionValueLabel: selection.optionValueLabel
+        })),
+        reservedCapacityDate: task.reservedCapacityDate,
+        reservedDate: task.reminderDate,
+        site: location.title,
+        taskId: task.id,
+        taskRawJson: task.rawJson,
+        taskTitle: task.title
+      }
+    };
+
+    const bookingResult = await client.query<{ booking_id: string }>(
+      `INSERT INTO bookings (
+         client_id,
+         location_id,
+         status,
+         guest_count,
+         total_amount,
+         paid_amount,
+         dt_from,
+         dt_to,
+         source,
+         regiondo_raw
+       )
+       VALUES ($1, $2, 'confirmed', $3, $4, $5, $6::timestamptz, $7::timestamptz, 'manual', $8::jsonb)
+       RETURNING booking_id`,
+      [
+        clientId,
+        location.location_id,
+        readTaskAttendees(task),
+        totalAmount,
+        paidAmount,
+        toIsoStringOrThrow(task.eventDateTime ?? '', 'task.eventDateTime'),
+        resolveTaskBookingEndDateTime(task),
+        JSON.stringify(bookingRaw)
+      ]
+    );
+
+    const bookingId = bookingResult.rows[0].booking_id;
+    const groupedProducts = resolvedSelections.reduce<Map<string, { quantity: number; unitPrice: number }>>(
+      (result, selection) => {
+        const existing = result.get(selection.productId);
+
+        if (existing) {
+          existing.quantity += selection.quantity;
+          existing.unitPrice = Math.max(existing.unitPrice, selection.unitPrice);
+          return result;
+        }
+
+        result.set(selection.productId, {
+          quantity: selection.quantity,
+          unitPrice: selection.unitPrice
+        });
+        return result;
+      },
+      new Map()
+    );
+
+    for (const [productId, value] of groupedProducts.entries()) {
+      await client.query(
+        `INSERT INTO booking_products (booking_id, product_id, quantity, unit_price)
+         VALUES ($1, $2, $3, $4)`,
+        [bookingId, productId, value.quantity, value.unitPrice]
+      );
+    }
+
+    await client.query(
+      `UPDATE tasks
+       SET connected_booking_key = $1,
+           update_log = $2::jsonb
+       WHERE id = $3`,
+      [bookingId, JSON.stringify(createTaskBookingActivityLog(task, bookingId, actor)), task.id]
+    );
+
+    await client.query('COMMIT');
+    return { bookingId };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function getBooking(bookingId: string): Promise<DashboardBookingDetail> {
   const row = await queryBookingRow(pool, bookingId);
   if (!row) {
@@ -515,6 +1272,7 @@ export async function getBooking(bookingId: string): Promise<DashboardBookingDet
 
   return {
     ...mapBookingRow(row),
+    drawerData: buildBookingDrawerData(row, products),
     products,
     sync
   };

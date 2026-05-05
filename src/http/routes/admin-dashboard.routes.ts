@@ -13,6 +13,7 @@ import {
   restoreTask,
   updateTask
 } from '../../dashboard/repository/tasks.js';
+import { createBookingFromTask, getBooking } from '../../dashboard/repository/bookings.js';
 import {
   createTaskColumn,
   deleteTaskColumn,
@@ -356,6 +357,33 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
       details: { title: task.title }
     });
     return { item: task };
+  });
+
+  app.post('/api/admin/tasks/:taskId/booking', async (request) => {
+    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { taskId } = request.params as { taskId: string };
+
+    try {
+      const { bookingId } = await createBookingFromTask(taskId, {
+        name: auth.user.displayName,
+        role: auth.user.role,
+        source: 'user'
+      });
+      const booking = await getBooking(bookingId);
+
+      await recordAdminWriteAudit({
+        request,
+        auth,
+        action: 'admin.booking.created_from_task',
+        entityType: 'booking',
+        entityId: booking.id,
+        details: { taskId }
+      });
+
+      return { item: booking };
+    } catch (error) {
+      sendError(error);
+    }
   });
 
   app.patch('/api/admin/tasks/:taskId', async (request) => {

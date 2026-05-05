@@ -69,6 +69,7 @@ function applyTestDefaults(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   normalized.REGIONDO_SECRET_KEY ??= 'test-secret-key';
   normalized.REGIONDO_PRIVATE_KEY ??= normalized.REGIONDO_SECRET_KEY;
   normalized.REGIONDO_PRODUCT_SUPPLIER_ID ??= 'supplier-1';
+  normalized.REGIONDO_CURRENCY ??= 'EUR';
   normalized.REMINDER_PROVIDER_WEBHOOK_URL ??= 'https://provider.example/webhook';
   normalized.REMINDER_PROVIDER_SECRET ??= 'test-reminder-secret';
   normalized.CRON_SECRET ??= 'test-cron-secret';
@@ -101,9 +102,15 @@ const schema = z
     REGIONDO_PRIVATE_KEY: z.string().min(1).optional(),
     REGIONDO_PRODUCT_SUPPLIER_ID: z.string().min(1),
     REGIONDO_LANGUAGE: z.string().default('de-DE'),
+    REGIONDO_CURRENCY: z.string().default('EUR'),
     REGIONDO_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(10_000),
     REGIONDO_REQUEST_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
     REGIONDO_REQUEST_RETRY_BASE_DELAY_MS: z.coerce.number().int().min(100).max(10_000).default(500),
+    REGIONDO_REQUEST_THROTTLE_MS: z.coerce.number().int().min(0).max(60_000).default(1_000),
+    REGIONDO_AVAILABILITY_RANGE_DAYS: z.coerce.number().int().min(1).max(365).default(90),
+    REGIONDO_OPTION_SLOT_LIMIT: z.coerce.number().int().min(1).max(100).default(20),
+    REGIONDO_PRODUCT_DETAIL_CONCURRENCY: z.coerce.number().int().min(1).max(10).default(1),
+    REGIONDO_VARIATION_SYNC_CONCURRENCY: z.coerce.number().int().min(1).max(10).default(1),
     REGIONDO_WEBHOOK_SECRET: z.string().optional(),
     REGIONDO_WEBHOOK_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(25).default(8),
     REGIONDO_WEBHOOK_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(25),
