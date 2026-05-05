@@ -30,7 +30,7 @@ import {
   updateLocation
 } from '../../dashboard/repository/locations.js';
 import { getDashboardSummary } from '../../dashboard/repository/summary.js';
-import { listUsers } from '../../dashboard/repository/users.js';
+import { listUsers, updateUserRole } from '../../dashboard/repository/users.js';
 import {
   DashboardNotFoundError,
   DashboardValidationError
@@ -145,6 +145,35 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   app.get('/api/admin/users', async (request) => {
     await requireAdminAuth(request as AdminFastifyRequest);
     return { items: await listUsers() };
+  });
+
+  app.patch('/api/admin/users/:userId/role', async (request) => {
+    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { userId } = request.params as { userId: string };
+    const { role } = request.body as { role: string };
+
+    const allowedRoles = ['Admin', 'Operator', 'Viewer'];
+
+    if (!allowedRoles.includes(role)) {
+      throw new HttpError(400, 'Invalid role specified.');
+    }
+
+    try {
+      const updatedUser = await updateUserRole(userId, role);
+
+      await recordAdminWriteAudit({
+        request,
+        auth,
+        action: 'admin.user.role_updated',
+        entityType: 'user',
+        entityId: userId,
+        details: { role }
+      });
+
+      return { item: updatedUser };
+    } catch (error) {
+      sendError(error);
+    }
   });
 
   app.get('/api/admin/locations', async (request) => {
