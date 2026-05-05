@@ -29,7 +29,7 @@ function parseCookieHeader(cookieHeader: string | undefined, cookieName: string)
 
 function buildCookieAttributes(maxAgeMs?: number): string[] {
   const attributes = [
-    `Path=/api/admin/auth`,
+    `Path=/api/admin`,
     'HttpOnly',
     appConfig.NODE_ENV === 'production' ? 'SameSite=None' : 'SameSite=Lax'
   ];
