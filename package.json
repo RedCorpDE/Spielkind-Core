@@ -11,7 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "test": "vitest run",
-    "migrate": "tsx src/db/migrate.ts",
+    "migrate": "node dist/db/migrate.js",
     "admin:create": "tsx src/auth/create-admin-user.ts",
     "job:regiondo-webhooks": "tsx src/scripts/job-regiondo-webhooks.ts",
     "job:sync-regiondo-catalog": "tsx src/scripts/job-sync-regiondo-catalog.ts",
