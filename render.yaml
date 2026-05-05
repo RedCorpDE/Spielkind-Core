@@ -23,6 +23,24 @@ services:
         fromDatabase:
           name: spielkind-db
           property: connectionString
+      - key: CRON_SECRET
+        sync: false
+      - key: REGIONDO_BASE_URL
+        sync: false
+      - key: REGIONDO_PUBLIC_KEY
+        sync: false
+      - key: REGIONDO_SECRET_KEY
+        sync: false
+      - key: REGIONDO_PRODUCT_SUPPLIER_ID
+        sync: false
+      - key: REMINDER_PROVIDER_WEBHOOK_URL
+        sync: false
+      - key: REMINDER_PROVIDER_SECRET
+        sync: false
+      - key: ADMIN_ACCESS_TOKEN_SECRET
+        sync: false
+      - key: DASHBOARD_ALLOWED_ORIGIN
+        sync: false
 
   # Render cron jobs (use when ENABLE_EMBEDDED_SCHEDULER=false):
   # - type: cron

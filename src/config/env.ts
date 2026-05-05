@@ -186,7 +186,7 @@ const schema = z
 const parsed = schema.safeParse(rawEnv);
 
 if (!parsed.success) {
-  console.error('Invalid environment variables:', parsed.error.flatten().fieldErrors);
+  console.error('Invalid environment variables:', parsed.error.flatten());
   process.exit(1);
 }
 
