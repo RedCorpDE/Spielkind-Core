@@ -1,4 +1,5 @@
 import { pool } from '../db/client.js';
+import { assertRoleExists, normalizeRoleName } from '../dashboard/repository/roles.js';
 import { hashPassword } from './password.js';
 import type { AdminUser } from './types.js';
 
@@ -108,6 +109,7 @@ export async function createAdminUser(input: {
   isActive: boolean;
 }): Promise<AdminUser> {
   try {
+    const normalizedRole = await assertRoleExists(input.role);
     const passwordHash = await hashPassword(input.password);
     const result = await pool.query<AdminUserRow>(
       `INSERT INTO users (
@@ -131,7 +133,7 @@ export async function createAdminUser(input: {
       [
         input.email.trim().toLowerCase(),
         input.displayName.trim(),
-        input.role.trim(),
+        normalizedRole,
         input.isActive,
         input.canAccessDashboard,
         passwordHash
@@ -162,7 +164,8 @@ export async function updateAdminUser(
 
   const nextEmail = typeof input.email === 'string' ? input.email.trim().toLowerCase() : existing.email;
   const nextDisplayName = typeof input.displayName === 'string' ? input.displayName.trim() : existing.displayName;
-  const nextRole = typeof input.role === 'string' ? input.role.trim() : existing.role;
+  const nextRole =
+    typeof input.role === 'string' ? await assertRoleExists(input.role) : normalizeRoleName(existing.role);
   const nextCanAccessDashboard =
     typeof input.canAccessDashboard === 'boolean' ? input.canAccessDashboard : existing.canAccessDashboard;
   const nextIsActive = typeof input.isActive === 'boolean' ? input.isActive : existing.isActive;

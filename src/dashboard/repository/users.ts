@@ -1,5 +1,6 @@
 import { pool } from '../../db/client.js';
 import type { DashboardUser } from '../types.js';
+import { assertRoleExists } from './roles.js';
 
 export async function listUsers(): Promise<DashboardUser[]> {
   const result = await pool.query<{ id: string; email: string; display_name: string; role: string }>(
@@ -13,12 +14,14 @@ export async function listUsers(): Promise<DashboardUser[]> {
 }
 
 export async function updateUserRole(userId: string, role: string): Promise<{ id: string; email: string; display_name: string; role: string }> {
+  const normalizedRole = await assertRoleExists(role);
+
   const result = await pool.query<{ id: string; email: string; display_name: string; role: string }>(
     `UPDATE users
      SET role = $1
      WHERE id = $2 AND is_active = true
      RETURNING id, email, display_name, role`,
-    [role, userId]
+    [normalizedRole, userId]
   );
 
   if (result.rowCount === 0) {

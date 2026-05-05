@@ -31,6 +31,7 @@ import {
 } from '../../dashboard/repository/locations.js';
 import { getDashboardSummary } from '../../dashboard/repository/summary.js';
 import { listUsers, updateUserRole } from '../../dashboard/repository/users.js';
+import { createRole, deleteRole, listRoles } from '../../dashboard/repository/roles.js';
 import {
   DashboardNotFoundError,
   DashboardValidationError
@@ -114,6 +115,14 @@ const listTasksQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(200).optional()
 });
 
+const updateUserRoleSchema = z.object({
+  role: z.string().trim().min(1)
+});
+
+const createRoleSchema = z.object({
+  name: z.string().trim().min(1)
+});
+
 function sendError(error: unknown): never {
   if (error instanceof DashboardNotFoundError) {
     throw new HttpError(404, error.message);
@@ -127,14 +136,16 @@ function sendError(error: unknown): never {
 export async function registerAdminDashboardRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/admin/dashboard/bootstrap', async (request) => {
     const auth = await requireAdminAuth(request as AdminFastifyRequest);
-    const [users, locations, taskColumns, summary] = await Promise.all([
+    const [users, roles, locations, taskColumns, summary] = await Promise.all([
       listUsers(),
+      listRoles(),
       listLocations(),
       listTaskColumns(),
       getDashboardSummary()
     ]);
     return {
       me: { id: auth.user.id, email: auth.user.email, name: auth.user.displayName, role: auth.user.role },
+      roles,
       users,
       locations,
       taskColumns,
@@ -147,19 +158,68 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
     return { items: await listUsers() };
   });
 
-  app.patch('/api/admin/users/:userId/role', async (request) => {
+  app.get('/api/admin/roles', async (request) => {
+    await requireAdminAuth(request as AdminFastifyRequest);
+    return { items: await listRoles() };
+  });
+
+  app.post('/api/admin/roles', async (request) => {
     const auth = await requireAdminAuth(request as AdminFastifyRequest);
-    const { userId } = request.params as { userId: string };
-    const { role } = request.body as { role: string };
-
-    const allowedRoles = ['Admin', 'Operator', 'Viewer'];
-
-    if (!allowedRoles.includes(role)) {
-      throw new HttpError(400, 'Invalid role specified.');
+    const parsed = createRoleSchema.safeParse(request.body);
+    if (!parsed.success) {
+      throw new ValidationHttpError('Invalid role payload.');
     }
 
     try {
-      const updatedUser = await updateUserRole(userId, role);
+      const role = await createRole(parsed.data.name);
+
+      await recordAdminWriteAudit({
+        request,
+        auth,
+        action: 'admin.role.created',
+        entityType: 'role',
+        entityId: role.name,
+        details: { role: role.name }
+      });
+
+      return { item: role };
+    } catch (error) {
+      sendError(error);
+    }
+  });
+
+  app.delete('/api/admin/roles/:roleName', async (request) => {
+    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { roleName } = request.params as { roleName: string };
+
+    try {
+      await deleteRole(roleName);
+
+      await recordAdminWriteAudit({
+        request,
+        auth,
+        action: 'admin.role.deleted',
+        entityType: 'role',
+        entityId: roleName,
+        details: { role: roleName }
+      });
+
+      return { deleted: true };
+    } catch (error) {
+      sendError(error);
+    }
+  });
+
+  app.patch('/api/admin/users/:userId/role', async (request) => {
+    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { userId } = request.params as { userId: string };
+    const parsed = updateUserRoleSchema.safeParse(request.body);
+    if (!parsed.success) {
+      throw new ValidationHttpError('Invalid user role payload.');
+    }
+
+    try {
+      const updatedUser = await updateUserRole(userId, parsed.data.role);
 
       await recordAdminWriteAudit({
         request,
@@ -167,7 +227,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
         action: 'admin.user.role_updated',
         entityType: 'user',
         entityId: userId,
-        details: { role }
+        details: { role: updatedUser.role }
       });
 
       return { item: updatedUser };

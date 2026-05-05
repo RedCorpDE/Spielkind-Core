@@ -18,12 +18,12 @@ async function main(): Promise<void> {
   const email = readArg('email');
   const password = readArg('password');
   const displayName = readArg('name');
-  const role = readArg('role') ?? 'admin';
+  const role = readArg('role') ?? 'Admin';
   const canAccessDashboard = (readArg('dashboard-access') ?? 'true').toLowerCase() !== 'false';
 
   if (!email || !password || !displayName) {
     throw new Error(
-      'Usage: npm run admin:create -- --email admin@example.com --name "Admin User" --password "long-secret-password" [--role admin] [--dashboard-access true]'
+      'Usage: npm run admin:create -- --email admin@example.com --name "Admin User" --password "long-secret-password" [--role Admin] [--dashboard-access true]'
     );
   }
 
@@ -54,4 +54,3 @@ main()
   .finally(async () => {
     await pool.end();
   });
-

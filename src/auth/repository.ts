@@ -1,4 +1,5 @@
 import { pool } from '../db/client.js';
+import { assertRoleExists } from '../dashboard/repository/roles.js';
 import type { AdminAuditEvent, AdminUser, AuthenticatedAdmin } from './types.js';
 import { hashRefreshToken } from './tokens.js';
 
@@ -256,6 +257,7 @@ export async function upsertAdminUser(input: {
   passwordHash: string;
   canAccessDashboard: boolean;
 }): Promise<AdminUser> {
+  const normalizedRole = await assertRoleExists(input.role);
   const result = await pool.query<AdminUserRow>(
     `INSERT INTO users (
        email,
@@ -284,7 +286,7 @@ export async function upsertAdminUser(input: {
     [
       input.email.trim().toLowerCase(),
       input.displayName.trim(),
-      input.role.trim(),
+      normalizedRole,
       input.passwordHash,
       input.canAccessDashboard
     ]
@@ -292,4 +294,3 @@ export async function upsertAdminUser(input: {
 
   return mapAdminUser(result.rows[0]);
 }
-

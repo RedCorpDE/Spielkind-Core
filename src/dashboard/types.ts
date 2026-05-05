@@ -5,6 +5,11 @@ export interface DashboardUser {
   role: string;
 }
 
+export interface DashboardRole {
+  name: string;
+  isSystem: boolean;
+}
+
 export interface DashboardAdminUser {
   id: string;
   email: string;
@@ -376,6 +381,7 @@ export interface DashboardSummary {
 
 export interface DashboardBootstrapResponse {
   me: DashboardUser;
+  roles: DashboardRole[];
   users: DashboardUser[];
   locations: DashboardLocation[];
   taskColumns: DashboardTaskColumn[];
