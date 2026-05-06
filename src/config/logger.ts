@@ -10,7 +10,6 @@ export const logger = pino({
       'headers.x-api-hash',
       'headers.x-core-signature',
       'config.REGIONDO_SECRET_KEY',
-      'config.REGIONDO_PRIVATE_KEY',
       'config.REMINDER_PROVIDER_SECRET',
       'config.CRON_SECRET'
     ],

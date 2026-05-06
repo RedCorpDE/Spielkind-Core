@@ -94,7 +94,20 @@ System:
 - `GET /version`
 
 Regiondo webhook:
-- `POST /webhooks/regiondo`
+- `GET /webhooks/regiondo/bookings`
+- `POST /webhooks/regiondo/bookings`
+
+Regiondo booking webhook setup:
+- Webhook name: `Spielkind Core Bookings`
+- Payload URL: `https://spielkind-core.onrender.com/webhooks/regiondo/bookings`
+- Header key: use `WEBHOOK_AUTH_HEADER_NAME` from Render, for example `x-webhook-token`
+- Header value: use `WEBHOOK_AUTH_HEADER_VALUE` from Render
+- Optional signature secret: set `REGIONDO_WEBHOOK_SECRET` only if Regiondo sends `x-regiondo-signature`
+
+Accepted webhook behavior:
+- The POST endpoint stores each incoming booking event in `regiondo_webhook_events`
+- Core immediately triggers inbox processing after successful inserts
+- The embedded scheduler continues polling as a safety net via `REGIONDO_WEBHOOK_CRON`
 
 Internal jobs:
 - `POST /internal/jobs/process-regiondo-webhooks`

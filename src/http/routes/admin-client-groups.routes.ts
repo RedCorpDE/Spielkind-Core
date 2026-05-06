@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { recordAdminWriteAudit } from '../admin-audit.js';
-import { type AdminFastifyRequest, requireAdminAuth } from '../admin.js';
+import { type AdminFastifyRequest } from '../admin.js';
+import { requireAdminPermission } from '../access-control.js';
 import { HttpError, ValidationHttpError } from '../errors.js';
 import {
   attachClientGroupMember,
@@ -19,12 +20,12 @@ const groupSchema = z.object({
 
 export async function registerAdminClientGroupRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/admin/client-groups', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'client_groups', 'view');
     return { ok: true, items: await listAdminClientGroups() };
   });
 
   app.post('/api/admin/client-groups', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'client_groups', 'create');
     const parsed = groupSchema.safeParse(request.body);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid client group payload.');
@@ -44,7 +45,7 @@ export async function registerAdminClientGroupRoutes(app: FastifyInstance): Prom
   });
 
   app.patch('/api/admin/client-groups/:groupId', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'client_groups', 'update');
     const parsed = groupSchema.safeParse(request.body);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid client group payload.');
@@ -69,7 +70,7 @@ export async function registerAdminClientGroupRoutes(app: FastifyInstance): Prom
   });
 
   app.delete('/api/admin/client-groups/:groupId', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'client_groups', 'delete');
     const { groupId } = request.params as { groupId: string };
     const existing = await getAdminClientGroup(groupId);
     if (!existing) {
@@ -90,7 +91,7 @@ export async function registerAdminClientGroupRoutes(app: FastifyInstance): Prom
   });
 
   app.post('/api/admin/client-groups/:groupId/members/:clientId', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'client_groups', 'manage');
     const { groupId, clientId } = request.params as { groupId: string; clientId: string };
     await attachClientGroupMember(groupId, clientId);
     await recordAdminWriteAudit({
@@ -106,7 +107,7 @@ export async function registerAdminClientGroupRoutes(app: FastifyInstance): Prom
   });
 
   app.delete('/api/admin/client-groups/:groupId/members/:clientId', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'client_groups', 'manage');
     const { groupId, clientId } = request.params as { groupId: string; clientId: string };
     const deleted = await detachClientGroupMember(groupId, clientId);
     if (!deleted) {

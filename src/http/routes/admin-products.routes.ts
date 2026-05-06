@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { HttpError, ValidationHttpError } from '../errors.js';
-import { type AdminFastifyRequest, requireAdminAuth } from '../admin.js';
+import { type AdminFastifyRequest } from '../admin.js';
+import { requireAdminPermission } from '../access-control.js';
 import { recordAdminWriteAudit } from '../admin-audit.js';
 import {
   deleteProductResourceMapping,
@@ -54,12 +55,12 @@ function getRegiondoSyncStatusCode(error: RegiondoApiError): number {
 
 export async function registerAdminProductRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/admin/products', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'products', 'view');
     return { ok: true, items: await listAdminProducts() };
   });
 
   app.get('/api/admin/products/:productId', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'products', 'view');
     const { productId } = request.params as { productId: string };
     const product = await getAdminProduct(productId);
     if (!product) {
@@ -70,7 +71,7 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
   });
 
   app.patch('/api/admin/products/:productId', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'update');
     const parsed = updateProductSchema.safeParse(request.body);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid product update payload.');
@@ -95,7 +96,7 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
   });
 
   app.post('/api/admin/products/:productId/resources', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
     const parsed = productResourceSchema.safeParse(request.body);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid product resource mapping payload.');
@@ -126,7 +127,7 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
   });
 
   app.delete('/api/admin/products/:productId/resources/:resourceId', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
     const { productId, resourceId } = request.params as { productId: string; resourceId: string };
     const deleted = await deleteProductResourceMapping(productId, resourceId);
     if (!deleted) {
@@ -146,12 +147,12 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
   });
 
   app.get('/api/admin/regiondo/products', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'products', 'view');
     return { ok: true, items: await listRegiondoCatalogProducts() };
   });
 
   app.post('/api/admin/regiondo/sync-products', async (request, reply) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'regiondo', 'manage');
 
     try {
       const result = await runRegiondoCatalogSyncJob();

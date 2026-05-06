@@ -13,7 +13,7 @@ vi.mock('../../src/db/client.js', () => ({
 
 import { getDashboardSummary } from '../../src/dashboard/repository/summary.js';
 import { mapTaskRow, resolveTaskColumnReorderOrder } from '../../src/dashboard/repository/core.js';
-import { assertRoleExists, listRoles } from '../../src/dashboard/repository/roles.js';
+import { assertRoleExists, getRoleByIdentifier, listRoles } from '../../src/dashboard/repository/roles.js';
 import { listTasks } from '../../src/dashboard/repository/tasks.js';
 
 describe('dashboard repository queries', () => {
@@ -134,32 +134,40 @@ describe('dashboard repository queries', () => {
     ).toThrow(/orderedColumnIds must include every task column exactly once/i);
   });
 
-  it('falls back to legacy role discovery when the user_roles table is not migrated yet', async () => {
-    queryMock
-      .mockRejectedValueOnce({ code: '42P01' })
-      .mockResolvedValueOnce({
-        rows: [{ name: 'admin' }, { name: 'Custom Role' }, { name: ' operations lead ' }]
-      });
+  it('lists roles from the current role table with stable keys', async () => {
+    queryMock.mockResolvedValueOnce({
+      rows: [
+        { key: 'admin', name: 'Admin', description: null, is_system: true },
+        { key: 'operations', name: 'Operations', description: 'Operations team', is_system: false }
+      ]
+    });
 
-    const roles = await listRoles();
-
-    expect(roles).toEqual(
-      expect.arrayContaining([
-        { name: 'Admin', isSystem: true },
-        { name: 'Custom Role', isSystem: false },
-        { name: 'Operations Lead', isSystem: false }
-      ])
-    );
-    expect(roles.filter((role) => role.name === 'Operations Lead')).toHaveLength(1);
+    await expect(listRoles()).resolves.toEqual([
+      { key: 'admin', name: 'Admin', description: null, isSystem: true },
+      { key: 'operations', name: 'Operations', description: 'Operations team', isSystem: false }
+    ]);
   });
 
-  it('resolves canonical role names from legacy user data when the user_roles table is missing', async () => {
-    queryMock
-      .mockRejectedValueOnce({ code: '42P01' })
-      .mockResolvedValueOnce({
-        rows: [{ name: 'admin' }]
-      });
+  it('resolves canonical role names from role keys and names', async () => {
+    queryMock.mockResolvedValueOnce({
+      rowCount: 1,
+      rows: [{ key: 'admin', name: 'Admin', description: null, is_system: true }]
+    });
 
-    await expect(assertRoleExists(' admin ')).resolves.toBe('Admin');
+    await expect(assertRoleExists('admin')).resolves.toBe('Admin');
+  });
+
+  it('finds roles by either key or display name', async () => {
+    queryMock.mockResolvedValueOnce({
+      rowCount: 1,
+      rows: [{ key: 'operations', name: 'Operations', description: null, is_system: false }]
+    });
+
+    await expect(getRoleByIdentifier('Operations')).resolves.toEqual({
+      key: 'operations',
+      name: 'Operations',
+      description: null,
+      isSystem: false
+    });
   });
 });

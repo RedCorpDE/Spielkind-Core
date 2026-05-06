@@ -3,47 +3,30 @@ import type { DashboardRole } from '../types.js';
 import { DashboardNotFoundError, DashboardValidationError } from './core.js';
 
 interface DashboardRoleRow {
+  key: string;
   name: string;
+  description: string | null;
   is_system: boolean;
 }
-
-interface LegacyRoleRow {
-  name: string;
-}
-
-const DEFAULT_ROLES: DashboardRole[] = [
-  { name: 'Admin', isSystem: true },
-  { name: 'Operations', isSystem: false },
-  { name: 'Operations Lead', isSystem: false },
-  { name: 'Program Manager', isSystem: false },
-  { name: 'Finance Coordinator', isSystem: false },
-  { name: 'People Operations', isSystem: false }
-];
 
 const USER_ROLES_MIGRATION_REQUIRED_MESSAGE =
   'Role management requires the latest database migration. Run migrations and try again.';
 
 function mapDashboardRole(row: DashboardRoleRow): DashboardRole {
   return {
+    key: row.key,
+    description: row.description,
     isSystem: row.is_system,
     name: row.name
   };
-}
-
-function sortRoles(left: DashboardRole, right: DashboardRole): number {
-  if (left.isSystem !== right.isSystem) {
-    return left.isSystem ? -1 : 1;
-  }
-
-  return left.name.localeCompare(right.name, undefined, { sensitivity: 'base' });
 }
 
 function isDatabaseError(error: unknown): error is { code?: string } {
   return typeof error === 'object' && error !== null;
 }
 
-function isMissingUserRolesTableError(error: unknown): boolean {
-  return isDatabaseError(error) && error.code === '42P01';
+function isMissingRoleManagementSchemaError(error: unknown): boolean {
+  return isDatabaseError(error) && (error.code === '42P01' || error.code === '42703');
 }
 
 export function normalizeRoleName(role: string): string {
@@ -52,51 +35,67 @@ export function normalizeRoleName(role: string): string {
     .replace(/\s+/g, ' ');
 }
 
-function mergeLegacyRoles(rows: LegacyRoleRow[]): DashboardRole[] {
-  const rolesByKey = new Map<string, DashboardRole>();
-
-  for (const role of DEFAULT_ROLES) {
-    rolesByKey.set(role.name.toLowerCase(), role);
+function normalizeRoleDescription(description: string | null | undefined): string | null {
+  if (typeof description !== 'string') {
+    return null;
   }
 
-  for (const row of rows) {
-    const normalizedRole = normalizeRoleName(row.name);
-    if (!normalizedRole) {
-      continue;
-    }
-
-    const key = normalizedRole.toLowerCase();
-    if (!rolesByKey.has(key)) {
-      rolesByKey.set(key, { name: normalizedRole, isSystem: false });
-    }
-  }
-
-  return [...rolesByKey.values()].sort(sortRoles);
+  const normalized = description.trim();
+  return normalized ? normalized : null;
 }
 
-async function listLegacyRoles(): Promise<DashboardRole[]> {
-  const result = await pool.query<LegacyRoleRow>(
-    `SELECT DISTINCT btrim(role) AS name
-     FROM users
-     WHERE role IS NOT NULL
-       AND btrim(role) <> ''`
-  );
+function createRoleKeySource(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
 
-  return mergeLegacyRoles(result.rows);
+function createRoleKey(name: string): string {
+  const key = createRoleKeySource(name);
+  return key || 'role';
 }
 
 export async function listRoles(): Promise<DashboardRole[]> {
   try {
     const result = await pool.query<DashboardRoleRow>(
-      `SELECT name, is_system
+      `SELECT key, name, description, is_system
        FROM user_roles
        ORDER BY is_system DESC, name ASC`
     );
 
     return result.rows.map(mapDashboardRole);
   } catch (error) {
-    if (isMissingUserRolesTableError(error)) {
-      return listLegacyRoles();
+    if (isMissingRoleManagementSchemaError(error)) {
+      throw new DashboardValidationError(USER_ROLES_MIGRATION_REQUIRED_MESSAGE);
+    }
+
+    throw error;
+  }
+}
+
+export async function getRoleByIdentifier(roleIdentifier: string): Promise<DashboardRole | null> {
+  const normalizedRoleIdentifier = roleIdentifier.trim();
+
+  if (!normalizedRoleIdentifier) {
+    return null;
+  }
+
+  try {
+    const result = await pool.query<DashboardRoleRow>(
+      `SELECT key, name, description, is_system
+       FROM user_roles
+       WHERE key = $1
+          OR name = $1
+       LIMIT 1`,
+      [normalizedRoleIdentifier]
+    );
+
+    return result.rowCount ? mapDashboardRole(result.rows[0]) : null;
+  } catch (error) {
+    if (isMissingRoleManagementSchemaError(error)) {
+      throw new DashboardValidationError(USER_ROLES_MIGRATION_REQUIRED_MESSAGE);
     }
 
     throw error;
@@ -104,56 +103,63 @@ export async function listRoles(): Promise<DashboardRole[]> {
 }
 
 export async function assertRoleExists(role: string): Promise<string> {
-  const normalizedRole = normalizeRoleName(role);
-
-  if (!normalizedRole) {
+  if (!role.trim()) {
     throw new DashboardValidationError('Role name cannot be empty.');
   }
 
-  try {
-    const result = await pool.query<{ name: string }>(
-      `SELECT name
-       FROM user_roles
-       WHERE name = $1
-       LIMIT 1`,
-      [normalizedRole]
-    );
+  const roleRecord = await getRoleByIdentifier(role);
 
-    if (!result.rowCount) {
-      throw new DashboardValidationError('Invalid role specified.');
-    }
-
-    return result.rows[0].name;
-  } catch (error) {
-    if (isMissingUserRolesTableError(error)) {
-      const legacyRoles = await listLegacyRoles();
-      const matchingRole = legacyRoles.find((candidate) => candidate.name.toLowerCase() === normalizedRole.toLowerCase());
-
-      if (!matchingRole) {
-        throw new DashboardValidationError('Invalid role specified.');
-      }
-
-      return matchingRole.name;
-    }
-
-    throw error;
+  if (!roleRecord) {
+    throw new DashboardValidationError('Invalid role specified.');
   }
+
+  return roleRecord.name;
 }
 
-export async function createRole(role: string): Promise<DashboardRole> {
-  const normalizedRole = normalizeRoleName(role);
+async function generateUniqueRoleKey(roleName: string): Promise<string> {
+  const baseKey = createRoleKey(roleName);
+  const result = await pool.query<{ key: string }>(
+    `SELECT key
+     FROM user_roles
+     WHERE key = $1
+        OR key LIKE $2`,
+    [baseKey, `${baseKey}_%`]
+  );
+  const existingKeys = new Set(result.rows.map((row) => row.key));
+
+  if (!existingKeys.has(baseKey)) {
+    return baseKey;
+  }
+
+  let suffix = 2;
+  let nextKey = `${baseKey}_${suffix}`;
+
+  while (existingKeys.has(nextKey)) {
+    suffix += 1;
+    nextKey = `${baseKey}_${suffix}`;
+  }
+
+  return nextKey;
+}
+
+export async function createRole(input: {
+  name: string;
+  description?: string | null;
+}): Promise<DashboardRole> {
+  const normalizedRole = normalizeRoleName(input.name);
 
   if (!normalizedRole) {
     throw new DashboardValidationError('Role name cannot be empty.');
   }
 
   try {
+    const nextKey = await generateUniqueRoleKey(normalizedRole);
     const result = await pool.query<DashboardRoleRow>(
-      `INSERT INTO user_roles (name)
-       VALUES ($1)
+      `INSERT INTO user_roles (key, name, description)
+       VALUES ($1, $2, $3)
        ON CONFLICT (name) DO NOTHING
-       RETURNING name, is_system`,
-      [normalizedRole]
+       RETURNING key, name, description, is_system`,
+      [nextKey, normalizedRole, normalizeRoleDescription(input.description)]
     );
 
     if (!result.rowCount) {
@@ -162,7 +168,7 @@ export async function createRole(role: string): Promise<DashboardRole> {
 
     return mapDashboardRole(result.rows[0]);
   } catch (error) {
-    if (isMissingUserRolesTableError(error)) {
+    if (isMissingRoleManagementSchemaError(error)) {
       throw new DashboardValidationError(USER_ROLES_MIGRATION_REQUIRED_MESSAGE);
     }
 
@@ -170,27 +176,97 @@ export async function createRole(role: string): Promise<DashboardRole> {
   }
 }
 
-export async function deleteRole(role: string): Promise<void> {
-  const normalizedRole = normalizeRoleName(role);
+export async function updateRole(
+  roleIdentifier: string,
+  input: {
+    name?: string;
+    description?: string | null;
+  }
+): Promise<DashboardRole> {
+  if (!roleIdentifier.trim()) {
+    throw new DashboardValidationError('Role name cannot be empty.');
+  }
 
-  if (!normalizedRole) {
+  const existingRole = await getRoleByIdentifier(roleIdentifier);
+
+  if (!existingRole) {
+    throw new DashboardNotFoundError('Role not found.');
+  }
+
+  const nextName = input.name !== undefined ? normalizeRoleName(input.name) : existingRole.name;
+  const nextDescription =
+    input.description !== undefined ? normalizeRoleDescription(input.description) : existingRole.description;
+
+  if (!nextName) {
+    throw new DashboardValidationError('Role name cannot be empty.');
+  }
+
+  if (existingRole.isSystem && nextName !== existingRole.name) {
+    throw new DashboardValidationError('System roles cannot be renamed.');
+  }
+
+  const client = await pool.connect();
+
+  try {
+    try {
+      await client.query('BEGIN');
+      const result = await client.query<DashboardRoleRow>(
+        `UPDATE user_roles
+         SET
+           name = $2,
+           description = $3
+         WHERE key = $1
+         RETURNING key, name, description, is_system`,
+        [existingRole.key, nextName, nextDescription]
+      );
+
+      if (!result.rowCount) {
+        throw new DashboardNotFoundError('Role not found.');
+      }
+
+      if (existingRole.name !== nextName) {
+        await client.query(
+          `UPDATE users
+           SET role = $1
+           WHERE role = $2`,
+          [nextName, existingRole.name]
+        );
+      }
+
+      await client.query('COMMIT');
+      return mapDashboardRole(result.rows[0]);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    if (isMissingRoleManagementSchemaError(error)) {
+      throw new DashboardValidationError(USER_ROLES_MIGRATION_REQUIRED_MESSAGE);
+    }
+
+    if (isDatabaseError(error) && error.code === '23505') {
+      throw new DashboardValidationError('This role already exists.');
+    }
+
+    throw error;
+  }
+}
+
+export async function deleteRole(roleIdentifier: string): Promise<void> {
+  if (!roleIdentifier.trim()) {
     throw new DashboardValidationError('Role name cannot be empty.');
   }
 
   try {
-    const existingRole = await pool.query<DashboardRoleRow>(
-      `SELECT name, is_system
-       FROM user_roles
-       WHERE name = $1
-       LIMIT 1`,
-      [normalizedRole]
-    );
+    const existingRole = await getRoleByIdentifier(roleIdentifier);
 
-    if (!existingRole.rowCount) {
+    if (!existingRole) {
       throw new DashboardNotFoundError('Role not found.');
     }
 
-    if (existingRole.rows[0].is_system) {
+    if (existingRole.isSystem) {
       throw new DashboardValidationError('System roles cannot be removed.');
     }
 
@@ -198,7 +274,7 @@ export async function deleteRole(role: string): Promise<void> {
       `SELECT COUNT(*)::text AS count
        FROM users
        WHERE role = $1`,
-      [normalizedRole]
+      [existingRole.name]
     );
 
     if (Number(assignedUsers.rows[0]?.count ?? 0) > 0) {
@@ -207,11 +283,11 @@ export async function deleteRole(role: string): Promise<void> {
 
     await pool.query(
       `DELETE FROM user_roles
-       WHERE name = $1`,
-      [normalizedRole]
+       WHERE key = $1`,
+      [existingRole.key]
     );
   } catch (error) {
-    if (isMissingUserRolesTableError(error)) {
+    if (isMissingRoleManagementSchemaError(error)) {
       throw new DashboardValidationError(USER_ROLES_MIGRATION_REQUIRED_MESSAGE);
     }
 

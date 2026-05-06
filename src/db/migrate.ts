@@ -33,7 +33,6 @@ function hashSql(sql: string): string {
 
 async function runMigrations(): Promise<void> {
   const baseDir = path.resolve(__dirname, '../../');
-  const legacyDir = path.join(baseDir, 'old');
   const extraDir = path.join(baseDir, 'db/migrations');
 
   const readSqlFiles = async (dir: string): Promise<string[]> => {
@@ -68,9 +67,8 @@ async function runMigrations(): Promise<void> {
     return migrations;
   };
 
-  const legacyFiles = await trackedFiles(legacyDir);
   const extraFiles = await trackedFiles(extraDir);
-  const migrations = [...legacyFiles, ...extraFiles];
+  const migrations = extraFiles;
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (

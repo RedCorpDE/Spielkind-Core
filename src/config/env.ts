@@ -41,18 +41,8 @@ function resolvePackageVersion(): string {
   }
 }
 
-function applyLegacyEnvAliases(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const normalized = { ...env };
-
-  normalized.REGIONDO_SECRET_KEY ??= normalized.REGIONDO_PRIVATE_KEY;
-  normalized.REGIONDO_PRIVATE_KEY ??= normalized.REGIONDO_SECRET_KEY;
-  normalized.REGIONDO_CATALOG_SYNC_CRON ??= normalized.PRODUCT_SYNC_CRON;
-
-  return normalized;
-}
-
 function applyTestDefaults(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const normalized = applyLegacyEnvAliases(env);
+  const normalized = { ...env };
   const nodeEnv = normalized.NODE_ENV ?? 'development';
 
   normalized.NODE_ENV = nodeEnv;
@@ -67,7 +57,6 @@ function applyTestDefaults(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   normalized.REGIONDO_BASE_URL ??= 'https://api.regiondo.example/v1';
   normalized.REGIONDO_PUBLIC_KEY ??= 'test-public-key';
   normalized.REGIONDO_SECRET_KEY ??= 'test-secret-key';
-  normalized.REGIONDO_PRIVATE_KEY ??= normalized.REGIONDO_SECRET_KEY;
   normalized.REGIONDO_PRODUCT_SUPPLIER_ID ??= 'supplier-1';
   normalized.REGIONDO_CURRENCY ??= 'EUR';
   normalized.REMINDER_PROVIDER_WEBHOOK_URL ??= 'https://provider.example/webhook';
@@ -99,7 +88,6 @@ const schema = z
     REGIONDO_BASE_URL: z.string().url(),
     REGIONDO_PUBLIC_KEY: z.string().min(1),
     REGIONDO_SECRET_KEY: z.string().min(1),
-    REGIONDO_PRIVATE_KEY: z.string().min(1).optional(),
     REGIONDO_PRODUCT_SUPPLIER_ID: z.string().min(1),
     REGIONDO_LANGUAGE: z.string().default('de-DE'),
     REGIONDO_CURRENCY: z.string().default('EUR'),
@@ -117,7 +105,7 @@ const schema = z
     REGIONDO_WEBHOOK_WORKER_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(25),
     REGIONDO_WEBHOOK_WORKER_INTERVAL_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
     REGIONDO_WEBHOOK_CRON: z.string().default('*/1 * * * *'),
-    WEBHOOK_BOOKINGS_PATH: z.string().default('/webhooks/regiondo'),
+    WEBHOOK_BOOKINGS_PATH: z.string().default('/webhooks/regiondo/bookings'),
     WEBHOOK_AUTH_HEADER_NAME: z.string().optional(),
     WEBHOOK_AUTH_HEADER_VALUE: z.string().optional(),
     WEBHOOK_BODY_LIMIT_BYTES: z.coerce.number().int().min(1_024).max(1_048_576).default(262_144),
@@ -191,8 +179,7 @@ if (!parsed.success) {
 }
 
 export const appConfig = {
-  ...parsed.data,
-  REGIONDO_PRIVATE_KEY: parsed.data.REGIONDO_PRIVATE_KEY ?? parsed.data.REGIONDO_SECRET_KEY
+  ...parsed.data
 } as const;
 
 export type AppConfig = typeof appConfig;

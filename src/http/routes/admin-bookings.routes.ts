@@ -2,7 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { getBooking, listBookings, updateBooking } from '../../dashboard/repository/bookings.js';
 import { recordAdminWriteAudit } from '../admin-audit.js';
-import { type AdminFastifyRequest, requireAdminAuth } from '../admin.js';
+import { type AdminFastifyRequest } from '../admin.js';
+import { requireAdminPermission } from '../access-control.js';
 import { HttpError, ValidationHttpError } from '../errors.js';
 import { cancelBookingLocally } from '../../modules/bookings/admin-booking.repository.js';
 import { rebuildConsumptionsForBooking } from '../../modules/resources/consumption.service.js';
@@ -39,7 +40,7 @@ const updateBookingMetadataSchema = z
 
 export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/admin/bookings', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'view');
     const parsed = listBookingsQuerySchema.safeParse(request.query);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid bookings query.');
@@ -49,13 +50,13 @@ export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<
   });
 
   app.get('/api/admin/bookings/:bookingId', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'view');
     const { bookingId } = request.params as { bookingId: string };
     return { ok: true, item: await getBooking(bookingId) };
   });
 
   app.patch('/api/admin/bookings/:bookingId/admin-metadata', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'update');
     const parsed = updateBookingMetadataSchema.safeParse(request.body);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid booking metadata payload.');
@@ -76,7 +77,7 @@ export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<
   });
 
   app.post('/api/admin/bookings/:bookingId/rebuild-consumptions', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'manage');
     const { bookingId } = request.params as { bookingId: string };
     const booking = await getBooking(bookingId);
     const result = await rebuildConsumptionsForBooking(bookingId);
@@ -94,7 +95,7 @@ export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<
   });
 
   app.post('/api/admin/bookings/:bookingId/cancel-local', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'manage');
     const { bookingId } = request.params as { bookingId: string };
     const canceled = await cancelBookingLocally(bookingId);
     if (!canceled) {

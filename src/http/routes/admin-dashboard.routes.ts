@@ -1,6 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { hasRoutePermission } from '../../access-control/model.js';
+import { listRoleMatrix, replaceRolePermissions } from '../../access-control/repository.js';
 import { requireAdminAuth, type AdminFastifyRequest } from '../admin.js';
+import { requireAdminPermission, getAdminAccessContext } from '../access-control.js';
 import { HttpError, ValidationHttpError } from '../errors.js';
 import { recordAdminWriteAudit } from '../admin-audit.js';
 import {
@@ -31,7 +34,7 @@ import {
 } from '../../dashboard/repository/locations.js';
 import { getDashboardSummary } from '../../dashboard/repository/summary.js';
 import { listUsers, updateUserRole } from '../../dashboard/repository/users.js';
-import { createRole, deleteRole, listRoles } from '../../dashboard/repository/roles.js';
+import { createRole, deleteRole, listRoles, updateRole } from '../../dashboard/repository/roles.js';
 import {
   DashboardNotFoundError,
   DashboardValidationError
@@ -120,7 +123,27 @@ const updateUserRoleSchema = z.object({
 });
 
 const createRoleSchema = z.object({
-  name: z.string().trim().min(1)
+  name: z.string().trim().min(1),
+  description: z.string().trim().nullable().optional()
+});
+
+const updateRoleSchema = z
+  .object({
+    name: z.string().trim().min(1).optional(),
+    description: z.string().trim().nullable().optional()
+  })
+  .refine((value) => Object.keys(value).length > 0, {
+    message: 'At least one role field must be provided.'
+  });
+
+const replaceRolePermissionsSchema = z.object({
+  permissions: z.array(
+    z.object({
+      resource: z.string().trim().min(1),
+      action: z.string().trim().min(1),
+      scope: z.enum(['none', 'own', 'location', 'all'])
+    })
+  )
 });
 
 function sendError(error: unknown): never {
@@ -133,18 +156,104 @@ function sendError(error: unknown): never {
   throw error;
 }
 
+const EMPTY_SUMMARY = {
+  totalTasks: 0,
+  overdueTasks: 0,
+  totalBookings: 0,
+  pendingBookings: 0,
+  tasksByColumn: [],
+  bookingsByStatus: []
+};
+
+async function loadBootstrapSection<T>(input: {
+  enabled: boolean;
+  fallback: T;
+  loader: () => Promise<T>;
+  requestId: string;
+  requestLog: { error: (payload: Record<string, unknown>, message: string) => void };
+  section: string;
+}): Promise<T> {
+  if (!input.enabled) {
+    return input.fallback;
+  }
+
+  try {
+    return await input.loader();
+  } catch (error) {
+    input.requestLog.error(
+      {
+        err: error,
+        requestId: input.requestId,
+        section: input.section
+      },
+      'Admin dashboard bootstrap section failed'
+    );
+    return input.fallback;
+  }
+}
+
 export async function registerAdminDashboardRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/admin/dashboard/bootstrap', async (request) => {
     const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const accessContext = await getAdminAccessContext(request as AdminFastifyRequest);
+
+    const canViewUsers = hasRoutePermission(accessContext.permissions, 'users', 'view');
+    const canViewRoles = hasRoutePermission(accessContext.permissions, 'roles', 'view');
+    const canViewLocations =
+      hasRoutePermission(accessContext.permissions, 'locations', 'view') ||
+      hasRoutePermission(accessContext.permissions, 'bookings', 'view') ||
+      hasRoutePermission(accessContext.permissions, 'messages', 'view');
+    const canViewTaskColumns =
+      hasRoutePermission(accessContext.permissions, 'task_columns', 'view') ||
+      hasRoutePermission(accessContext.permissions, 'tasks', 'view');
+    const canViewDashboard = hasRoutePermission(accessContext.permissions, 'dashboard', 'view');
+
     const [users, roles, locations, taskColumns, summary] = await Promise.all([
-      listUsers(),
-      listRoles(),
-      listLocations(),
-      listTaskColumns(),
-      getDashboardSummary()
+      loadBootstrapSection({
+        enabled: canViewUsers,
+        fallback: [],
+        loader: () => listUsers(),
+        requestId: request.id,
+        requestLog: request.log,
+        section: 'users'
+      }),
+      loadBootstrapSection({
+        enabled: canViewRoles,
+        fallback: [],
+        loader: () => listRoles(),
+        requestId: request.id,
+        requestLog: request.log,
+        section: 'roles'
+      }),
+      loadBootstrapSection({
+        enabled: canViewLocations,
+        fallback: [],
+        loader: () => listLocations(),
+        requestId: request.id,
+        requestLog: request.log,
+        section: 'locations'
+      }),
+      loadBootstrapSection({
+        enabled: canViewTaskColumns,
+        fallback: [],
+        loader: () => listTaskColumns(),
+        requestId: request.id,
+        requestLog: request.log,
+        section: 'taskColumns'
+      }),
+      loadBootstrapSection({
+        enabled: canViewDashboard,
+        fallback: EMPTY_SUMMARY,
+        loader: () => getDashboardSummary(),
+        requestId: request.id,
+        requestLog: request.log,
+        section: 'summary'
+      })
     ]);
+
     return {
       me: { id: auth.user.id, email: auth.user.email, name: auth.user.displayName, role: auth.user.role },
+      permissions: accessContext.permissions,
       roles,
       users,
       locations,
@@ -154,24 +263,24 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.get('/api/admin/users', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'users', 'view');
     return { items: await listUsers() };
   });
 
   app.get('/api/admin/roles', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'roles', 'view');
     return { items: await listRoles() };
   });
 
   app.post('/api/admin/roles', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'roles', 'create');
     const parsed = createRoleSchema.safeParse(request.body);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid role payload.');
     }
 
     try {
-      const role = await createRole(parsed.data.name);
+      const role = await createRole(parsed.data);
 
       await recordAdminWriteAudit({
         request,
@@ -189,7 +298,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.delete('/api/admin/roles/:roleName', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'roles', 'delete');
     const { roleName } = request.params as { roleName: string };
 
     try {
@@ -211,7 +320,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.patch('/api/admin/users/:userId/role', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'users', 'update');
     const { userId } = request.params as { userId: string };
     const parsed = updateUserRoleSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -236,13 +345,182 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
     }
   });
 
+  app.get('/api/admin/access-control/matrix', async (request) => {
+    await requireAdminPermission(request as AdminFastifyRequest, 'roles', 'view');
+    const matrix = await listRoleMatrix();
+
+    return {
+      permissions: matrix.permissions,
+      rolePermissions: matrix.rolePermissions.map((permission) => ({
+        action: permission.action,
+        resource: permission.resource,
+        roleId: permission.roleKey,
+        scope: permission.scope
+      })),
+      roles: matrix.roles.map((role) => ({
+        id: role.key,
+        key: role.key,
+        name: role.name,
+        description: role.description,
+        system: role.isSystem
+      }))
+    };
+  });
+
+  app.post('/api/admin/access-control/roles', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'roles', 'create');
+    const parsed = createRoleSchema.safeParse(request.body);
+    if (!parsed.success) {
+      throw new ValidationHttpError('Invalid role payload.');
+    }
+
+    try {
+      const role = await createRole(parsed.data);
+
+      await recordAdminWriteAudit({
+        request,
+        auth,
+        action: 'admin.access_control.role_created',
+        entityType: 'role',
+        entityId: role.key,
+        details: { key: role.key, name: role.name }
+      });
+
+      return {
+        item: {
+          id: role.key,
+          key: role.key,
+          name: role.name,
+          description: role.description,
+          system: role.isSystem
+        }
+      };
+    } catch (error) {
+      sendError(error);
+    }
+  });
+
+  app.patch('/api/admin/access-control/roles/:roleId', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'roles', 'update');
+    const { roleId } = request.params as { roleId: string };
+    const parsed = updateRoleSchema.safeParse(request.body);
+    if (!parsed.success) {
+      throw new ValidationHttpError('Invalid role payload.');
+    }
+
+    try {
+      const role = await updateRole(roleId, parsed.data);
+
+      await recordAdminWriteAudit({
+        request,
+        auth,
+        action: 'admin.access_control.role_updated',
+        entityType: 'role',
+        entityId: role.key,
+        details: parsed.data as Record<string, unknown>
+      });
+
+      return {
+        item: {
+          id: role.key,
+          key: role.key,
+          name: role.name,
+          description: role.description,
+          system: role.isSystem
+        }
+      };
+    } catch (error) {
+      sendError(error);
+    }
+  });
+
+  app.delete('/api/admin/access-control/roles/:roleId', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'roles', 'delete');
+    const { roleId } = request.params as { roleId: string };
+
+    try {
+      await deleteRole(roleId);
+
+      await recordAdminWriteAudit({
+        request,
+        auth,
+        action: 'admin.access_control.role_deleted',
+        entityType: 'role',
+        entityId: roleId
+      });
+
+      return { deleted: true };
+    } catch (error) {
+      sendError(error);
+    }
+  });
+
+  app.put('/api/admin/access-control/roles/:roleId/permissions', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'roles', 'manage');
+    const { roleId } = request.params as { roleId: string };
+    const parsed = replaceRolePermissionsSchema.safeParse(request.body);
+    if (!parsed.success) {
+      throw new ValidationHttpError('Invalid role permissions payload.');
+    }
+
+    try {
+      const permissions = await replaceRolePermissions(
+        roleId,
+        parsed.data.permissions.flatMap((permission) =>
+          permission.resource &&
+          permission.action &&
+          permission.scope
+            ? [
+                {
+                  action: permission.action as never,
+                  resource: permission.resource as never,
+                  scope: permission.scope
+                }
+              ]
+            : []
+        )
+      );
+
+      await recordAdminWriteAudit({
+        request,
+        auth,
+        action: 'admin.access_control.permissions_replaced',
+        entityType: 'role',
+        entityId: roleId,
+        details: {
+          permissions: permissions.map(({ action, resource, scope }) => ({
+            action,
+            resource,
+            scope
+          }))
+        }
+      });
+
+      return {
+        items: permissions.map((permission) => ({
+          action: permission.action,
+          resource: permission.resource,
+          roleId: permission.roleKey,
+          scope: permission.scope
+        }))
+      };
+    } catch (error) {
+      sendError(error);
+    }
+  });
+
+  app.get('/api/admin/me/permissions', async (request) => {
+    const accessContext = await getAdminAccessContext(request as AdminFastifyRequest);
+    return { permissions: accessContext.permissions };
+  });
+
   app.get('/api/admin/locations', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'locations', 'view');
     return { items: await listLocations() };
   });
 
   app.get('/api/admin/locations/:locationId', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'locations', 'view');
     try {
       const { locationId } = request.params as { locationId: string };
       return { item: await getLocation(locationId) };
@@ -252,7 +530,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.post('/api/admin/locations', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'locations', 'create');
     const parsed = createLocationSchema.safeParse(request.body);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid location payload.');
@@ -275,7 +553,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.patch('/api/admin/locations/:locationId', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'locations', 'update');
     const parsed = updateLocationSchema.safeParse(request.body);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid location payload.');
@@ -304,7 +582,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.delete('/api/admin/locations/:locationId', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'locations', 'delete');
     const { locationId } = request.params as { locationId: string };
 
     try {
@@ -323,12 +601,12 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.get('/api/admin/task-columns', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'task_columns', 'view');
     return { items: await listTaskColumns() };
   });
 
   app.get('/api/admin/task-columns/:columnId', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'task_columns', 'view');
     try {
       const { columnId } = request.params as { columnId: string };
       return { item: await getTaskColumnById(columnId) };
@@ -338,7 +616,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.post('/api/admin/task-columns', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'task_columns', 'create');
     const parsed = createTaskColumnSchema.safeParse(request.body);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid task column payload.');
@@ -357,7 +635,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.post('/api/admin/task-columns/reorder', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'task_columns', 'manage');
     const parsed = reorderTaskColumnsSchema.safeParse(request.body);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid task column reorder payload.');
@@ -375,7 +653,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.patch('/api/admin/task-columns/:columnId', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'task_columns', 'update');
     const parsed = updateTaskColumnSchema.safeParse(request.body);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid task column payload.');
@@ -395,7 +673,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.delete('/api/admin/task-columns/:columnId', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'task_columns', 'delete');
     const { columnId } = request.params as { columnId: string };
 
     await deleteTaskColumn(columnId);
@@ -410,13 +688,13 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.get('/api/admin/tasks', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'tasks', 'view');
     const query = listTasksQuerySchema.parse(request.query);
     return { items: await listTasks(query) };
   });
 
   app.get('/api/admin/tasks/:taskId', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'tasks', 'view');
     try {
       const { taskId } = request.params as { taskId: string };
       return { item: await getTask(taskId) };
@@ -426,7 +704,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.post('/api/admin/tasks', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'tasks', 'create');
     const parsed = createTaskSchema.safeParse(request.body);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid task payload.');
@@ -449,7 +727,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.post('/api/admin/tasks/:taskId/booking', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'manage');
     const { taskId } = request.params as { taskId: string };
 
     try {
@@ -476,7 +754,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.patch('/api/admin/tasks/:taskId', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'tasks', 'update');
     const parsed = updateTaskSchema.safeParse(request.body);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid task payload.');
@@ -500,7 +778,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.delete('/api/admin/tasks/:taskId', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'tasks', 'delete');
     const { taskId } = request.params as { taskId: string };
 
     try {
@@ -519,13 +797,13 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.get('/api/admin/bookings/:bookingId/tasks', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'tasks', 'view');
     const { bookingId } = request.params as { bookingId: string };
     return { items: await listTasksByBookingId(bookingId) };
   });
 
   app.get('/api/admin/deleted-tasks', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'tasks', 'view');
     const { limit } = z.object({
       limit: z.coerce.number().int().positive().max(200).optional()
     }).parse(request.query);
@@ -533,7 +811,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.post('/api/admin/deleted-tasks/:taskId/restore', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'tasks', 'update');
     const { taskId } = request.params as { taskId: string };
 
     try {
@@ -552,7 +830,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.post('/api/admin/bookings/:bookingId/tasks', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'tasks', 'create');
     const parsed = createTaskSchema
       .omit({ connectedBookingId: true })
       .safeParse(request.body);

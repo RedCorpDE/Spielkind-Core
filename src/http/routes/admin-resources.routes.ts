@@ -2,7 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { getAvailability } from '../../modules/resources/availability.service.js';
 import { getAdminResource, listAdminResources } from '../../modules/resources/resource-admin.repository.js';
-import { type AdminFastifyRequest, requireAdminAuth } from '../admin.js';
+import { type AdminFastifyRequest } from '../admin.js';
+import { requireAdminPermission } from '../access-control.js';
 import { HttpError, ValidationHttpError } from '../errors.js';
 
 const availabilityQuerySchema = z.object({
@@ -15,7 +16,7 @@ const availabilityQuerySchema = z.object({
 
 export async function registerAdminResourceRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/admin/resources', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'resources', 'view');
     const query = request.query as { location_id?: string };
     return {
       ok: true,
@@ -24,7 +25,7 @@ export async function registerAdminResourceRoutes(app: FastifyInstance): Promise
   });
 
   app.get('/api/admin/resources/:resourceId', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'resources', 'view');
     const { resourceId } = request.params as { resourceId: string };
     const resource = await getAdminResource(resourceId);
     if (!resource) {
@@ -38,7 +39,7 @@ export async function registerAdminResourceRoutes(app: FastifyInstance): Promise
   });
 
   app.get('/api/admin/availability', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'resources', 'view');
     const parsed = availabilityQuerySchema.safeParse(request.query);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid availability query.');

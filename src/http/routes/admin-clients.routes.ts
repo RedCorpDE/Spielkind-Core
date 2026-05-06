@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { recordAdminWriteAudit } from '../admin-audit.js';
-import { type AdminFastifyRequest, requireAdminAuth } from '../admin.js';
+import { type AdminFastifyRequest } from '../admin.js';
+import { requireAdminPermission } from '../access-control.js';
 import { HttpError, ValidationHttpError } from '../errors.js';
 import { getAdminClient, listAdminClients, updateAdminClient } from '../../modules/clients/client-admin.repository.js';
 
@@ -31,13 +32,13 @@ const updateClientSchema = z
 
 export async function registerAdminClientRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/admin/clients', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'customers', 'view');
     const query = request.query as { search?: string };
     return { ok: true, items: await listAdminClients(query.search) };
   });
 
   app.get('/api/admin/clients/:clientId', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'customers', 'view');
     const { clientId } = request.params as { clientId: string };
     const client = await getAdminClient(clientId);
     if (!client) {
@@ -48,7 +49,7 @@ export async function registerAdminClientRoutes(app: FastifyInstance): Promise<v
   });
 
   app.patch('/api/admin/clients/:clientId', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'customers', 'update');
     const parsed = updateClientSchema.safeParse(request.body);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid client update payload.');

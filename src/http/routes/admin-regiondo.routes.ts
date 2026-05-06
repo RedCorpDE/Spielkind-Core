@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { recordAdminWriteAudit } from '../admin-audit.js';
-import { type AdminFastifyRequest, requireAdminAuth } from '../admin.js';
+import { type AdminFastifyRequest } from '../admin.js';
+import { requireAdminPermission } from '../access-control.js';
 import { HttpError, ValidationHttpError } from '../errors.js';
 import { getRegiondoSyncSummary, getRegiondoWebhookEvent, listRegiondoWebhookEvents } from '../../sync/repository.js';
 import { retryBookingWebhookEvent } from '../../sync/sync-service.js';
@@ -21,12 +22,12 @@ const listRegiondoWebhookEventsQuerySchema = z.object({
 
 export async function registerAdminRegiondoRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/admin/regiondo/sync-summary', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'regiondo', 'view');
     return { ok: true, item: await getRegiondoSyncSummary() };
   });
 
   app.get('/api/admin/regiondo/webhook-events', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'regiondo', 'view');
     const parsed = listRegiondoWebhookEventsQuerySchema.safeParse(request.query);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid Regiondo webhook events query.');
@@ -36,7 +37,7 @@ export async function registerAdminRegiondoRoutes(app: FastifyInstance): Promise
   });
 
   app.get('/api/admin/regiondo/webhook-events/:eventId', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'regiondo', 'view');
     const { eventId } = request.params as { eventId: string };
     const event = await getRegiondoWebhookEvent(eventId);
     if (!event) {
@@ -47,7 +48,7 @@ export async function registerAdminRegiondoRoutes(app: FastifyInstance): Promise
   });
 
   app.post('/api/admin/regiondo/webhook-events/:eventId/retry', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'regiondo', 'manage');
     const { eventId } = request.params as { eventId: string };
     await retryBookingWebhookEvent(eventId);
     const job = await runProcessRegiondoWebhookInboxJob({ limit: 1 });

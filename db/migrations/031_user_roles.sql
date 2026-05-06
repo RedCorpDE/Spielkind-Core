@@ -8,11 +8,9 @@ CREATE TABLE IF NOT EXISTS user_roles (
 INSERT INTO user_roles (name, is_system)
 VALUES
   ('Admin', true),
-  ('Operations', false),
-  ('Operations Lead', false),
-  ('Program Manager', false),
-  ('Finance Coordinator', false),
-  ('People Operations', false)
+  ('Manager', false),
+  ('Staff', false),
+  ('Viewer', false),
 ON CONFLICT (name) DO UPDATE
 SET is_system = user_roles.is_system OR EXCLUDED.is_system;
 

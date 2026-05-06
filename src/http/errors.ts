@@ -28,6 +28,13 @@ export class UnauthorizedHttpError extends HttpError {
   }
 }
 
+export class ForbiddenHttpError extends HttpError {
+  constructor(message = 'Forbidden') {
+    super(403, message);
+    this.name = 'ForbiddenHttpError';
+  }
+}
+
 export class ConflictHttpError extends HttpError {
   constructor(message: string) {
     super(409, message);

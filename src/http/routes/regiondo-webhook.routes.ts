@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { appConfig } from '../../config/env.js';
 import { UnauthorizedHttpError, ValidationHttpError } from '../errors.js';
 import { verifyRegiondoWebhookSignature } from '../../modules/regiondo/regiondo.auth.js';
+import { runProcessRegiondoWebhookInboxJob } from '../../modules/regiondo/regiondo-webhook-inbox.job.js';
 import { enqueueRegiondoWebhook, RegiondoWebhookValidationError } from '../../modules/regiondo/regiondo-webhook.service.js';
 
 type FastifyRequestWithRawBody = FastifyRequest & { rawBody?: string };
@@ -34,6 +35,12 @@ async function handleWebhook(request: FastifyRequestWithRawBody) {
       headers: request.headers as Record<string, string | string[] | undefined>
     });
 
+    if (result.insertedCount > 0) {
+      void runProcessRegiondoWebhookInboxJob({ limit: result.insertedCount }).catch((error) => {
+        request.log.error({ err: error }, 'Immediate Regiondo webhook processing trigger failed');
+      });
+    }
+
     return {
       ok: true,
       accepted: true,
@@ -51,7 +58,7 @@ async function handleWebhook(request: FastifyRequestWithRawBody) {
 
 export async function registerRegiondoWebhookRoutes(app: FastifyInstance): Promise<void> {
   const configuredPath = appConfig.WEBHOOK_BOOKINGS_PATH;
-  const canonicalPath = '/webhooks/regiondo';
+  const canonicalPath = '/webhooks/regiondo/bookings';
   const paths = new Set([canonicalPath, configuredPath]);
 
   for (const path of paths) {

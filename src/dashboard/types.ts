@@ -6,7 +6,9 @@ export interface DashboardUser {
 }
 
 export interface DashboardRole {
+  key: string;
   name: string;
+  description: string | null;
   isSystem: boolean;
 }
 

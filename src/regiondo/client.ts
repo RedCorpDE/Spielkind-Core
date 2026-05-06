@@ -76,7 +76,7 @@ export class RegiondoClient {
 
     this.baseUrl = new URL(resolvedBaseUrl.endsWith('/') ? resolvedBaseUrl : `${resolvedBaseUrl}/`);
     this.publicKey = options.publicKey ?? appConfig.REGIONDO_PUBLIC_KEY;
-    this.privateKey = options.privateKey ?? appConfig.REGIONDO_PRIVATE_KEY;
+    this.privateKey = options.privateKey ?? appConfig.REGIONDO_SECRET_KEY;
     this.language = options.language ?? appConfig.REGIONDO_LANGUAGE;
     this.requestTimeoutMs = options.requestTimeoutMs ?? appConfig.REGIONDO_REQUEST_TIMEOUT_MS;
     this.maxRetries = options.maxRetries ?? appConfig.REGIONDO_REQUEST_MAX_RETRIES;

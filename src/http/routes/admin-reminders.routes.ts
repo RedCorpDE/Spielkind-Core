@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { recordAdminWriteAudit } from '../admin-audit.js';
-import { type AdminFastifyRequest, requireAdminAuth } from '../admin.js';
+import { type AdminFastifyRequest } from '../admin.js';
+import { requireAdminPermission } from '../access-control.js';
 import { HttpError, ValidationHttpError } from '../errors.js';
 import {
   createReminderRule,
@@ -33,12 +34,12 @@ const reminderRulePatchSchema = reminderRuleSchema.partial().refine((value) => O
 
 export async function registerAdminReminderRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/admin/reminder-rules', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'messages', 'view');
     return { ok: true, items: await listReminderRules() };
   });
 
   app.post('/api/admin/reminder-rules', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'messages', 'create');
     const parsed = reminderRuleSchema.safeParse(request.body);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid reminder rule payload.');
@@ -62,7 +63,7 @@ export async function registerAdminReminderRoutes(app: FastifyInstance): Promise
   });
 
   app.get('/api/admin/reminder-rules/:ruleId', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'messages', 'view');
     const { ruleId } = request.params as { ruleId: string };
     const rule = await getReminderRule(ruleId);
     if (!rule) {
@@ -73,7 +74,7 @@ export async function registerAdminReminderRoutes(app: FastifyInstance): Promise
   });
 
   app.patch('/api/admin/reminder-rules/:ruleId', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'messages', 'update');
     const parsed = reminderRulePatchSchema.safeParse(request.body);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid reminder rule payload.');
@@ -98,7 +99,7 @@ export async function registerAdminReminderRoutes(app: FastifyInstance): Promise
   });
 
   app.delete('/api/admin/reminder-rules/:ruleId', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'messages', 'delete');
     const { ruleId } = request.params as { ruleId: string };
     const deleted = await deleteReminderRule(ruleId);
     if (!deleted) {
@@ -117,7 +118,7 @@ export async function registerAdminReminderRoutes(app: FastifyInstance): Promise
   });
 
   app.get('/api/admin/reminder-deliveries', async (request) => {
-    await requireAdminAuth(request as AdminFastifyRequest);
+    await requireAdminPermission(request as AdminFastifyRequest, 'messages', 'view');
     const query = request.query as { status?: 'pending' | 'processing' | 'sent' | 'failed' | 'skipped'; bookingId?: string; limit?: string };
     return {
       ok: true,
@@ -130,7 +131,7 @@ export async function registerAdminReminderRoutes(app: FastifyInstance): Promise
   });
 
   app.post('/api/admin/reminder-deliveries/:deliveryId/retry', async (request) => {
-    const auth = await requireAdminAuth(request as AdminFastifyRequest);
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'messages', 'manage');
     const { deliveryId } = request.params as { deliveryId: string };
     const retried = await retryReminderDelivery(deliveryId);
     if (!retried) {

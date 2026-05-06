@@ -1,11 +1,15 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
+import type { AccessContext } from '../access-control/model.js';
 import { appConfig } from '../config/env.js';
 import { findAuthenticatedAdminBySession } from '../auth/repository.js';
 import { AdminAccessTokenError, verifyAccessToken } from '../auth/tokens.js';
 import type { AdminAuthUser, AuthenticatedAdmin } from '../auth/types.js';
 import { UnauthorizedHttpError } from './errors.js';
 
-export type AdminFastifyRequest = FastifyRequest & { adminAuth?: AuthenticatedAdmin };
+export type AdminFastifyRequest = FastifyRequest & {
+  adminAuth?: AuthenticatedAdmin;
+  adminAccessContext?: AccessContext;
+};
 
 const loginAttempts = new Map<string, { count: number; windowStartedAt: number; blockedUntil?: number }>();
 const LOGIN_WINDOW_MS = 10 * 60 * 1000;

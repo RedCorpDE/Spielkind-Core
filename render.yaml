@@ -15,6 +15,8 @@ services:
         value: Europe/Berlin
       - key: REGIONDO_WEBHOOK_CRON
         value: "*/1 * * * *"
+      - key: WEBHOOK_BOOKINGS_PATH
+        value: /webhooks/regiondo/bookings
       - key: REGIONDO_CATALOG_SYNC_CRON
         value: 0 3 * * 1
       - key: REMINDER_DISPATCH_CRON
@@ -32,6 +34,12 @@ services:
       - key: REGIONDO_SECRET_KEY
         sync: false
       - key: REGIONDO_PRODUCT_SUPPLIER_ID
+        sync: false
+      - key: WEBHOOK_AUTH_HEADER_NAME
+        sync: false
+      - key: WEBHOOK_AUTH_HEADER_VALUE
+        sync: false
+      - key: REGIONDO_WEBHOOK_SECRET
         sync: false
       - key: REMINDER_PROVIDER_WEBHOOK_URL
         sync: false
