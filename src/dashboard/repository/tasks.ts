@@ -67,13 +67,40 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isTaskRawJsonValue(value: unknown): value is DashboardTaskRawJsonValue {
-  return (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'number' ||
-    typeof value === 'boolean' ||
-    (Array.isArray(value) && value.every((entry) => typeof entry === 'string'))
-  );
+  return sanitizeTaskRawJsonValue(value) !== undefined;
+}
+
+function sanitizeTaskRawJsonValue(value: unknown): DashboardTaskRawJsonValue | undefined {
+  if (value === null) {
+    return null;
+  }
+
+  if (typeof value === 'string' || typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined;
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => {
+      const sanitizedEntry = sanitizeTaskRawJsonValue(entry);
+      return sanitizedEntry === undefined ? [] : [sanitizedEntry];
+    });
+  }
+
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  return Object.entries(value).reduce<Record<string, DashboardTaskRawJsonValue | undefined>>((result, [key, nestedValue]) => {
+    const sanitizedValue = sanitizeTaskRawJsonValue(nestedValue);
+    if (sanitizedValue !== undefined) {
+      result[key] = sanitizedValue;
+    }
+    return result;
+  }, {});
 }
 
 function sanitizeTaskRawJson(rawJson: unknown): DashboardTaskRawJson {
@@ -82,11 +109,16 @@ function sanitizeTaskRawJson(rawJson: unknown): DashboardTaskRawJson {
   }
 
   return Object.entries(rawJson).reduce<DashboardTaskRawJson>((result, [key, value]) => {
-    if (RESERVED_TASK_RAW_JSON_KEYS.has(key) || !isTaskRawJsonValue(value)) {
+    if (RESERVED_TASK_RAW_JSON_KEYS.has(key)) {
       return result;
     }
 
-    result[key] = Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : value;
+    const sanitizedValue = sanitizeTaskRawJsonValue(value);
+    if (sanitizedValue === undefined) {
+      return result;
+    }
+
+    result[key] = sanitizedValue;
     return result;
   }, {});
 }

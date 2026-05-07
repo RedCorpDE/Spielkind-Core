@@ -86,7 +86,7 @@ export function applyAdminCors(request: FastifyRequest, reply: FastifyReply): bo
 
     reply.header('Access-Control-Allow-Origin', origin);
     reply.header('Access-Control-Allow-Credentials', 'true');
-    reply.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+    reply.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
     reply.header('Access-Control-Allow-Headers', 'Authorization,Content-Type,X-Request-Id');
   }
 

@@ -9,11 +9,30 @@ import {
 describe('access control model', () => {
   it('hydrates default admin permissions with full scope', () => {
     const permissions = getDefaultRolePermissions('admin');
+    const bookingsCreatePermission = permissions.find(
+      (permission) => permission.resource === 'bookings' && permission.action === 'create'
+    );
+    const bookingsDeletePermission = permissions.find(
+      (permission) => permission.resource === 'bookings' && permission.action === 'delete'
+    );
     const bookingsManagePermission = permissions.find(
       (permission) => permission.resource === 'bookings' && permission.action === 'manage'
     );
 
+    expect(bookingsCreatePermission?.scope).toBe('all');
+    expect(bookingsDeletePermission?.scope).toBe('all');
     expect(bookingsManagePermission?.scope).toBe('all');
+  });
+
+  it('preserves booking create and cancel access for operational roles', () => {
+    const permissions = getDefaultRolePermissions('program_manager');
+
+    expect(
+      permissions.find((permission) => permission.resource === 'bookings' && permission.action === 'create')?.scope
+    ).toBe('all');
+    expect(
+      permissions.find((permission) => permission.resource === 'bookings' && permission.action === 'delete')?.scope
+    ).toBe('all');
   });
 
   it('fills unsupported permissions with none when normalizing a partial set', () => {

@@ -24,10 +24,12 @@ describe('summarizeRegiondoProductCatalog', () => {
 
     expect(summary.variations).toEqual([
       {
+        description: null,
         id: '720707',
         label: 'Evening slot',
         options: [
           {
+            description: null,
             id: '2017401',
             label: 'VIP',
             values: [{ id: 'vip', label: 'vip' }]
@@ -39,6 +41,7 @@ describe('summarizeRegiondoProductCatalog', () => {
     ]);
     expect(summary.options).toEqual([
       {
+        description: null,
         id: '2017401',
         label: 'VIP',
         values: [{ id: 'vip', label: 'vip' }]
@@ -101,6 +104,7 @@ describe('summarizeRegiondoProductCatalog', () => {
 
     expect(summary.options).toEqual([
       {
+        description: null,
         id: '2017401',
         label: 'VIP, Standard',
         values: [
@@ -160,6 +164,7 @@ describe('summarizeRegiondoProductCatalog', () => {
 
     expect(summary.options).toHaveLength(1);
     expect(summary.options[0]).toEqual({
+      description: null,
       id: '2017401',
       label: 'Seating',
       values: [
@@ -174,14 +179,22 @@ describe('summarizeRegiondoProductCatalog', () => {
     const summary = summarizeRegiondoProductCatalogFromRows({
       options: [
         {
-          rawJson: { option_id: '2017401', values: [{ value: 'VIP' }] },
+          rawJson: {
+            description: 'Front-row seat',
+            option_id: '2017401',
+            values: [{ value: 'VIP' }]
+          },
           regiondoOptionId: '2017401',
           regiondoVariantId: '720707',
           title: 'Seat',
           valuesJson: [{ value: 'VIP' }]
         },
         {
-          rawJson: { option_id: '2017401', values: [{ value: 'General' }] },
+          rawJson: {
+            description: 'General admission',
+            option_id: '2017401',
+            values: [{ value: 'General' }]
+          },
           regiondoOptionId: '2017401',
           regiondoVariantId: '720708',
           title: null,
@@ -191,7 +204,10 @@ describe('summarizeRegiondoProductCatalog', () => {
       variations: [
         {
           price: 19.5,
-          rawJson: { values: [{ value: 'Morning' }] },
+          rawJson: {
+            description: 'Morning slot details',
+            values: [{ value: 'Morning' }]
+          },
           regiondoVariantId: '720707',
           title: null
         },
@@ -206,10 +222,12 @@ describe('summarizeRegiondoProductCatalog', () => {
 
     expect(summary.variations).toEqual([
       {
+        description: 'Morning slot details',
         id: '720707',
         label: 'Morning',
         options: [
           {
+            description: 'Front-row seat',
             id: '2017401',
             label: 'Seat',
             values: [{ id: 'VIP', label: 'VIP' }]
@@ -219,10 +237,12 @@ describe('summarizeRegiondoProductCatalog', () => {
         values: ['Morning']
       },
       {
+        description: null,
         id: '720708',
         label: 'Evening',
         options: [
           {
+            description: 'General admission',
             id: '2017401',
             label: 'General',
             values: [{ id: 'General', label: 'General' }]
@@ -234,12 +254,58 @@ describe('summarizeRegiondoProductCatalog', () => {
     ]);
     expect(summary.options).toEqual([
       {
+        description: 'Front-row seat',
         id: '2017401',
         label: 'Seat',
         values: [
           { id: 'VIP', label: 'VIP' },
           { id: 'General', label: 'General' }
         ]
+      }
+    ]);
+  });
+
+  it('preserves descriptive metadata from Regiondo option payloads', () => {
+    const summary = summarizeRegiondoProductCatalog({
+      variations: [
+        {
+          description: 'Weekday booking window',
+          options: [
+            {
+              description: 'Up to 30 guests on Wednesday and Thursday',
+              option_id: '2017401',
+              title: '2 hours'
+            }
+          ],
+          title: 'Weekday pricing',
+          variation_id: '720707'
+        }
+      ]
+    });
+
+    expect(summary.variations).toEqual([
+      {
+        description: 'Weekday booking window',
+        id: '720707',
+        label: 'Weekday pricing',
+        options: [
+          {
+            description: 'Up to 30 guests on Wednesday and Thursday',
+            id: '2017401',
+            label: '2 hours',
+            values: []
+          }
+        ],
+        price: null,
+        values: []
+      }
+    ]);
+    expect(summary.options).toEqual([
+      {
+        description: 'Up to 30 guests on Wednesday and Thursday',
+        id: '2017401',
+        label: '2 hours',
+        values: []
       }
     ]);
   });

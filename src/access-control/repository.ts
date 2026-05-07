@@ -116,6 +116,20 @@ function normalizeIncomingPermissions(input: Array<{
   );
 }
 
+function resolveStoredPermissions(
+  roleKey: string,
+  storedPermissions: Array<{
+    resource: PermissionResource;
+    action: PermissionAction;
+    scope: PermissionScope;
+  }>
+): ResolvedPermission[] {
+  return normalizePermissionSet([
+    ...getDefaultRolePermissions(roleKey),
+    ...storedPermissions
+  ]);
+}
+
 export async function listRoleMatrix(): Promise<{
   permissions: typeof permissionDefinitions;
   rolePermissions: RolePermission[];
@@ -131,11 +145,14 @@ export async function listRoleMatrix(): Promise<{
     if (storedRolePermissions?.length) {
       return completeRolePermissions(
         role.key,
-        storedRolePermissions.map(({ action, resource, scope }) => ({
-          action,
-          resource,
-          scope
-        }))
+        resolveStoredPermissions(
+          role.key,
+          storedRolePermissions.map(({ action, resource, scope }) => ({
+            action,
+            resource,
+            scope
+          }))
+        )
       );
     }
 
@@ -220,7 +237,8 @@ export async function resolvePermissionsForRoleName(roleName: string): Promise<R
     return getDefaultRolePermissions(role.key);
   }
 
-  return normalizePermissionSet(
+  return resolveStoredPermissions(
+    role.key,
     storedPermissions.map(({ action, resource, scope }) => ({
       action,
       resource,

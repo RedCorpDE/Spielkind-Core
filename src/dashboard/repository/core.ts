@@ -118,13 +118,40 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isTaskRawJsonValue(value: unknown): value is DashboardTaskRawJsonValue {
-  return (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'number' ||
-    typeof value === 'boolean' ||
-    (Array.isArray(value) && value.every((entry) => typeof entry === 'string'))
-  );
+  return sanitizeTaskRawJsonValue(value) !== undefined;
+}
+
+function sanitizeTaskRawJsonValue(value: unknown): DashboardTaskRawJsonValue | undefined {
+  if (value === null) {
+    return null;
+  }
+
+  if (typeof value === 'string' || typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined;
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => {
+      const sanitizedEntry = sanitizeTaskRawJsonValue(entry);
+      return sanitizedEntry === undefined ? [] : [sanitizedEntry];
+    });
+  }
+
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  return Object.entries(value).reduce<Record<string, DashboardTaskRawJsonValue | undefined>>((result, [key, nestedValue]) => {
+    const sanitizedValue = sanitizeTaskRawJsonValue(nestedValue);
+    if (sanitizedValue !== undefined) {
+      result[key] = sanitizedValue;
+    }
+    return result;
+  }, {});
 }
 
 export function toIsoString(value: Date | string | null | undefined): string | null {
@@ -208,11 +235,12 @@ function normalizeActivityLog(value: unknown, createdAt: string, updatedAt: stri
 function parseTaskRawJson(rawJson: unknown): DashboardTaskRawJson {
   const raw = isRecord(rawJson) ? rawJson : {};
   const normalized = Object.entries(raw).reduce<DashboardTaskRawJson>((result, [key, value]) => {
-    if (!isTaskRawJsonValue(value)) {
+    const sanitizedValue = sanitizeTaskRawJsonValue(value);
+    if (sanitizedValue === undefined) {
       return result;
     }
 
-    result[key] = Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : value;
+    result[key] = sanitizedValue;
     return result;
   }, {});
 
@@ -318,7 +346,11 @@ function getProviderRawSection(rawValue: unknown): Record<string, unknown> | nul
   }
 
   const provider = rawValue.provider;
-  return isRecord(provider) ? provider : null;
+  if (isRecord(provider)) {
+    return provider;
+  }
+
+  return rawValue;
 }
 
 function getPurchaseDataRaw(rawValue: unknown): Record<string, unknown> | null {

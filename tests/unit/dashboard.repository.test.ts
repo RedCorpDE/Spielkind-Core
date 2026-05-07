@@ -68,7 +68,18 @@ describe('dashboard repository queries', () => {
       raw_json: {
         site: 'Berlin',
         payment_method: 'per_invoice',
-        blocker_1_selection: ['alpha', 'beta']
+        blocker_1_selection: ['alpha', 'beta'],
+        booking_data: {
+          contact_data: {
+            email: 'booking@example.com'
+          },
+          products: [
+            {
+              product_id: '297021',
+              qty: 2
+            }
+          ]
+        }
       },
       event_date_time: '2026-04-29T10:00:00.000Z',
       reminder_date: null,
@@ -86,7 +97,18 @@ describe('dashboard repository queries', () => {
     expect(task.rawJson).toMatchObject({
       site: 'Berlin',
       payment_method: 'per_invoice',
-      blocker_1_selection: ['alpha', 'beta']
+      blocker_1_selection: ['alpha', 'beta'],
+      booking_data: {
+        contact_data: {
+          email: 'booking@example.com'
+        },
+        products: [
+          {
+            product_id: '297021',
+            qty: 2
+          }
+        ]
+      }
     });
   });
 

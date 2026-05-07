@@ -90,7 +90,13 @@ export interface ReorderDashboardTaskColumnsInput {
 }
 
 export type DashboardTaskStatus = string;
-export type DashboardTaskRawJsonValue = string | number | boolean | null | string[];
+export type DashboardTaskRawJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | DashboardTaskRawJsonValue[]
+  | { [key: string]: DashboardTaskRawJsonValue | undefined };
 export type DashboardTaskRawJson = Record<string, DashboardTaskRawJsonValue | undefined>;
 
 export interface DashboardTaskActivityActor {

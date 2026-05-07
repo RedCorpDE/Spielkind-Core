@@ -101,8 +101,8 @@ export const permissionDefinitions: PermissionDefinition[] = [
   {
     resource: 'bookings',
     label: 'Bookings',
-    description: 'View and manage booking operations, metadata, and manual booking actions.',
-    actions: ['view', 'update', 'manage', 'export']
+    description: 'View, create, cancel, and manage booking operations, metadata, and exports.',
+    actions: ['view', 'create', 'update', 'delete', 'manage', 'export']
   },
   {
     resource: 'products',
@@ -187,7 +187,7 @@ const defaultRoleGrants: Record<string, PermissionGrant[]> = {
     ...grant('tasks', { view: 'all', create: 'all', update: 'all', delete: 'all' }),
     ...grant('task_columns', { view: 'all' }),
     ...grant('locations', { view: 'all' }),
-    ...grant('bookings', { view: 'all', update: 'all', manage: 'all', export: 'all' }),
+    ...grant('bookings', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all', export: 'all' }),
     ...grant('products', { view: 'all', update: 'all' }),
     ...grant('messages', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all' }),
     ...grant('customers', { view: 'all', update: 'all' }),
@@ -201,7 +201,7 @@ const defaultRoleGrants: Record<string, PermissionGrant[]> = {
     ...grant('tasks', { view: 'all', create: 'all', update: 'all', delete: 'all' }),
     ...grant('task_columns', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all' }),
     ...grant('locations', { view: 'all', create: 'all', update: 'all', delete: 'all' }),
-    ...grant('bookings', { view: 'all', update: 'all', manage: 'all', export: 'all' }),
+    ...grant('bookings', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all', export: 'all' }),
     ...grant('products', { view: 'all', update: 'all', manage: 'all' }),
     ...grant('messages', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all' }),
     ...grant('users', { view: 'all', update: 'all', manage: 'all' }),
@@ -214,7 +214,7 @@ const defaultRoleGrants: Record<string, PermissionGrant[]> = {
   program_manager: [
     ...grant('dashboard', { view: 'all' }),
     ...grant('tasks', { view: 'all', create: 'all', update: 'all' }),
-    ...grant('bookings', { view: 'all', update: 'all', manage: 'all' }),
+    ...grant('bookings', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all' }),
     ...grant('products', { view: 'all' }),
     ...grant('messages', { view: 'all', create: 'all', update: 'all' }),
     ...grant('locations', { view: 'all' }),

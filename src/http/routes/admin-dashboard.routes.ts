@@ -39,15 +39,19 @@ import {
   DashboardNotFoundError,
   DashboardValidationError
 } from '../../dashboard/repository/core.js';
+import type { DashboardTaskRawJson } from '../../dashboard/types.js';
 
 const taskColumnIdSchema = z.union([z.string().uuid(), z.literal('none')]);
-const taskRawJsonValueSchema = z.union([
-  z.string(),
-  z.number(),
-  z.boolean(),
-  z.null(),
-  z.array(z.string())
-]);
+const taskRawJsonValueSchema: z.ZodType<unknown> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.array(taskRawJsonValueSchema),
+    z.record(taskRawJsonValueSchema)
+  ])
+);
 const taskRawJsonSchema = z.record(taskRawJsonValueSchema);
 
 const createTaskSchema = z.object({
@@ -710,7 +714,10 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
       throw new ValidationHttpError('Invalid task payload.');
     }
 
-    const task = await createTask(parsed.data, {
+    const task = await createTask({
+      ...parsed.data,
+      rawJson: parsed.data.rawJson as DashboardTaskRawJson | undefined
+    }, {
       name: auth.user.displayName,
       role: auth.user.role,
       source: 'user'
@@ -727,7 +734,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.post('/api/admin/tasks/:taskId/booking', async (request) => {
-    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'manage');
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'create');
     const { taskId } = request.params as { taskId: string };
 
     try {
@@ -761,7 +768,10 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
     }
 
     const { taskId } = request.params as { taskId: string };
-    const task = await updateTask(taskId, parsed.data, {
+    const task = await updateTask(taskId, {
+      ...parsed.data,
+      rawJson: parsed.data.rawJson as DashboardTaskRawJson | undefined
+    }, {
       name: auth.user.displayName,
       role: auth.user.role,
       source: 'user'
@@ -841,7 +851,11 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
 
     const { bookingId } = request.params as { bookingId: string };
     const task = await createTask(
-      { ...parsed.data, connectedBookingId: bookingId },
+      {
+        ...parsed.data,
+        connectedBookingId: bookingId,
+        rawJson: parsed.data.rawJson as DashboardTaskRawJson | undefined
+      },
       { name: auth.user.displayName, role: auth.user.role, source: 'user' }
     );
     await recordAdminWriteAudit({

@@ -26,7 +26,11 @@ vi.mock('../../src/dashboard/repository/roles.js', () => ({
   listRoles: listRolesMock
 }));
 
-import { replaceRolePermissions, resolvePermissionsForRoleName } from '../../src/access-control/repository.js';
+import {
+  listRoleMatrix,
+  replaceRolePermissions,
+  resolvePermissionsForRoleName
+} from '../../src/access-control/repository.js';
 
 describe('access control repository', () => {
   beforeEach(() => {
@@ -52,6 +56,47 @@ describe('access control repository', () => {
 
     expect(
       permissions.find((permission) => permission.resource === 'dashboard' && permission.action === 'view')?.scope
+    ).toBe('all');
+  });
+
+  it('merges stored permissions with default system-role grants', async () => {
+    getRoleByIdentifierMock.mockResolvedValue({
+      key: 'admin',
+      name: 'Admin',
+      description: null,
+      isSystem: true
+    });
+    poolQueryMock.mockResolvedValueOnce({
+      rows: [{ role_key: 'admin', resource: 'dashboard', action: 'view', scope: 'all' }]
+    });
+
+    const permissions = await resolvePermissionsForRoleName('Admin');
+
+    expect(
+      permissions.find((permission) => permission.resource === 'tasks' && permission.action === 'create')?.scope
+    ).toBe('all');
+  });
+
+  it('surfaces merged permissions in the role matrix', async () => {
+    listRolesMock.mockResolvedValue([
+      {
+        key: 'admin',
+        name: 'Admin',
+        description: null,
+        isSystem: true
+      }
+    ]);
+    poolQueryMock.mockResolvedValueOnce({
+      rows: [{ role_key: 'admin', resource: 'dashboard', action: 'view', scope: 'all' }]
+    });
+
+    const matrix = await listRoleMatrix();
+
+    expect(
+      matrix.rolePermissions.find(
+        (permission) =>
+          permission.roleKey === 'admin' && permission.resource === 'tasks' && permission.action === 'create'
+      )?.scope
     ).toBe('all');
   });
 

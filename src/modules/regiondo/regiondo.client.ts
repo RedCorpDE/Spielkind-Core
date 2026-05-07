@@ -28,6 +28,43 @@ type RegiondoObjectResponse<T> = {
   item?: T;
 };
 
+interface RegiondoRequestOptions {
+  method?: 'DELETE' | 'GET' | 'POST' | 'PUT';
+  params?: Record<string, string>;
+  body?: unknown;
+}
+
+export interface RegiondoCheckoutCartItem {
+  product_id: number | string;
+  qty: number;
+  date_time?: string;
+  external_item_id?: string;
+  option_id?: number | string;
+  reservation_code?: string;
+  value?: number | string | null;
+  [key: string]: unknown;
+}
+
+export interface RegiondoCheckoutContactData {
+  email: string;
+  firstname: string;
+  lastname: string;
+  telephone?: string;
+  [key: string]: unknown;
+}
+
+export interface RegiondoPurchaseOrderInput {
+  attendeeData?: unknown[];
+  buyerData?: unknown[];
+  comment?: string;
+  contactData: RegiondoCheckoutContactData;
+  items: RegiondoCheckoutCartItem[];
+  sendTicketsToCustomer?: boolean;
+  storeLocale?: string;
+  subId?: string;
+  syncTicketsProcessing?: boolean;
+}
+
 interface RegiondoClientOptions {
   baseUrl: string;
   catalogPageSize: number;
@@ -172,8 +209,9 @@ export class RegiondoClient {
     }
   }
 
-  private async requestJson<T>(pathname: string, params: Record<string, string> = {}): Promise<T> {
-    const queryParams = this.buildQueryParams(params);
+  private async requestJson<T>(pathname: string, options: RegiondoRequestOptions = {}): Promise<T> {
+    const method = options.method ?? 'GET';
+    const queryParams = this.buildQueryParams(options.params ?? {});
     const url = new URL(pathname.replace(/^\//, ''), this.baseUrl);
     url.search = queryParams.toString();
 
@@ -190,13 +228,16 @@ export class RegiondoClient {
         });
 
         const response = await this.fetchImplementation(url, {
+          body: options.body === undefined ? undefined : JSON.stringify(options.body),
           headers: {
             'X-API-ID': this.publicKey,
             'X-API-TIME': `${timestamp}`,
             'X-API-HASH': hash,
             'Accept-Language': this.language,
-            Accept: 'application/json'
+            Accept: 'application/json',
+            ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' })
           },
+          method,
           signal: AbortSignal.timeout(this.requestTimeoutMs)
         });
 
@@ -204,7 +245,21 @@ export class RegiondoClient {
           throw mapHttpError(response.status, await response.text());
         }
 
-        return (await response.json()) as T;
+        if (response.status === 204) {
+          return undefined as T;
+        }
+
+        const responseBody = await response.text();
+        if (!responseBody) {
+          return undefined as T;
+        }
+
+        const contentType = response.headers.get('content-type') ?? '';
+        if (contentType.includes('application/json')) {
+          return JSON.parse(responseBody) as T;
+        }
+
+        return responseBody as T;
       } catch (error) {
         if (attempt >= this.maxRetries || !isRetryableRegiondoError(error)) {
           throw error;
@@ -218,12 +273,12 @@ export class RegiondoClient {
   }
 
   async getCollection<T>(pathname: string, params: Record<string, string> = {}): Promise<T[]> {
-    const body = await this.requestJson<RegiondoCollectionResponse<T>>(pathname, params);
+    const body = await this.requestJson<RegiondoCollectionResponse<T>>(pathname, { params });
     return body.data ?? body.items ?? [];
   }
 
   async getObject<T>(pathname: string, params: Record<string, string> = {}): Promise<T> {
-    const body = await this.requestJson<RegiondoObjectResponse<T> | T>(pathname, params);
+    const body = await this.requestJson<RegiondoObjectResponse<T> | T>(pathname, { params });
 
     if (body && typeof body === 'object' && !Array.isArray(body)) {
       if ('data' in body && body.data !== undefined) {
@@ -252,11 +307,13 @@ export class RegiondoClient {
 
     while (true) {
       const response = await this.requestJson<RegiondoCollectionResponse<unknown>>('/products', {
-        currency: this.currency,
-        limit: `${this.catalogPageSize}`,
-        ...(offset > 0 ? { offset: `${offset}` } : {}),
-        store_locale: this.language,
-        supplier_id: this.supplierId
+        params: {
+          currency: this.currency,
+          limit: `${this.catalogPageSize}`,
+          ...(offset > 0 ? { offset: `${offset}` } : {}),
+          store_locale: this.language,
+          supplier_id: this.supplierId
+        }
       });
       const pageItems = response.data ?? response.items ?? [];
       const currentPage = normalizePositiveInteger(response.page?.current);
@@ -309,9 +366,11 @@ export class RegiondoClient {
     to: string;
   }): Promise<unknown> {
     return this.requestJson<unknown>(`/products/availabilities/${encodeURIComponent(input.variationId)}`, {
-      dt_from: input.from,
-      dt_to: input.to,
-      store_locale: this.language
+      params: {
+        dt_from: input.from,
+        dt_to: input.to,
+        store_locale: this.language
+      }
     });
   }
 
@@ -321,9 +380,11 @@ export class RegiondoClient {
     time?: string;
   }): Promise<unknown> {
     return this.requestJson<unknown>(`/products/availoptions/${encodeURIComponent(input.variationId)}`, {
-      ...(input.date ? { date: input.date } : {}),
-      ...(input.time ? { time: input.time } : {}),
-      store_locale: this.language
+      params: {
+        ...(input.date ? { date: input.date } : {}),
+        ...(input.time ? { time: input.time } : {}),
+        store_locale: this.language
+      }
     });
   }
 
@@ -350,6 +411,45 @@ export class RegiondoClient {
       supplierBookings,
       purchaseData: regiondoPurchaseDataSchema.parse(purchaseDataRaw)
     };
+  }
+
+  async purchaseOrder(input: RegiondoPurchaseOrderInput): Promise<RegiondoPurchaseData> {
+    const purchaseDataRaw = await this.requestJson<unknown>('/checkout/purchase', {
+      body: {
+        ...(input.attendeeData?.length ? { attendee_data: input.attendeeData } : {}),
+        ...(input.buyerData?.length ? { buyer_data: input.buyerData } : {}),
+        ...(input.comment ? { comment: input.comment } : {}),
+        contact_data: input.contactData,
+        items: input.items,
+        ...(input.sendTicketsToCustomer !== undefined
+          ? { send_tickets_to_customer: input.sendTicketsToCustomer }
+          : {}),
+        ...(input.subId ? { sub_id: input.subId } : {}),
+        ...(input.syncTicketsProcessing !== undefined
+          ? { sync_tickets_processing: input.syncTicketsProcessing }
+          : {})
+      },
+      method: 'POST',
+      params: {
+        currency: this.currency,
+        store_locale: input.storeLocale ?? this.language
+      }
+    });
+
+    return regiondoPurchaseDataSchema.parse(purchaseDataRaw);
+  }
+
+  async cancelTickets(referenceIds: string[]): Promise<void> {
+    if (!referenceIds.length) {
+      return;
+    }
+
+    await this.requestJson<unknown>('/checkout/cancel', {
+      method: 'POST',
+      params: {
+        reference_ids: referenceIds.join(',')
+      }
+    });
   }
 }
 

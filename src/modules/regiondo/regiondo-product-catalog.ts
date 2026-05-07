@@ -6,12 +6,14 @@ export interface RegiondoCatalogOptionValueSummary {
 }
 
 export interface RegiondoCatalogOptionSummary {
+  description: string | null;
   id: string;
   label: string;
   values: RegiondoCatalogOptionValueSummary[];
 }
 
 export interface RegiondoCatalogVariationSummary {
+  description: string | null;
   id: string;
   label: string;
   options: RegiondoCatalogOptionSummary[];
@@ -73,6 +75,11 @@ const readTrimmedString = (record: CatalogRecord | null, keys: string[]) => {
   }
 
   return '';
+};
+
+const readNullableTrimmedString = (record: CatalogRecord | null, keys: string[]) => {
+  const value = readTrimmedString(record, keys);
+  return value || null;
 };
 
 const readNumber = (record: CatalogRecord | null, keys: string[]) => {
@@ -253,6 +260,7 @@ const parseOption = (value: unknown): ParsedOptionSummary | null => {
   const { label, labelPriority } = buildOptionLabel(record, values, optionId);
 
   return {
+    description: readNullableTrimmedString(record, ['description', 'info', 'important_info', 'short_description']),
     id: optionId,
     label,
     labelPriority,
@@ -276,6 +284,7 @@ const buildOptionSourceFromRow = (row: RegiondoCatalogOptionRowSummaryInput): Ca
 };
 
 const toPublicOption = (option: ParsedOptionSummary): RegiondoCatalogOptionSummary => ({
+  description: option.description ?? null,
   id: option.id,
   label: option.label,
   values: option.values
@@ -297,8 +306,14 @@ const mergeOptionSummary = (
         : current.values.length >= incoming.values.length
           ? current
           : incoming;
+  const description =
+    preferredLabelSource.description ??
+    current.description ??
+    incoming.description ??
+    null;
 
   return {
+    description,
     id: current.id || incoming.id,
     label: preferredLabelSource.label,
     labelPriority: preferredLabelSource.labelPriority,
@@ -318,6 +333,7 @@ const buildVariationLabel = (
   `Variation ${variationId}`;
 
 const toPublicVariation = (variation: ParsedVariationSummary): RegiondoCatalogVariationSummary => ({
+  description: variation.description ?? null,
   id: variation.id,
   label: variation.label,
   options: variation.options,
@@ -351,6 +367,7 @@ const parseVariation = (value: unknown): ParsedVariationSummary | null => {
   const linkedOptionValues = parsedOptions.flatMap((option) => option.values);
 
   return {
+    description: readNullableTrimmedString(record, ['description', 'info', 'important_info', 'short_description']),
     id: variationId,
     label: buildVariationLabel(record, variationValues, linkedOptionValues, variationId),
     options: parsedOptions.map(toPublicOption),

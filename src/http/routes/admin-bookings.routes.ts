@@ -1,11 +1,15 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { getBooking, listBookings, updateBooking } from '../../dashboard/repository/bookings.js';
+import { DashboardNotFoundError, DashboardValidationError } from '../../dashboard/repository/core.js';
 import { recordAdminWriteAudit } from '../admin-audit.js';
 import { type AdminFastifyRequest } from '../admin.js';
 import { requireAdminPermission } from '../access-control.js';
 import { HttpError, ValidationHttpError } from '../errors.js';
-import { cancelBookingLocally } from '../../modules/bookings/admin-booking.repository.js';
+import {
+  cancelBookingInRegiondo,
+  cancelBookingLocally
+} from '../../modules/bookings/admin-booking.repository.js';
 import { rebuildConsumptionsForBooking } from '../../modules/resources/consumption.service.js';
 
 const bookingExternalStatusSchema = z.enum(['Pending', 'Processing', 'Confirmed', 'Completed', 'Rejected', 'Canceled', 'Unknown']);
@@ -37,6 +41,18 @@ const updateBookingMetadataSchema = z
   .refine((value) => Object.keys(value).length > 0, {
     message: 'At least one booking metadata field must be provided.'
   });
+
+function sendError(error: unknown): never {
+  if (error instanceof DashboardNotFoundError) {
+    throw new HttpError(404, error.message);
+  }
+
+  if (error instanceof DashboardValidationError) {
+    throw new ValidationHttpError(error.message);
+  }
+
+  throw error;
+}
 
 export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/admin/bookings', async (request) => {
@@ -95,7 +111,7 @@ export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<
   });
 
   app.post('/api/admin/bookings/:bookingId/cancel-local', async (request) => {
-    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'manage');
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'delete');
     const { bookingId } = request.params as { bookingId: string };
     const canceled = await cancelBookingLocally(bookingId);
     if (!canceled) {
@@ -113,5 +129,34 @@ export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<
     });
 
     return { ok: true, item: await getBooking(bookingId), rebuild };
+  });
+
+  app.post('/api/admin/bookings/:bookingId/cancel-regiondo', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'delete');
+    const { bookingId } = request.params as { bookingId: string };
+
+    try {
+      const canceled = await cancelBookingInRegiondo(bookingId);
+      if (!canceled) {
+        throw new HttpError(404, 'Booking not found.');
+      }
+
+      const rebuild = await rebuildConsumptionsForBooking(bookingId);
+      await recordAdminWriteAudit({
+        request,
+        auth,
+        action: 'admin.booking.canceled_regiondo',
+        entityType: 'booking',
+        entityId: bookingId,
+        details: {
+          rebuild,
+          synchronized: canceled.synchronized
+        }
+      });
+
+      return { ok: true, item: await getBooking(bookingId), rebuild };
+    } catch (error) {
+      sendError(error);
+    }
   });
 }

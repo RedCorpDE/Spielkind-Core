@@ -1,5 +1,13 @@
 import { randomUUID } from 'node:crypto';
+import type { PoolClient } from 'pg';
 import { pool } from '../../db/client.js';
+import { normalizeRegiondoBookingImport } from '../../modules/bookings/booking-normalizer.js';
+import { upsertNormalizedRegiondoBooking } from '../../modules/bookings/booking.repository.js';
+import {
+  regiondoClient,
+  type RegiondoCheckoutCartItem,
+  type RegiondoCheckoutContactData
+} from '../../modules/regiondo/regiondo.client.js';
 import { SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID } from '../../sync/mappers.js';
 import type {
   DashboardBooking,
@@ -119,6 +127,18 @@ interface TaskBookingResolvedSelection {
   optionValueLabel: string | null;
 }
 
+interface TaskRegiondoBookingPayload {
+  attendeeData: unknown[];
+  buyerData: unknown[];
+  comment: string | null;
+  contactData: RegiondoCheckoutContactData;
+  items: RegiondoCheckoutCartItem[];
+  sendTicketsToCustomer: boolean;
+  storeLocale: string | null;
+  subId: string;
+  syncTicketsProcessing: boolean;
+}
+
 const TASK_SELECT_QUERY = `SELECT
    t.id,
    t.title,
@@ -178,7 +198,11 @@ function getProviderRecord(rawValue: unknown): Record<string, unknown> | null {
   }
 
   const provider = rawValue.provider;
-  return isRecord(provider) ? provider : null;
+  if (isRecord(provider)) {
+    return provider;
+  }
+
+  return rawValue;
 }
 
 function getPurchaseDataRecord(rawValue: unknown): Record<string, unknown> | null {
@@ -259,6 +283,277 @@ function readTaskAttendees(task: DashboardTask): number {
   }
 
   return 1;
+}
+
+function readTaskRawRecord(task: DashboardTask, key: string): Record<string, unknown> | null {
+  const value = task.rawJson[key];
+  return isRecord(value) ? value : null;
+}
+
+function readTaskRawArray(task: DashboardTask, key: string): unknown[] {
+  const value = task.rawJson[key];
+  return Array.isArray(value) ? value : [];
+}
+
+function readRecordText(record: Record<string, unknown> | null, ...keys: string[]): string | null {
+  if (!record) {
+    return null;
+  }
+
+  for (const key of keys) {
+    const normalized = normalizeText(record[key]);
+    if (normalized) {
+      return normalized;
+    }
+
+    const numericIdentifier = stringifyIdentifier(record[key]);
+    if (numericIdentifier) {
+      return numericIdentifier;
+    }
+  }
+
+  return null;
+}
+
+function readPositiveIntegerValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value > 0 ? Math.floor(value) : null;
+  }
+
+  if (typeof value === 'string') {
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : null;
+  }
+
+  return null;
+}
+
+function readRecordPositiveInteger(record: Record<string, unknown> | null, ...keys: string[]): number | null {
+  if (!record) {
+    return null;
+  }
+
+  for (const key of keys) {
+    const parsed = readPositiveIntegerValue(record[key]);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function readRecordBoolean(record: Record<string, unknown> | null, ...keys: string[]): boolean | null {
+  if (!record) {
+    return null;
+  }
+
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'boolean') {
+      return value;
+    }
+
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (normalized === 'true' || normalized === '1') {
+        return true;
+      }
+
+      if (normalized === 'false' || normalized === '0') {
+        return false;
+      }
+    }
+  }
+
+  return null;
+}
+
+function toRegiondoRequestIdentifier(value: string): number | string {
+  return /^\d+$/.test(value) ? Number(value) : value;
+}
+
+function buildTaskRegiondoCartItem(
+  item: Record<string, unknown>,
+  index: number,
+  defaultQuantity: number
+): RegiondoCheckoutCartItem {
+  const productId = readRecordText(item, 'product_id', 'productId', 'id');
+  if (!productId) {
+    throw new DashboardValidationError(`Task booking_data.products[${index}] is missing product_id.`);
+  }
+
+  const quantity = readRecordPositiveInteger(item, 'qty', 'quantity') ?? defaultQuantity;
+  const optionId = readRecordText(
+    item,
+    'option_id',
+    'optionId',
+    'variation_id',
+    'variationId',
+    'variant_id',
+    'variantId'
+  );
+  const externalItemId = readRecordText(item, 'external_item_id', 'externalItemId', 'external_id', 'externalId');
+  const reservationCode = readRecordText(item, 'reservation_code', 'reservationCode');
+  const dateTime = readRecordText(item, 'date_time', 'dateTime', 'event_date_time', 'eventDateTime');
+  const startDate = readRecordText(item, 'start_date', 'startDate');
+  const endDate = readRecordText(item, 'end_date', 'endDate');
+
+  let value: string | number | null | undefined = undefined;
+  const rawValue = item.value ?? item.value_id ?? item.valueId ?? item.option_value ?? item.optionValue;
+  if (typeof rawValue === 'number' && Number.isFinite(rawValue)) {
+    value = rawValue;
+  } else if (typeof rawValue === 'string' && rawValue.trim()) {
+    value = rawValue.trim();
+  } else if (rawValue === null) {
+    value = null;
+  }
+
+  return {
+    ...(dateTime ? { date_time: dateTime } : {}),
+    ...(endDate ? { end_date: endDate } : {}),
+    ...(externalItemId ? { external_item_id: externalItemId } : {}),
+    ...(optionId ? { option_id: toRegiondoRequestIdentifier(optionId) } : {}),
+    product_id: toRegiondoRequestIdentifier(productId),
+    qty: quantity,
+    ...(reservationCode ? { reservation_code: reservationCode } : {}),
+    ...(startDate ? { start_date: startDate } : {}),
+    ...(value !== undefined ? { value } : {})
+  };
+}
+
+function buildTaskRegiondoContactData(task: DashboardTask, bookingData: Record<string, unknown>): RegiondoCheckoutContactData {
+  const bookingContact = isRecord(bookingData.contact_data)
+    ? bookingData.contact_data
+    : isRecord(bookingData.contactData)
+      ? bookingData.contactData
+      : null;
+
+  const firstname = readRecordText(bookingContact, 'firstname', 'first_name', 'firstName') ?? readTaskRawText(task, 'first_name');
+  const lastname = readRecordText(bookingContact, 'lastname', 'last_name', 'lastName') ?? readTaskRawText(task, 'last_name');
+  const email = readRecordText(bookingContact, 'email') ?? readTaskRawText(task, 'email');
+  const telephone =
+    readRecordText(bookingContact, 'telephone', 'phone_number', 'phoneNumber') ?? readTaskRawText(task, 'phone_number');
+
+  if (!firstname || !lastname || !email) {
+    throw new DashboardValidationError(
+      'Task contact data must include first name, last name, and email before creating a Regiondo booking.'
+    );
+  }
+
+  return {
+    email,
+    firstname,
+    lastname,
+    ...(telephone ? { telephone } : {})
+  };
+}
+
+function buildTaskRegiondoBookingPayload(task: DashboardTask): TaskRegiondoBookingPayload {
+  const bookingData = readTaskRawRecord(task, 'booking_data') ?? readTaskRawRecord(task, 'bookingData');
+  if (!bookingData) {
+    throw new DashboardValidationError('Task raw_json.booking_data is required before creating a Regiondo booking.');
+  }
+
+  const products = Array.isArray(bookingData.products)
+    ? bookingData.products
+    : Array.isArray(bookingData.items)
+      ? bookingData.items
+      : [];
+
+  const items = products.flatMap((product, index) => {
+    if (!isRecord(product)) {
+      return [];
+    }
+
+    return [buildTaskRegiondoCartItem(product, index, readTaskAttendees(task))];
+  });
+
+  if (!items.length) {
+    throw new DashboardValidationError('Task booking_data.products must include at least one Regiondo cart item.');
+  }
+
+  const buyerData = Array.isArray(bookingData.buyer_data)
+    ? bookingData.buyer_data
+    : Array.isArray(bookingData.buyerData)
+      ? bookingData.buyerData
+      : [];
+  const attendeeData = Array.isArray(bookingData.attendee_data)
+    ? bookingData.attendee_data
+    : Array.isArray(bookingData.attendeeData)
+      ? bookingData.attendeeData
+      : [];
+  const comment = readRecordText(bookingData, 'comment') ?? normalizeText(task.description);
+  const storeLocale = readRecordText(bookingData, 'store_locale', 'storeLocale');
+
+  return {
+    attendeeData,
+    buyerData,
+    comment,
+    contactData: buildTaskRegiondoContactData(task, bookingData),
+    items,
+    sendTicketsToCustomer: readRecordBoolean(bookingData, 'send_tickets_to_customer', 'sendTicketsToCustomer') ?? false,
+    storeLocale,
+    subId: readRecordText(bookingData, 'sub_id', 'subId') ?? task.id,
+    syncTicketsProcessing:
+      readRecordBoolean(bookingData, 'sync_tickets_processing', 'syncTicketsProcessing') ?? true
+  };
+}
+
+function extractRegiondoBookingKeyFromPurchase(task: DashboardTask, purchaseData: Record<string, unknown>): string {
+  const items = Array.isArray(purchaseData.items) ? purchaseData.items : [];
+  const bookingKeys = Array.from(
+    new Set(
+      items.flatMap((item) => {
+        if (!isRecord(item)) {
+          return [];
+        }
+
+        const bookingKey = readRecordText(item, 'booking_key');
+        return bookingKey ? [bookingKey] : [];
+      })
+    )
+  );
+
+  if (!bookingKeys.length) {
+    throw new DashboardValidationError('Regiondo purchase did not return a booking key for the created order.');
+  }
+
+  if (bookingKeys.length > 1) {
+    throw new DashboardValidationError(
+      `Task ${task.id} produced multiple Regiondo booking groups in a single order, which cannot be linked to one task booking.`
+    );
+  }
+
+  return bookingKeys[0];
+}
+
+async function createRegiondoBookingForTask(client: PoolClient, task: DashboardTask): Promise<{ bookingId: string }> {
+  const purchasePayload = buildTaskRegiondoBookingPayload(task);
+  const purchaseData = await regiondoClient.purchaseOrder({
+    attendeeData: purchasePayload.attendeeData,
+    buyerData: purchasePayload.buyerData,
+    comment: purchasePayload.comment ?? undefined,
+    contactData: purchasePayload.contactData,
+    items: purchasePayload.items,
+    sendTicketsToCustomer: purchasePayload.sendTicketsToCustomer,
+    storeLocale: purchasePayload.storeLocale ?? undefined,
+    subId: purchasePayload.subId,
+    syncTicketsProcessing: purchasePayload.syncTicketsProcessing
+  });
+  const bookingKey = extractRegiondoBookingKeyFromPurchase(task, purchaseData as unknown as Record<string, unknown>);
+  const snapshot = await regiondoClient.hydrateBookingOrder({
+    bookingKey,
+    orderNumber: `${purchaseData.order_number}`
+  });
+  const normalizedBooking = normalizeRegiondoBookingImport({
+    bookingKey,
+    purchaseData: snapshot.purchaseData,
+    supplierBookings: snapshot.supplierBookings,
+    webhookPayload: null
+  });
+
+  return upsertNormalizedRegiondoBooking(client, normalizedBooking);
 }
 
 function decodeSelectionNodeValue(value: string): string[] {
@@ -455,7 +750,7 @@ async function resolveTaskBookingSelection(
     return null;
   }
 
-  const [productNode, optionNode, optionValueNode] = valuePath;
+  const [productNode, levelOneNode, levelTwoNode, levelThreeNode] = valuePath;
   const [productKind, productKey] = decodeSelectionNodeValue(productNode);
 
   if (productKind !== 'product' || !productKey) {
@@ -478,52 +773,82 @@ async function resolveTaskBookingSelection(
   let unitPrice = Number(product.base_amount);
   let variationLabel: string | null = null;
   let optionValueLabel: string | null = null;
+  let variationId: string | null = null;
+  let optionNode: string | undefined;
+  let optionValueNode: string | undefined;
 
-  if (optionNode) {
-    const [nodeKind, , nodeId] = decodeSelectionNodeValue(optionNode);
+  if (levelOneNode) {
+    const [levelOneKind, , decodedVariationId, decodedOptionId] = decodeSelectionNodeValue(levelOneNode);
 
-    if (nodeKind === 'variant' && nodeId) {
-      const variationResult = await executor.query<TaskBookingVariantRow>(
-        `SELECT title, price
-         FROM product_variants
-         WHERE regiondo_variant_id = $1
-         LIMIT 1`,
-        [nodeId]
-      );
+    if (levelOneKind === 'variant' && decodedVariationId) {
+      variationId = decodedVariationId;
+      optionNode = levelTwoNode;
+      optionValueNode = levelThreeNode;
+    } else {
+      optionNode = levelOneNode;
+      optionValueNode = levelTwoNode;
 
-      if (variationResult.rowCount) {
-        variationLabel = normalizeText(variationResult.rows[0].title) ?? nodeId;
-        const variantPrice = variationResult.rows[0].price;
-        const parsedVariantPrice =
-          typeof variantPrice === 'number'
-            ? variantPrice
-            : typeof variantPrice === 'string'
-              ? Number(variantPrice)
-              : NaN;
-
-        if (Number.isFinite(parsedVariantPrice)) {
-          unitPrice = parsedVariantPrice;
-        }
-      } else {
-        variationLabel = nodeId;
+      if (levelOneKind === 'option' && decodedOptionId) {
+        variationId = decodedOptionId;
       }
     }
+  }
 
-    if (nodeKind === 'option' && nodeId) {
+  if (variationId) {
+    const variationResult = await executor.query<TaskBookingVariantRow>(
+      `SELECT title, price
+       FROM product_variants
+       WHERE regiondo_variant_id = $1
+       LIMIT 1`,
+      [variationId]
+    );
+
+    if (variationResult.rowCount) {
+      variationLabel = normalizeText(variationResult.rows[0].title) ?? variationId;
+      const variantPrice = variationResult.rows[0].price;
+      const parsedVariantPrice =
+        typeof variantPrice === 'number'
+          ? variantPrice
+          : typeof variantPrice === 'string'
+            ? Number(variantPrice)
+            : NaN;
+
+      if (Number.isFinite(parsedVariantPrice)) {
+        unitPrice = parsedVariantPrice;
+      }
+    } else {
+      variationLabel = variationId;
+    }
+  }
+
+  if (optionNode) {
+    const decodedOptionNode = decodeSelectionNodeValue(optionNode);
+    const optionNodeKind = decodedOptionNode[0];
+    const optionNodeVariationId = decodedOptionNode.length >= 4 ? decodedOptionNode[2] : null;
+    const optionId = decodedOptionNode.length >= 4 ? decodedOptionNode[3] : decodedOptionNode[2];
+    const resolvedVariationId = variationId ?? optionNodeVariationId;
+
+    if (optionNodeKind === 'option' && optionId) {
       const optionResult = await executor.query<TaskBookingOptionRow>(
         `SELECT title, values_json
          FROM product_options
-         WHERE regiondo_option_id = $1
+         WHERE regiondo_product_id = $1
+           AND regiondo_option_id = $2
+           AND ($3::text IS NULL OR regiondo_variant_id = $3)
+         ORDER BY CASE WHEN regiondo_variant_id = $3 THEN 0 ELSE 1 END, regiondo_variant_id NULLS LAST
          LIMIT 1`,
-        [nodeId]
+        [product.regiondo_product_id, optionId, resolvedVariationId]
       );
 
-      const optionTitle = optionResult.rowCount ? normalizeText(optionResult.rows[0].title) ?? nodeId : nodeId;
+      const optionTitle = optionResult.rowCount ? normalizeText(optionResult.rows[0].title) ?? optionId : optionId;
 
       if (!optionValueNode) {
         optionValueLabel = optionTitle;
       } else {
-        const [valueKind, , , valueId] = decodeSelectionNodeValue(optionValueNode);
+        const decodedValueNode = decodeSelectionNodeValue(optionValueNode);
+        const valueKind = decodedValueNode[0];
+        const valueId = decodedValueNode.length >= 5 ? decodedValueNode[4] : decodedValueNode[3];
+
         if (valueKind === 'option-value' && valueId) {
           if (optionResult.rowCount && Array.isArray(optionResult.rows[0].values_json)) {
             const matchingValue = optionResult.rows[0].values_json.find((entry) => {
@@ -1132,117 +1457,7 @@ export async function createBookingFromTask(
       throw new DashboardValidationError('Bookings can only be created from the configured confirmation columns.');
     }
 
-    const selectionPaths = readTaskSelectionPaths(task);
-    if (!selectionPaths.length) {
-      throw new DashboardValidationError('Select at least one product before creating a booking.');
-    }
-
-    const resolvedSelections = (
-      await Promise.all(selectionPaths.map((valuePath) => resolveTaskBookingSelection(client, valuePath)))
-    ).filter((selection): selection is TaskBookingResolvedSelection => Boolean(selection));
-
-    if (!resolvedSelections.length) {
-      throw new DashboardValidationError('Selected task products could not be resolved to internal products.');
-    }
-
-    const location = await resolveTaskBookingLocation(client, task.site);
-    const clientId = await upsertTaskBookingClient(client, task);
-    const totalAmount =
-      parseTaskBookingAmount(readTaskRawText(task, 'price')) ??
-      resolvedSelections.reduce((sum, selection) => sum + selection.unitPrice * selection.quantity, 0);
-    const paidAmount = 0;
-    const bookingRaw = {
-      source: 'manual_task',
-      notes: task.description.trim(),
-      manual: {
-        columnTitle: task.columnTitle,
-        contact: {
-          email: readTaskRawText(task, 'email'),
-          firstName: readTaskRawText(task, 'first_name'),
-          lastName: readTaskRawText(task, 'last_name'),
-          phoneNumber: readTaskRawText(task, 'phone_number')
-        },
-        payment: {
-          amountOutstanding: totalAmount,
-          amountPaid: paidAmount,
-          amountToPay: totalAmount,
-          fixedPrice: readTaskRawText(task, 'fixed_price'),
-          paymentMethod: readTaskRawText(task, 'payment_method'),
-          priceCalculation: readTaskRawText(task, 'price_calculation'),
-          taxation: readTaskRawText(task, 'taxation')
-        },
-        regiondoSelections: resolvedSelections.map((selection, index) => ({
-          id: `manual-selection-${index + 1}`,
-          quantity: selection.quantity,
-          productId: selection.productId,
-          regiondoProductId: selection.regiondoProductId,
-          productTitle: selection.productTitle,
-          variationLabel: selection.variationLabel,
-          optionValueLabel: selection.optionValueLabel
-        })),
-        reservedCapacityDate: task.reservedCapacityDate,
-        reservedDate: task.reminderDate,
-        site: location.title,
-        taskId: task.id,
-        taskRawJson: task.rawJson,
-        taskTitle: task.title
-      }
-    };
-
-    const bookingResult = await client.query<{ booking_id: string }>(
-      `INSERT INTO bookings (
-         client_id,
-         location_id,
-         status,
-         guest_count,
-         total_amount,
-         paid_amount,
-         dt_from,
-         dt_to,
-         source,
-         regiondo_raw
-       )
-       VALUES ($1, $2, 'confirmed', $3, $4, $5, $6::timestamptz, $7::timestamptz, 'manual', $8::jsonb)
-       RETURNING booking_id`,
-      [
-        clientId,
-        location.location_id,
-        readTaskAttendees(task),
-        totalAmount,
-        paidAmount,
-        toIsoStringOrThrow(task.eventDateTime ?? '', 'task.eventDateTime'),
-        resolveTaskBookingEndDateTime(task),
-        JSON.stringify(bookingRaw)
-      ]
-    );
-
-    const bookingId = bookingResult.rows[0].booking_id;
-    const groupedProducts = resolvedSelections.reduce<Map<string, { quantity: number; unitPrice: number }>>(
-      (result, selection) => {
-        const existing = result.get(selection.productId);
-
-        if (existing) {
-          existing.quantity += selection.quantity;
-          existing.unitPrice = Math.max(existing.unitPrice, selection.unitPrice);
-          return result;
-        }
-
-        result.set(selection.productId, {
-          quantity: selection.quantity,
-          unitPrice: selection.unitPrice
-        });
-        return result;
-      },
-      new Map()
-    );
-
-    for (const [productId, value] of groupedProducts.entries()) {
-      await client.query(
-        `INSERT INTO booking_products (booking_id, product_id, quantity, unit_price)
-         VALUES ($1, $2, $3, $4)`,
-        [bookingId, productId, value.quantity, value.unitPrice]
-      );
-    }
+    const { bookingId } = await createRegiondoBookingForTask(client, task);
 
     await client.query(
       `UPDATE tasks

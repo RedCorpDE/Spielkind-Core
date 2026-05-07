@@ -125,88 +125,93 @@ async function ensureProductStub(
   return result.rows[0].product_id;
 }
 
-export async function importNormalizedRegiondoBooking(input: NormalizedRegiondoBookingImport): Promise<{ bookingId: string }> {
-  return withTransaction(async (client) => {
-    const clientId = await upsertClient(client, input.client);
-    const locationId = await resolveLocation(client, {
-      location: input.location,
-      regiondoProductIds: input.items.map((item) => item.regiondoProductId)
-    });
-
-    const bookingResult = await client.query<{ booking_id: string }>(
-      `INSERT INTO bookings (
-         client_id,
-         location_id,
-         status,
-         guest_count,
-         total_amount,
-         paid_amount,
-         dt_from,
-         dt_to,
-         source,
-         regiondo_booking_id,
-         regiondo_order_number,
-         regiondo_snapshot_generated_at,
-         regiondo_raw
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, 'regiondo', $9, $10, $11::timestamptz, $12::jsonb)
-       ON CONFLICT (regiondo_booking_id)
-       DO UPDATE SET client_id = EXCLUDED.client_id,
-                     location_id = EXCLUDED.location_id,
-                     status = EXCLUDED.status,
-                     guest_count = EXCLUDED.guest_count,
-                     total_amount = EXCLUDED.total_amount,
-                     paid_amount = EXCLUDED.paid_amount,
-                     dt_from = EXCLUDED.dt_from,
-                     dt_to = EXCLUDED.dt_to,
-                     regiondo_order_number = EXCLUDED.regiondo_order_number,
-                     regiondo_snapshot_generated_at = EXCLUDED.regiondo_snapshot_generated_at,
-                     regiondo_raw = EXCLUDED.regiondo_raw,
-                     updated_at = now()
-       RETURNING booking_id`,
-      [
-        clientId,
-        locationId,
-        input.status,
-        input.guestCount,
-        input.totalAmount,
-        input.paidAmount,
-        input.dtFrom,
-        input.dtTo,
-        input.bookingKey,
-        input.orderNumber,
-        input.snapshotGeneratedAt,
-        JSON.stringify(input.raw)
-      ]
-    );
-
-    const bookingId = bookingResult.rows[0].booking_id;
-
-    await client.query('DELETE FROM booking_products WHERE booking_id = $1', [bookingId]);
-
-    for (const item of input.items) {
-      const productId = await ensureProductStub(client, item);
-      await client.query(
-        `INSERT INTO booking_products (booking_id, product_id, quantity, unit_price)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (booking_id, product_id)
-         DO UPDATE SET quantity = EXCLUDED.quantity, unit_price = EXCLUDED.unit_price`,
-        [bookingId, productId, item.quantity, item.unitPrice]
-      );
-    }
-
-    await client.query('DELETE FROM payments WHERE booking_id = $1', [bookingId]);
-
-    for (const payment of input.payments) {
-      await client.query(
-        `INSERT INTO payments (booking_id, amount, type, provider_ref)
-         VALUES ($1, $2, $3, $4)`,
-        [bookingId, payment.amount, payment.type, payment.providerRef]
-      );
-    }
-
-    return { bookingId };
+export async function upsertNormalizedRegiondoBooking(
+  client: PoolClient,
+  input: NormalizedRegiondoBookingImport
+): Promise<{ bookingId: string }> {
+  const clientId = await upsertClient(client, input.client);
+  const locationId = await resolveLocation(client, {
+    location: input.location,
+    regiondoProductIds: input.items.map((item) => item.regiondoProductId)
   });
+
+  const bookingResult = await client.query<{ booking_id: string }>(
+    `INSERT INTO bookings (
+       client_id,
+       location_id,
+       status,
+       guest_count,
+       total_amount,
+       paid_amount,
+       dt_from,
+       dt_to,
+       source,
+       regiondo_booking_id,
+       regiondo_order_number,
+       regiondo_snapshot_generated_at,
+       regiondo_raw
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, 'regiondo', $9, $10, $11::timestamptz, $12::jsonb)
+     ON CONFLICT (regiondo_booking_id)
+     DO UPDATE SET client_id = EXCLUDED.client_id,
+                   location_id = EXCLUDED.location_id,
+                   status = EXCLUDED.status,
+                   guest_count = EXCLUDED.guest_count,
+                   total_amount = EXCLUDED.total_amount,
+                   paid_amount = EXCLUDED.paid_amount,
+                   dt_from = EXCLUDED.dt_from,
+                   dt_to = EXCLUDED.dt_to,
+                   regiondo_order_number = EXCLUDED.regiondo_order_number,
+                   regiondo_snapshot_generated_at = EXCLUDED.regiondo_snapshot_generated_at,
+                   regiondo_raw = EXCLUDED.regiondo_raw,
+                   updated_at = now()
+     RETURNING booking_id`,
+    [
+      clientId,
+      locationId,
+      input.status,
+      input.guestCount,
+      input.totalAmount,
+      input.paidAmount,
+      input.dtFrom,
+      input.dtTo,
+      input.bookingKey,
+      input.orderNumber,
+      input.snapshotGeneratedAt,
+      JSON.stringify(input.raw)
+    ]
+  );
+
+  const bookingId = bookingResult.rows[0].booking_id;
+
+  await client.query('DELETE FROM booking_products WHERE booking_id = $1', [bookingId]);
+
+  for (const item of input.items) {
+    const productId = await ensureProductStub(client, item);
+    await client.query(
+      `INSERT INTO booking_products (booking_id, product_id, quantity, unit_price)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (booking_id, product_id)
+       DO UPDATE SET quantity = EXCLUDED.quantity, unit_price = EXCLUDED.unit_price`,
+      [bookingId, productId, item.quantity, item.unitPrice]
+    );
+  }
+
+  await client.query('DELETE FROM payments WHERE booking_id = $1', [bookingId]);
+
+  for (const payment of input.payments) {
+    await client.query(
+      `INSERT INTO payments (booking_id, amount, type, provider_ref)
+       VALUES ($1, $2, $3, $4)`,
+      [bookingId, payment.amount, payment.type, payment.providerRef]
+    );
+  }
+
+  return { bookingId };
+}
+
+export async function importNormalizedRegiondoBooking(input: NormalizedRegiondoBookingImport): Promise<{ bookingId: string }> {
+  return withTransaction(async (client) => upsertNormalizedRegiondoBooking(client, input));
 }
 
 export async function listRegiondoBookingsForReconciliation(limit: number): Promise<
