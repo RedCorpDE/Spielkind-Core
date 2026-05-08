@@ -67,18 +67,19 @@ describe('dashboard repository queries', () => {
       update_log: [],
       raw_json: {
         site: 'Berlin',
-        payment_method: 'per_invoice',
-        blocker_1_selection: ['alpha', 'beta'],
         booking_data: {
           contact_data: {
             email: 'booking@example.com'
           },
-          products: [
+          options: [
             {
+              option_id: '720707',
               product_id: '297021',
-              qty: 2
+              variation_id: '315643'
             }
-          ]
+          ],
+          payment_method: 'per_invoice',
+          qty: 1
         }
       },
       event_date_time: '2026-04-29T10:00:00.000Z',
@@ -96,18 +97,19 @@ describe('dashboard repository queries', () => {
     expect(task.site).toBe('Berlin');
     expect(task.rawJson).toMatchObject({
       site: 'Berlin',
-      payment_method: 'per_invoice',
-      blocker_1_selection: ['alpha', 'beta'],
       booking_data: {
         contact_data: {
           email: 'booking@example.com'
         },
-        products: [
+        options: [
           {
+            option_id: '720707',
             product_id: '297021',
-            qty: 2
+            variation_id: '315643'
           }
-        ]
+        ],
+        payment_method: 'per_invoice',
+        qty: 1
       }
     });
   });

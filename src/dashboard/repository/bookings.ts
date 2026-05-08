@@ -269,6 +269,12 @@ function parseTaskBookingAmount(value: string | null): number | null {
 }
 
 function readTaskAttendees(task: DashboardTask): number {
+  const bookingData = readTaskBookingData(task);
+  const bookingDataAttendees = readRecordPositiveInteger(bookingData, 'attendees');
+  if (bookingDataAttendees !== null) {
+    return bookingDataAttendees;
+  }
+
   const value = task.rawJson.attendees;
 
   if (typeof value === 'number' && Number.isFinite(value)) {
@@ -293,6 +299,10 @@ function readTaskRawRecord(task: DashboardTask, key: string): Record<string, unk
 function readTaskRawArray(task: DashboardTask, key: string): unknown[] {
   const value = task.rawJson[key];
   return Array.isArray(value) ? value : [];
+}
+
+function readTaskBookingData(task: DashboardTask): Record<string, unknown> | null {
+  return readTaskRawRecord(task, 'booking_data') ?? readTaskRawRecord(task, 'bookingData');
 }
 
 function readRecordText(record: Record<string, unknown> | null, ...keys: string[]): string | null {
@@ -380,7 +390,7 @@ function buildTaskRegiondoCartItem(
 ): RegiondoCheckoutCartItem {
   const productId = readRecordText(item, 'product_id', 'productId', 'id');
   if (!productId) {
-    throw new DashboardValidationError(`Task booking_data.products[${index}] is missing product_id.`);
+    throw new DashboardValidationError(`Task booking_data.options[${index}] is missing product_id.`);
   }
 
   const quantity = readRecordPositiveInteger(item, 'qty', 'quantity') ?? defaultQuantity;
@@ -429,11 +439,19 @@ function buildTaskRegiondoContactData(task: DashboardTask, bookingData: Record<s
       ? bookingData.contactData
       : null;
 
-  const firstname = readRecordText(bookingContact, 'firstname', 'first_name', 'firstName') ?? readTaskRawText(task, 'first_name');
-  const lastname = readRecordText(bookingContact, 'lastname', 'last_name', 'lastName') ?? readTaskRawText(task, 'last_name');
-  const email = readRecordText(bookingContact, 'email') ?? readTaskRawText(task, 'email');
+  const firstname =
+    readRecordText(bookingContact, 'firstname', 'first_name', 'firstName') ??
+    readRecordText(bookingData, 'first_name', 'firstName') ??
+    readTaskRawText(task, 'first_name');
+  const lastname =
+    readRecordText(bookingContact, 'lastname', 'last_name', 'lastName') ??
+    readRecordText(bookingData, 'last_name', 'lastName') ??
+    readTaskRawText(task, 'last_name');
+  const email = readRecordText(bookingContact, 'email') ?? readRecordText(bookingData, 'email') ?? readTaskRawText(task, 'email');
   const telephone =
-    readRecordText(bookingContact, 'telephone', 'phone_number', 'phoneNumber') ?? readTaskRawText(task, 'phone_number');
+    readRecordText(bookingContact, 'telephone', 'phone_number', 'phoneNumber') ??
+    readRecordText(bookingData, 'phone_number', 'phoneNumber') ??
+    readTaskRawText(task, 'phone_number');
 
   if (!firstname || !lastname || !email) {
     throw new DashboardValidationError(
@@ -450,27 +468,41 @@ function buildTaskRegiondoContactData(task: DashboardTask, bookingData: Record<s
 }
 
 function buildTaskRegiondoBookingPayload(task: DashboardTask): TaskRegiondoBookingPayload {
-  const bookingData = readTaskRawRecord(task, 'booking_data') ?? readTaskRawRecord(task, 'bookingData');
+  const bookingData = readTaskBookingData(task);
   if (!bookingData) {
     throw new DashboardValidationError('Task raw_json.booking_data is required before creating a Regiondo booking.');
   }
 
-  const products = Array.isArray(bookingData.products)
-    ? bookingData.products
-    : Array.isArray(bookingData.items)
-      ? bookingData.items
-      : [];
+  const cartItemsSource = Array.isArray(bookingData.options)
+    ? bookingData.options
+    : Array.isArray(bookingData.products)
+      ? bookingData.products
+      : Array.isArray(bookingData.items)
+        ? bookingData.items
+        : [];
+  const defaultQuantity = readRecordPositiveInteger(bookingData, 'qty', 'quantity') ?? 1;
+  const defaultExternalItemId = readRecordText(bookingData, 'external_item_id', 'externalItemId');
 
-  const items = products.flatMap((product, index) => {
-    if (!isRecord(product)) {
+  const items = cartItemsSource.flatMap((entry, index) => {
+    if (!isRecord(entry)) {
       return [];
     }
 
-    return [buildTaskRegiondoCartItem(product, index, readTaskAttendees(task))];
+    return [
+      buildTaskRegiondoCartItem(
+        {
+          ...entry,
+          ...(defaultExternalItemId ? { external_item_id: defaultExternalItemId } : {}),
+          ...(task.eventDateTime ? { date_time: task.eventDateTime } : {})
+        },
+        index,
+        defaultQuantity
+      )
+    ];
   });
 
   if (!items.length) {
-    throw new DashboardValidationError('Task booking_data.products must include at least one Regiondo cart item.');
+    throw new DashboardValidationError('Task booking_data.options must include at least one Regiondo cart item.');
   }
 
   const buyerData = Array.isArray(bookingData.buyer_data)
@@ -617,7 +649,9 @@ function resolveTaskBookingEndDateTime(task: DashboardTask): string {
     throw new DashboardValidationError('Task event date/time is invalid.');
   }
 
-  const secondaryEventTime = readTaskRawText(task, 'secondary_event_time');
+  const bookingData = readTaskBookingData(task);
+  const secondaryEventTime =
+    readRecordText(bookingData, 'secondary_event_time', 'secondaryEventTime') ?? readTaskRawText(task, 'secondary_event_time');
   if (secondaryEventTime && /^\d{2}:\d{2}$/.test(secondaryEventTime)) {
     const [hours, minutes] = secondaryEventTime.split(':').map((value) => Number(value));
     const end = new Date(start);
