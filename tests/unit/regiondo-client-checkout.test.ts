@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RegiondoClient } from '../../src/modules/regiondo/regiondo.client.js';
+import { RegiondoClient, RegiondoPayloadError } from '../../src/modules/regiondo/regiondo.client.js';
 
 describe('RegiondoClient checkout actions', () => {
   it('posts checkout purchases with signed query params and JSON body', async () => {
@@ -132,5 +132,67 @@ describe('RegiondoClient checkout actions', () => {
     expect(observedMethod).toBe('POST');
     expect(observedUrl?.pathname).toBe('/v1/checkout/cancel');
     expect(observedUrl?.searchParams.get('reference_ids')).toBe('ref-1,ref-2');
+  });
+
+  it('surfaces invalid Regiondo purchase payloads as structured provider errors', async () => {
+    const client = new RegiondoClient({
+      baseUrl: 'https://example.com/v1',
+      currency: 'EUR',
+      fetchImplementation: async () =>
+        new Response(
+          JSON.stringify({
+            order_id: '4711',
+            order_number: 'R-10001'
+          }),
+          {
+            headers: { 'content-type': 'application/json' },
+            status: 200
+          }
+        ),
+      language: 'de-DE',
+      maxRetries: 0,
+      publicKey: 'public-key',
+      requestThrottleMs: 0,
+      requestTimeoutMs: 1_000,
+      retryBaseDelayMs: 1,
+      secretKey: 'secret-key',
+      sleep: async () => undefined,
+      supplierId: '15241'
+    });
+
+    await expect(
+      client.purchaseOrder({
+        contactData: {
+          email: 'booking@example.com',
+          firstname: 'Jamie',
+          lastname: 'Rivera'
+        },
+        items: [
+          {
+            product_id: 297021,
+            qty: 1
+          }
+        ]
+      })
+    ).rejects.toBeInstanceOf(RegiondoPayloadError);
+
+    await expect(
+      client.purchaseOrder({
+        contactData: {
+          email: 'booking@example.com',
+          firstname: 'Jamie',
+          lastname: 'Rivera'
+        },
+        items: [
+          {
+            product_id: 297021,
+            qty: 1
+          }
+        ]
+      })
+    ).rejects.toMatchObject({
+      message: 'Regiondo purchase response payload did not match the expected shape.',
+      responseBody: expect.stringContaining('items')
+    });
   });
 });

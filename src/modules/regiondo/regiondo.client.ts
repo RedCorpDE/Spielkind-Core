@@ -1,4 +1,5 @@
 import { appConfig } from '../../config/env.js';
+import { ZodError, type ZodType } from 'zod';
 import { signRegiondoRequest } from './regiondo.auth.js';
 import { RegiondoCatalogSyncError } from './regiondo-catalog.errors.js';
 import {
@@ -115,8 +116,33 @@ export class RegiondoTransientError extends RegiondoApiError {
   }
 }
 
+export class RegiondoPayloadError extends RegiondoApiError {
+  constructor(message: string, details: string) {
+    super(message, 502, details);
+    this.name = 'RegiondoPayloadError';
+  }
+}
+
 function sleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+function formatZodErrorDetails(error: ZodError): string {
+  return error.issues
+    .map((issue) => `${issue.path.join('.') || 'payload'}: ${issue.message}`)
+    .join('; ');
+}
+
+function parseRegiondoPayload<T>(schema: ZodType<T>, payload: unknown, context: string): T {
+  const parsed = schema.safeParse(payload);
+  if (parsed.success) {
+    return parsed.data;
+  }
+
+  throw new RegiondoPayloadError(
+    `Regiondo ${context} payload did not match the expected shape.`,
+    formatZodErrorDetails(parsed.error)
+  );
 }
 
 function mapHttpError(status: number, responseBody: string): RegiondoApiError {
@@ -397,7 +423,11 @@ export class RegiondoClient {
       limit: '250'
     });
 
-    const supplierBookings = regiondoSupplierBookingsSchema.parse(supplierBookingsRaw);
+    const supplierBookings = parseRegiondoPayload(
+      regiondoSupplierBookingsSchema,
+      supplierBookingsRaw,
+      'supplier bookings response'
+    );
     if (!supplierBookings.length) {
       throw new RegiondoTransientError(503, `No supplier bookings found for ${input.bookingKey}`);
     }
@@ -409,7 +439,7 @@ export class RegiondoClient {
 
     return {
       supplierBookings,
-      purchaseData: regiondoPurchaseDataSchema.parse(purchaseDataRaw)
+      purchaseData: parseRegiondoPayload(regiondoPurchaseDataSchema, purchaseDataRaw, 'purchase response')
     };
   }
 
@@ -436,7 +466,7 @@ export class RegiondoClient {
       }
     });
 
-    return regiondoPurchaseDataSchema.parse(purchaseDataRaw);
+    return parseRegiondoPayload(regiondoPurchaseDataSchema, purchaseDataRaw, 'purchase response');
   }
 
   async cancelTickets(referenceIds: string[]): Promise<void> {

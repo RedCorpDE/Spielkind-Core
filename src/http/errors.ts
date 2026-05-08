@@ -1,5 +1,11 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { DashboardNotFoundError, DashboardValidationError } from '../dashboard/repository/core.js';
+import {
+  RegiondoApiError,
+  RegiondoAuthError,
+  RegiondoRateLimitError,
+  RegiondoTransientError
+} from '../modules/regiondo/regiondo.client.js';
 import { RegiondoSyncValidationError } from '../sync/repository.js';
 import { RegiondoWebhookValidationError } from '../sync/sync-service.js';
 import { MissingProductResourceMappingError, OverbookingError } from '../modules/resources/consumption.service.js';
@@ -42,6 +48,26 @@ export class ConflictHttpError extends HttpError {
   }
 }
 
+function getRegiondoStatusCode(error: RegiondoApiError): number {
+  if (error instanceof RegiondoRateLimitError) {
+    return 429;
+  }
+
+  if (error instanceof RegiondoTransientError) {
+    return 503;
+  }
+
+  if (error instanceof RegiondoAuthError) {
+    return 502;
+  }
+
+  if (typeof error.status === 'number' && error.status >= 400 && error.status < 500) {
+    return 400;
+  }
+
+  return 502;
+}
+
 export function registerErrorHandler() {
   return async function errorHandler(error: Error, request: FastifyRequest, reply: FastifyReply) {
     if (error instanceof HttpError) {
@@ -66,6 +92,17 @@ export function registerErrorHandler() {
 
     if (error instanceof OverbookingError || error instanceof MissingProductResourceMappingError) {
       reply.status(409).send({ ok: false, error: error.message });
+      return;
+    }
+
+    if (error instanceof RegiondoApiError) {
+      const details = error.responseBody?.trim();
+
+      reply.status(getRegiondoStatusCode(error)).send({
+        ok: false,
+        error: error.message,
+        ...(details ? { details } : {})
+      });
       return;
     }
 
