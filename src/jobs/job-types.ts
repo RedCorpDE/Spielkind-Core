@@ -1,5 +1,6 @@
 export const JOB_TYPES = {
   PROCESS_REGIONDO_WEBHOOKS: 'process_regiondo_webhooks',
+  SYNC_REGIONDO_BOOKINGS: 'sync_regiondo_bookings',
   SYNC_REGIONDO_CATALOG: 'sync_regiondo_catalog',
   DISPATCH_REMINDERS: 'dispatch_reminders',
   RECONCILE_REGIONDO_BOOKINGS: 'reconcile_regiondo_bookings'

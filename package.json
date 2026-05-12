@@ -14,6 +14,7 @@
     "migrate": "node dist/db/migrate.js",
     "admin:create": "tsx src/auth/create-admin-user.ts",
     "job:regiondo-webhooks": "tsx src/scripts/job-regiondo-webhooks.ts",
+    "job:sync-regiondo-bookings": "tsx src/scripts/job-sync-regiondo-bookings.ts",
     "job:sync-regiondo-catalog": "tsx src/scripts/job-sync-regiondo-catalog.ts",
     "job:dispatch-reminders": "tsx src/scripts/job-dispatch-reminders.ts",
     "job:reconcile-regiondo-bookings": "tsx src/scripts/job-reconcile-regiondo-bookings.ts"

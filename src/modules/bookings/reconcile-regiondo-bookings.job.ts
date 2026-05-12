@@ -3,7 +3,7 @@ import { runJobWithLock } from '../../jobs/run-job.js';
 import { regiondoClient } from '../regiondo/regiondo.client.js';
 import { importNormalizedRegiondoBooking, listRegiondoBookingsForReconciliation } from './booking.repository.js';
 import { normalizeRegiondoBookingImport } from './booking-normalizer.js';
-import { rebuildConsumptionsForBooking } from '../resources/consumption.service.js';
+import { isNonBlockingConsumptionRebuildError, rebuildConsumptionsForBooking } from '../resources/consumption.service.js';
 
 export async function runReconcileRegiondoBookingsJob(input: { limit?: number } = {}) {
   return runJobWithLock({
@@ -27,7 +27,15 @@ export async function runReconcileRegiondoBookingsJob(input: { limit?: number } 
         });
 
         const { bookingId } = await importNormalizedRegiondoBooking(normalized);
-        await rebuildConsumptionsForBooking(bookingId);
+
+        try {
+          await rebuildConsumptionsForBooking(bookingId);
+        } catch (error) {
+          if (!isNonBlockingConsumptionRebuildError(error)) {
+            throw error;
+          }
+        }
+
         processedCount += 1;
       }
 

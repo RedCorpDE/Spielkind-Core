@@ -69,6 +69,19 @@ export interface RegiondoPurchaseOrderInput {
   syncTicketsProcessing?: boolean;
 }
 
+export interface RegiondoListSupplierBookingsInput {
+  bookingKey?: string;
+  dateRange?: string;
+  dateRangeBy?: 'date_bought' | 'date_of_event';
+  limit?: number;
+  offset?: number;
+  orderIds?: string[];
+  productIds?: string[];
+  resourceIds?: string[];
+  status?: string;
+  type?: string;
+}
+
 interface RegiondoClientOptions {
   baseUrl: string;
   catalogPageSize: number;
@@ -136,7 +149,7 @@ function formatZodErrorDetails(error: ZodError): string {
     .join('; ');
 }
 
-function parseRegiondoPayload<T>(schema: ZodType<T>, payload: unknown, context: string): T {
+function parseRegiondoPayload<T>(schema: ZodType<T, any, any>, payload: unknown, context: string): T {
   const parsed = schema.safeParse(payload);
   if (parsed.success) {
     return parsed.data;
@@ -424,20 +437,31 @@ export class RegiondoClient {
     });
   }
 
+  async listSupplierBookings(input: RegiondoListSupplierBookingsInput = {}): Promise<RegiondoSupplierBooking[]> {
+    const supplierBookingsRaw = await this.getCollection<RegiondoSupplierBooking>('/supplier/bookings', {
+      ...(input.bookingKey ? { booking_key: input.bookingKey } : {}),
+      ...(input.dateRange ? { date_range: input.dateRange } : {}),
+      ...(input.dateRangeBy ? { date_range_by: input.dateRangeBy } : {}),
+      ...(typeof input.limit === 'number' ? { limit: `${input.limit}` } : {}),
+      ...(typeof input.offset === 'number' ? { offset: `${input.offset}` } : {}),
+      ...(input.orderIds?.length ? { order_ids: input.orderIds.join(',') } : {}),
+      ...(input.productIds?.length ? { product_ids: input.productIds.join(',') } : {}),
+      ...(input.resourceIds?.length ? { resource_ids: input.resourceIds.join(',') } : {}),
+      ...(input.status ? { status: input.status } : {}),
+      ...(input.type ? { type: input.type } : {})
+    });
+
+    return parseRegiondoPayload(regiondoSupplierBookingsSchema, supplierBookingsRaw, 'supplier bookings response');
+  }
+
   async hydrateBookingOrder(input: {
     bookingKey: string;
     orderNumber?: string | null;
   }): Promise<{ supplierBookings: RegiondoSupplierBooking[]; purchaseData: RegiondoPurchaseData }> {
-    const supplierBookingsRaw = await this.getCollection<RegiondoSupplierBooking>('/supplier/bookings', {
-      booking_key: input.bookingKey,
-      limit: '250'
+    const supplierBookings = await this.listSupplierBookings({
+      bookingKey: input.bookingKey,
+      limit: 250
     });
-
-    const supplierBookings = parseRegiondoPayload(
-      regiondoSupplierBookingsSchema,
-      supplierBookingsRaw,
-      'supplier bookings response'
-    );
     if (!supplierBookings.length) {
       throw new RegiondoTransientError(503, `No supplier bookings found for ${input.bookingKey}`);
     }

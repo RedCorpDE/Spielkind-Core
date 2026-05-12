@@ -77,10 +77,10 @@ export const regiondoCatalogProductsSchema = z.array(regiondoCatalogProductSchem
 
 const regiondoContactDataSchema = z
   .object({
-    firstname: z.string().optional(),
-    lastname: z.string().optional(),
-    email: z.string().optional(),
-    telephone: z.string().optional()
+    firstname: optionalTrimmedStringSchema,
+    lastname: optionalTrimmedStringSchema,
+    email: optionalTrimmedStringSchema,
+    telephone: optionalTrimmedStringSchema
   })
   .passthrough();
 
@@ -88,21 +88,21 @@ export const regiondoSoldItemSchema = z
   .object({
     unique_item_id: z.string().optional(),
     booking_key: z.string().min(1),
-    ticket_name: z.string().optional(),
-    product_name: z.string().optional(),
-    ticket_variation: z.string().optional(),
-    ticket_option: z.string().optional(),
+    ticket_name: optionalTrimmedStringSchema,
+    product_name: optionalTrimmedStringSchema,
+    ticket_variation: optionalTrimmedStringSchema,
+    ticket_option: optionalTrimmedStringSchema,
     ticket_qty: z.coerce.number().int().nonnegative().optional(),
     ticket_qty_canceled: z.coerce.number().int().nonnegative().optional(),
-    status: z.string().optional(),
-    event_date_time: z.string().optional(),
+    status: optionalTrimmedStringSchema,
+    event_date_time: optionalTrimmedStringSchema,
     row_total_incl_tax: z.coerce.number().optional(),
     price_per_one_incl_tax: z.coerce.number().optional(),
-    payment_status: z.string().optional(),
-    item_type_code: z.string().optional(),
+    payment_status: optionalTrimmedStringSchema,
+    item_type_code: optionalTrimmedStringSchema,
     product_id: regiondoIdentifierSchema.optional(),
-    sales_channel: z.string().optional(),
-    external_id: z.string().optional(),
+    sales_channel: optionalTrimmedStringSchema,
+    external_id: optionalTrimmedStringSchema,
     resources: z.array(z.unknown()).optional()
   })
   .passthrough();
@@ -112,9 +112,9 @@ export const regiondoPurchaseDataSchema = z
     info_generated_at: z.string().min(1),
     order_number: regiondoIdentifierSchema,
     order_id: regiondoIdentifierSchema.optional(),
-    purchased_at: z.string().optional(),
-    sales_channel: z.string().optional(),
-    payment_method: z.string().optional(),
+    purchased_at: optionalTrimmedStringSchema,
+    sales_channel: optionalTrimmedStringSchema,
+    payment_method: optionalTrimmedStringSchema,
     contact_data: regiondoContactDataSchema.optional(),
     items: z.array(regiondoSoldItemSchema).min(1),
     grand_total: z.coerce.number().optional()
@@ -139,27 +139,27 @@ export const regiondoPurchaseDataPushSchema = z
 export const legacyRegiondoBookingSchema = z
   .object({
     id: regiondoIdentifierSchema,
-    status: z.string().optional(),
-    start_date: z.string().optional(),
-    end_date: z.string().optional(),
+    status: optionalTrimmedStringSchema,
+    start_date: optionalTrimmedStringSchema,
+    end_date: optionalTrimmedStringSchema,
     total_price: z.coerce.number().optional(),
     paid_amount: z.coerce.number().optional(),
     guest_count: z.coerce.number().int().positive().optional(),
     customer: z
       .object({
         id: regiondoIdentifierSchema.optional(),
-        first_name: z.string().optional(),
-        last_name: z.string().optional(),
-        email: z.string().optional(),
-        phone_number: z.string().optional()
+        first_name: optionalTrimmedStringSchema,
+        last_name: optionalTrimmedStringSchema,
+        email: optionalTrimmedStringSchema,
+        phone_number: optionalTrimmedStringSchema
       })
       .passthrough()
       .optional(),
     location: z
       .object({
         id: regiondoIdentifierSchema.optional(),
-        name: z.string().optional(),
-        title: z.string().optional()
+        name: optionalTrimmedStringSchema,
+        title: optionalTrimmedStringSchema
       })
       .passthrough()
       .optional(),
@@ -167,7 +167,7 @@ export const legacyRegiondoBookingSchema = z
       .object({
         id: regiondoIdentifierSchema.optional(),
         price: z.coerce.number().optional(),
-        title: z.string().optional()
+        title: optionalTrimmedStringSchema
       })
       .passthrough()
       .optional(),
@@ -178,7 +178,7 @@ export const legacyRegiondoBookingSchema = z
             id: regiondoIdentifierSchema.optional(),
             quantity: z.coerce.number().int().positive().optional(),
             price: z.coerce.number().optional(),
-            title: z.string().optional()
+            title: optionalTrimmedStringSchema
           })
           .passthrough()
       )
@@ -192,21 +192,21 @@ export const regiondoSupplierBookingSchema = z
   .object({
     booking_key: z.string().min(1),
     order_number: regiondoIdentifierSchema,
-    status: z.string().optional(),
-    event_date_time: z.string().optional(),
-    date_applied_for: z.string().optional(),
-    duration_type: z.string().optional(),
+    status: optionalTrimmedStringSchema,
+    event_date_time: optionalTrimmedStringSchema,
+    date_applied_for: optionalTrimmedStringSchema,
+    duration_type: optionalTrimmedStringSchema,
     duration_value: z.coerce.number().optional(),
     qty: z.coerce.number().int().nonnegative().optional(),
     qty_cancelled: z.coerce.number().int().nonnegative().optional(),
     product_id: regiondoIdentifierSchema.optional(),
-    product_name: z.string().optional(),
-    ticket_name: z.string().optional(),
-    option_name: z.string().optional(),
-    first_name: z.string().optional(),
-    last_name: z.string().optional(),
-    phone_number: z.string().optional(),
-    email: z.string().optional(),
+    product_name: optionalTrimmedStringSchema,
+    ticket_name: optionalTrimmedStringSchema,
+    option_name: optionalTrimmedStringSchema,
+    first_name: optionalTrimmedStringSchema,
+    last_name: optionalTrimmedStringSchema,
+    phone_number: optionalTrimmedStringSchema,
+    email: optionalTrimmedStringSchema,
     contact_data: regiondoContactDataSchema.optional()
   })
   .passthrough();

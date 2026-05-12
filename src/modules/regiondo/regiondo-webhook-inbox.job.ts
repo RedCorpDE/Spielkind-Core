@@ -4,7 +4,7 @@ import { runJobWithLock } from '../../jobs/run-job.js';
 import { startSync, finishSync, failSync } from '../../sync/sync-log.js';
 import { importNormalizedRegiondoBooking } from '../bookings/booking.repository.js';
 import { normalizeRegiondoBookingImport } from '../bookings/booking-normalizer.js';
-import { rebuildConsumptionsForBooking } from '../resources/consumption.service.js';
+import { isNonBlockingConsumptionRebuildError, rebuildConsumptionsForBooking } from '../resources/consumption.service.js';
 import { isRetryableRegiondoError, regiondoClient } from './regiondo.client.js';
 import {
   claimRegiondoWebhookEvents,
@@ -33,6 +33,7 @@ export async function runProcessRegiondoWebhookInboxJob(input: { limit?: number 
       let processedCount = 0;
       let retriedCount = 0;
       let deadLetterCount = 0;
+      let skippedConsumptionRebuildCount = 0;
 
       try {
         for (const event of events) {
@@ -51,7 +52,17 @@ export async function runProcessRegiondoWebhookInboxJob(input: { limit?: number 
             });
 
             const { bookingId } = await importNormalizedRegiondoBooking(normalized);
-            await rebuildConsumptionsForBooking(bookingId);
+
+            try {
+              await rebuildConsumptionsForBooking(bookingId);
+            } catch (error) {
+              if (!isNonBlockingConsumptionRebuildError(error)) {
+                throw error;
+              }
+
+              skippedConsumptionRebuildCount += 1;
+            }
+
             await markRegiondoWebhookEventProcessed(event.event_id);
             processedCount += 1;
           } catch (error) {
@@ -73,6 +84,7 @@ export async function runProcessRegiondoWebhookInboxJob(input: { limit?: number 
           recordsProcessed: processedCount,
           metadata: {
             claimed: events.length,
+            skippedConsumptionRebuildCount,
             retriedCount,
             deadLetterCount
           }

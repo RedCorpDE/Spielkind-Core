@@ -15,6 +15,12 @@ export class MissingProductResourceMappingError extends Error {
   }
 }
 
+export function isNonBlockingConsumptionRebuildError(
+  error: unknown
+): error is MissingProductResourceMappingError | OverbookingError {
+  return error instanceof MissingProductResourceMappingError || error instanceof OverbookingError;
+}
+
 interface ResourceRequirementRow {
   resource_id: string;
   resource_title: string;

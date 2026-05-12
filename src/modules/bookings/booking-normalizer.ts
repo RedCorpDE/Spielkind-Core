@@ -1,5 +1,6 @@
 import { aggregateRegiondoBookingStatus, type BookingStatus } from './booking-status.mapper.js';
 import { RegiondoPayloadError } from '../regiondo/regiondo.client.js';
+import { parseRegiondoDateTime } from '../regiondo/regiondo-datetime.js';
 import type {
   LegacyRegiondoBooking,
   RegiondoPurchaseData,
@@ -132,11 +133,11 @@ function calculateBookingRange(input: {
   const starts = input.supplierBookings
     .map((booking) => booking.event_date_time ?? booking.date_applied_for)
     .filter((value): value is string => Boolean(value))
-    .map((value) => new Date(value))
-    .filter((value) => !Number.isNaN(value.getTime()))
+    .map((value) => parseRegiondoDateTime(value))
+    .filter((value): value is Date => value instanceof Date && !Number.isNaN(value.getTime()))
     .sort((left, right) => left.getTime() - right.getTime());
 
-  const fallbackStart = input.purchaseTimestamp ? new Date(input.purchaseTimestamp) : null;
+  const fallbackStart = parseRegiondoDateTime(input.purchaseTimestamp);
   const startDate = starts[0] ?? (fallbackStart && !Number.isNaN(fallbackStart.getTime()) ? fallbackStart : null);
 
   if (!startDate) {
@@ -146,7 +147,7 @@ function calculateBookingRange(input: {
   const computedEnds = input.supplierBookings
     .map((booking) => {
       const startValue = booking.event_date_time ?? booking.date_applied_for;
-      const start = startValue ? new Date(startValue) : null;
+      const start = parseRegiondoDateTime(startValue);
       const unit = booking.duration_type?.trim().toLowerCase() ?? '';
       const multiplier = durationUnitToMs[unit];
       const duration = typeof booking.duration_value === 'number' ? booking.duration_value : null;
@@ -157,7 +158,7 @@ function calculateBookingRange(input: {
 
       return new Date(start.getTime() + multiplier * duration);
     })
-    .filter((value): value is Date => Boolean(value))
+    .filter((value): value is Date => value instanceof Date && !Number.isNaN(value.getTime()))
     .sort((left, right) => right.getTime() - left.getTime());
 
   const endDate = computedEnds[0] ?? new Date(startDate.getTime() + 60 * 60 * 1000);

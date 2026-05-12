@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { appConfig } from '../config/env.js';
 import { runReconcileRegiondoBookingsJob } from '../modules/bookings/reconcile-regiondo-bookings.job.js';
+import { runSyncRegiondoBookingsJob } from '../modules/regiondo/regiondo-booking-sync.job.js';
 import { runDispatchRemindersJob } from '../modules/reminders/dispatch-reminders.job.js';
 import { runRegiondoCatalogSyncJob } from '../modules/regiondo/regiondo-catalog-sync.job.js';
 import { runProcessRegiondoWebhookInboxJob } from '../modules/regiondo/regiondo-webhook-inbox.job.js';
@@ -38,6 +39,14 @@ export const internalJobDefinitions = [
     embeddedCron: appConfig.REGIONDO_WEBHOOK_CRON,
     bodySchema: limitBodySchema,
     run: async (body) => runProcessRegiondoWebhookInboxJob({ limit: body.limit })
+  }),
+  defineInternalJob({
+    routePath: 'sync-regiondo-bookings',
+    jobType: JOB_TYPES.SYNC_REGIONDO_BOOKINGS,
+    description: 'Pulls recent Regiondo supplier bookings into the canonical booking dashboard.',
+    embeddedCron: appConfig.REGIONDO_BOOKING_SYNC_CRON,
+    bodySchema: limitBodySchema,
+    run: async (body) => runSyncRegiondoBookingsJob({ limit: body.limit })
   }),
   defineInternalJob({
     routePath: 'sync-regiondo-catalog',

@@ -4,6 +4,7 @@ import type {
   RegiondoSupplierBooking,
   RegiondoWebhookPayload
 } from './types.js';
+import { parseRegiondoDateTime } from '../modules/regiondo/regiondo-datetime.js';
 
 export const SHARED_REGIONDO_PLACEHOLDER_CUSTOMER_ID = '__unknown_regiondo_customer__';
 export const SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID = '__unknown_regiondo_location__';
@@ -143,11 +144,11 @@ export function calculateBookingRange(input: {
   const starts = input.supplierBookings
     .map((booking) => booking.event_date_time ?? booking.date_applied_for)
     .filter((value): value is string => Boolean(value))
-    .map((value) => new Date(value))
-    .filter((value) => !Number.isNaN(value.getTime()))
+    .map((value) => parseRegiondoDateTime(value))
+    .filter((value): value is Date => value instanceof Date && !Number.isNaN(value.getTime()))
     .sort((left, right) => left.getTime() - right.getTime());
 
-  const fallbackStart = input.purchaseTimestamp ? new Date(input.purchaseTimestamp) : null;
+  const fallbackStart = parseRegiondoDateTime(input.purchaseTimestamp);
   const startDate =
     starts[0] ??
     (fallbackStart && !Number.isNaN(fallbackStart.getTime()) ? fallbackStart : null);
@@ -159,7 +160,7 @@ export function calculateBookingRange(input: {
   const computedEnds = input.supplierBookings
     .map((booking) => {
       const startValue = booking.event_date_time ?? booking.date_applied_for;
-      const start = startValue ? new Date(startValue) : null;
+      const start = parseRegiondoDateTime(startValue);
       const unit = booking.duration_type?.trim().toLowerCase() ?? '';
       const multiplier = durationUnitToMs[unit];
       const value = typeof booking.duration_value === 'number' && Number.isFinite(booking.duration_value) ? booking.duration_value : null;
@@ -170,7 +171,7 @@ export function calculateBookingRange(input: {
 
       return new Date(start.getTime() + multiplier * value);
     })
-    .filter((value): value is Date => Boolean(value))
+    .filter((value): value is Date => value instanceof Date && !Number.isNaN(value.getTime()))
     .sort((left, right) => right.getTime() - left.getTime());
 
   const durationFallbackMs =
