@@ -131,6 +131,54 @@ function buildTaskRawJson(site: string, rawJson: unknown, existingRawJson?: unkn
   };
 }
 
+async function replaceTaskBookingLinks(
+  client: Queryable,
+  input: { taskId: string; bookingIds: string[]; primaryBookingId: string | null }
+): Promise<void> {
+  await client.query('DELETE FROM task_bookings WHERE task_id = $1', [input.taskId]);
+
+  for (const bookingId of input.bookingIds) {
+    await client.query(
+      `INSERT INTO task_bookings (task_id, booking_id)
+       VALUES ($1, $2)
+       ON CONFLICT (task_id, booking_id) DO NOTHING`,
+      [input.taskId, bookingId]
+    );
+  }
+
+  await client.query(
+    `UPDATE tasks
+     SET connected_booking_key = $1
+     WHERE id = $2`,
+    [input.primaryBookingId, input.taskId]
+  );
+}
+
+export async function appendTaskBookingLinks(
+  client: Queryable,
+  input: { taskId: string; bookingIds: string[]; primaryBookingId?: string | null }
+): Promise<void> {
+  const uniqueBookingIds = Array.from(new Set(input.bookingIds.filter(Boolean)));
+
+  for (const bookingId of uniqueBookingIds) {
+    await client.query(
+      `INSERT INTO task_bookings (task_id, booking_id)
+       VALUES ($1, $2)
+       ON CONFLICT (task_id, booking_id) DO NOTHING`,
+      [input.taskId, bookingId]
+    );
+  }
+
+  if (input.primaryBookingId !== undefined) {
+    await client.query(
+      `UPDATE tasks
+       SET connected_booking_key = $1
+       WHERE id = $2`,
+      [input.primaryBookingId, input.taskId]
+    );
+  }
+}
+
 async function ensureOwner(client: Queryable, ownerId?: string | null): Promise<DashboardTaskOwner | null> {
   if (!ownerId) {
     return null;
@@ -192,7 +240,12 @@ function buildListTasksQuery(filters: ListDashboardTasksFilters = {}): { query: 
 
   if (filters.connectedBookingId) {
     values.push(filters.connectedBookingId);
-    where.push(`t.connected_booking_key = $${values.length}::uuid`);
+    where.push(`EXISTS (
+      SELECT 1
+      FROM task_bookings tb
+      WHERE tb.task_id = t.id
+        AND tb.booking_id = $${values.length}::uuid
+    )`);
   }
 
   if (filters.search?.trim()) {
@@ -274,6 +327,14 @@ export async function createTask(input: CreateDashboardTaskInput, actor?: Dashbo
       ]
     );
 
+    if (input.connectedBookingId) {
+      await appendTaskBookingLinks(client, {
+        taskId: created.rows[0].id,
+        bookingIds: [input.connectedBookingId],
+        primaryBookingId: input.connectedBookingId
+      });
+    }
+
     await client.query('COMMIT');
     return await getTask(created.rows[0].id);
   } catch (error) {
@@ -333,6 +394,14 @@ export async function updateTask(
         taskId
       ]
     );
+
+    if (input.connectedBookingId !== undefined && input.connectedBookingId !== existingTask.connectedBookingId) {
+      await replaceTaskBookingLinks(client, {
+        taskId,
+        bookingIds: input.connectedBookingId ? [input.connectedBookingId] : [],
+        primaryBookingId: input.connectedBookingId ?? null
+      });
+    }
 
     await client.query('COMMIT');
     return await getTask(taskId);

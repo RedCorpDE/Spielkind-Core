@@ -41,6 +41,7 @@ import {
   toIsoString,
   toIsoStringOrThrow
 } from './core.js';
+import { appendTaskBookingLinks } from './tasks.js';
 
 const DEFAULT_BOOKINGS_PAGE_SIZE = 50;
 
@@ -532,7 +533,7 @@ function buildTaskRegiondoBookingPayload(task: DashboardTask): TaskRegiondoBooki
   };
 }
 
-function extractRegiondoBookingKeyFromPurchase(task: DashboardTask, purchaseData: Record<string, unknown>): string {
+function extractRegiondoBookingKeysFromPurchase(purchaseData: Record<string, unknown>): string[] {
   const items = Array.isArray(purchaseData.items) ? purchaseData.items : [];
   const bookingKeys = Array.from(
     new Set(
@@ -551,16 +552,13 @@ function extractRegiondoBookingKeyFromPurchase(task: DashboardTask, purchaseData
     throw new DashboardValidationError('Regiondo purchase did not return a booking key for the created order.');
   }
 
-  if (bookingKeys.length > 1) {
-    throw new DashboardValidationError(
-      `Task ${task.id} produced multiple Regiondo booking groups in a single order, which cannot be linked to one task booking.`
-    );
-  }
-
-  return bookingKeys[0];
+  return bookingKeys;
 }
 
-async function createRegiondoBookingForTask(client: PoolClient, task: DashboardTask): Promise<{ bookingId: string }> {
+async function createRegiondoBookingsForTask(
+  client: PoolClient,
+  task: DashboardTask
+): Promise<{ bookingIds: string[]; primaryBookingId: string }> {
   const purchasePayload = buildTaskRegiondoBookingPayload(task);
   const purchaseData = await regiondoClient.purchaseOrder({
     attendeeData: purchasePayload.attendeeData,
@@ -573,19 +571,28 @@ async function createRegiondoBookingForTask(client: PoolClient, task: DashboardT
     subId: purchasePayload.subId,
     syncTicketsProcessing: purchasePayload.syncTicketsProcessing
   });
-  const bookingKey = extractRegiondoBookingKeyFromPurchase(task, purchaseData as unknown as Record<string, unknown>);
-  const snapshot = await regiondoClient.hydrateBookingOrder({
-    bookingKey,
-    orderNumber: `${purchaseData.order_number}`
-  });
-  const normalizedBooking = normalizeRegiondoBookingImport({
-    bookingKey,
-    purchaseData: snapshot.purchaseData,
-    supplierBookings: snapshot.supplierBookings,
-    webhookPayload: null
-  });
+  const bookingKeys = extractRegiondoBookingKeysFromPurchase(purchaseData as unknown as Record<string, unknown>);
+  const createdBookingIds: string[] = [];
 
-  return upsertNormalizedRegiondoBooking(client, normalizedBooking);
+  for (const bookingKey of bookingKeys) {
+    const supplierBookings = await regiondoClient.listSupplierBookings({
+      bookingKey,
+      limit: 250
+    });
+    const normalizedBooking = normalizeRegiondoBookingImport({
+      bookingKey,
+      purchaseData,
+      supplierBookings,
+      webhookPayload: null
+    });
+    const { bookingId } = await upsertNormalizedRegiondoBooking(client, normalizedBooking);
+    createdBookingIds.push(bookingId);
+  }
+
+  return {
+    bookingIds: createdBookingIds,
+    primaryBookingId: createdBookingIds[0]
+  };
 }
 
 function decodeSelectionNodeValue(value: string): string[] {
@@ -1491,18 +1498,22 @@ export async function createBookingFromTask(
       throw new DashboardValidationError('Bookings can only be created from the configured confirmation columns.');
     }
 
-    const { bookingId } = await createRegiondoBookingForTask(client, task);
+    const { bookingIds, primaryBookingId } = await createRegiondoBookingsForTask(client, task);
 
     await client.query(
       `UPDATE tasks
-       SET connected_booking_key = $1,
-           update_log = $2::jsonb
-       WHERE id = $3`,
-      [bookingId, JSON.stringify(createTaskBookingActivityLog(task, bookingId, actor)), task.id]
+       SET update_log = $1::jsonb
+       WHERE id = $2`,
+      [JSON.stringify(createTaskBookingActivityLog(task, primaryBookingId, actor)), task.id]
     );
+    await appendTaskBookingLinks(client, {
+      taskId: task.id,
+      bookingIds,
+      primaryBookingId
+    });
 
     await client.query('COMMIT');
-    return { bookingId };
+    return { bookingId: primaryBookingId };
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
