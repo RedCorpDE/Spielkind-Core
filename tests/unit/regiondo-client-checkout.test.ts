@@ -134,6 +134,66 @@ describe('RegiondoClient checkout actions', () => {
     expect(observedUrl?.searchParams.get('reference_ids')).toBe('ref-1,ref-2');
   });
 
+  it('unwraps wrapped checkout purchase payloads before validating them', async () => {
+    const client = new RegiondoClient({
+      baseUrl: 'https://example.com/v1',
+      currency: 'EUR',
+      fetchImplementation: async () =>
+        new Response(
+          JSON.stringify({
+            full_purchase_data: {
+              info_generated_at: '2026-05-07T10:00:00.000Z',
+              items: [
+                {
+                  booking_key: 'booking-key-1',
+                  payment_status: 'paid',
+                  price_per_one_incl_tax: 19.9,
+                  product_id: '297021',
+                  row_total_incl_tax: 39.8,
+                  ticket_qty: 2
+                }
+              ],
+              order_id: '4711',
+              order_number: 'R-10001',
+              payment_method: 'API external payment',
+              purchased_at: '2026-05-07T10:00:00.000Z',
+              sales_channel: 'API'
+            }
+          }),
+          {
+            headers: { 'content-type': 'application/json' },
+            status: 200
+          }
+        ),
+      language: 'de-DE',
+      maxRetries: 0,
+      publicKey: 'public-key',
+      requestThrottleMs: 0,
+      requestTimeoutMs: 1_000,
+      retryBaseDelayMs: 1,
+      secretKey: 'secret-key',
+      sleep: async () => undefined,
+      supplierId: '15241'
+    });
+
+    const purchase = await client.purchaseOrder({
+      contactData: {
+        email: 'booking@example.com',
+        firstname: 'Jamie',
+        lastname: 'Rivera'
+      },
+      items: [
+        {
+          product_id: 297021,
+          qty: 1
+        }
+      ]
+    });
+
+    expect(purchase.order_number).toBe('R-10001');
+    expect(purchase.items[0]?.booking_key).toBe('booking-key-1');
+  });
+
   it('surfaces invalid Regiondo purchase payloads as structured provider errors', async () => {
     const client = new RegiondoClient({
       baseUrl: 'https://example.com/v1',

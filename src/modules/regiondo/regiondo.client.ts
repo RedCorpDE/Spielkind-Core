@@ -26,7 +26,10 @@ type RegiondoCollectionResponse<T> = {
 
 type RegiondoObjectResponse<T> = {
   data?: T;
+  full_purchase_data?: T;
   item?: T;
+  product?: T;
+  result?: T;
 };
 
 interface RegiondoRequestOptions {
@@ -303,9 +306,7 @@ export class RegiondoClient {
     return body.data ?? body.items ?? [];
   }
 
-  async getObject<T>(pathname: string, params: Record<string, string> = {}): Promise<T> {
-    const body = await this.requestJson<RegiondoObjectResponse<T> | T>(pathname, { params });
-
+  private unwrapObjectResponse<T>(body: RegiondoObjectResponse<T> | T): T {
     if (body && typeof body === 'object' && !Array.isArray(body)) {
       if ('data' in body && body.data !== undefined) {
         return body.data;
@@ -316,15 +317,24 @@ export class RegiondoClient {
       }
 
       if ('result' in body && body.result !== undefined) {
-        return body.result as T;
+        return body.result;
       }
 
       if ('product' in body && body.product !== undefined) {
-        return body.product as T;
+        return body.product;
+      }
+
+      if ('full_purchase_data' in body && body.full_purchase_data !== undefined) {
+        return body.full_purchase_data;
       }
     }
 
     return body as T;
+  }
+
+  async getObject<T>(pathname: string, params: Record<string, string> = {}): Promise<T> {
+    const body = await this.requestJson<RegiondoObjectResponse<T> | T>(pathname, { params });
+    return this.unwrapObjectResponse(body);
   }
 
   async getCatalogProducts(): Promise<RegiondoCatalogProduct[]> {
@@ -444,7 +454,7 @@ export class RegiondoClient {
   }
 
   async purchaseOrder(input: RegiondoPurchaseOrderInput): Promise<RegiondoPurchaseData> {
-    const purchaseDataRaw = await this.requestJson<unknown>('/checkout/purchase', {
+    const purchaseDataRaw = await this.requestJson<RegiondoObjectResponse<unknown> | unknown>('/checkout/purchase', {
       body: {
         ...(input.attendeeData?.length ? { attendee_data: input.attendeeData } : {}),
         ...(input.buyerData?.length ? { buyer_data: input.buyerData } : {}),
@@ -466,7 +476,11 @@ export class RegiondoClient {
       }
     });
 
-    return parseRegiondoPayload(regiondoPurchaseDataSchema, purchaseDataRaw, 'purchase response');
+    return parseRegiondoPayload(
+      regiondoPurchaseDataSchema,
+      this.unwrapObjectResponse(purchaseDataRaw),
+      'purchase response'
+    );
   }
 
   async cancelTickets(referenceIds: string[]): Promise<void> {
