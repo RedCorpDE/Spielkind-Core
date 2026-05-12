@@ -1,4 +1,5 @@
 import { aggregateRegiondoBookingStatus, type BookingStatus } from './booking-status.mapper.js';
+import { RegiondoPayloadError } from '../regiondo/regiondo.client.js';
 import type {
   LegacyRegiondoBooking,
   RegiondoPurchaseData,
@@ -16,6 +17,10 @@ const durationUnitToMs: Record<string, number> = {
   month: 30 * 24 * 60 * 60 * 1000,
   year: 365 * 24 * 60 * 60 * 1000
 };
+
+function createNormalizationError(details: string): RegiondoPayloadError {
+  return new RegiondoPayloadError('Regiondo booking snapshot could not be normalized.', details);
+}
 
 export interface NormalizedRegiondoBookingImport {
   bookingKey: string;
@@ -135,7 +140,7 @@ function calculateBookingRange(input: {
   const startDate = starts[0] ?? (fallbackStart && !Number.isNaN(fallbackStart.getTime()) ? fallbackStart : null);
 
   if (!startDate) {
-    throw new Error('Regiondo booking snapshot does not include a usable start timestamp.');
+    throw createNormalizationError('Regiondo booking snapshot does not include a usable start timestamp.');
   }
 
   const computedEnds = input.supplierBookings
@@ -192,17 +197,17 @@ export function normalizeRegiondoBookingImport(input: {
 }): NormalizedRegiondoBookingImport {
   const matchingSupplierBookings = input.supplierBookings.filter((booking) => booking.booking_key === input.bookingKey);
   if (!matchingSupplierBookings.length) {
-    throw new Error(`Supplier booking snapshot does not contain booking key ${input.bookingKey}.`);
+    throw createNormalizationError(`Supplier booking snapshot does not contain booking key ${input.bookingKey}.`);
   }
 
   const matchingItems = selectPurchaseItemsForBooking(input.purchaseData, input.bookingKey);
   if (!matchingItems.length) {
-    throw new Error(`Purchase snapshot does not contain booking key ${input.bookingKey}.`);
+    throw createNormalizationError(`Purchase snapshot does not contain booking key ${input.bookingKey}.`);
   }
 
   const snapshotGeneratedAt = new Date(input.purchaseData.info_generated_at);
   if (Number.isNaN(snapshotGeneratedAt.getTime())) {
-    throw new Error('Regiondo purchase snapshot does not include a valid info_generated_at timestamp.');
+    throw createNormalizationError('Regiondo purchase snapshot does not include a valid info_generated_at timestamp.');
   }
 
   const bookingRange = calculateBookingRange({
@@ -250,12 +255,12 @@ export function normalizeRegiondoBookingImport(input: {
     .filter((item): item is NonNullable<typeof item> => Boolean(item));
 
   if (!items.length) {
-    throw new Error(`No Regiondo product identifiers were present for booking ${input.bookingKey}.`);
+    throw createNormalizationError(`No Regiondo product identifiers were present for booking ${input.bookingKey}.`);
   }
 
   const orderNumber = stringifyRegiondoId(input.purchaseData.order_number);
   if (!orderNumber) {
-    throw new Error(`Regiondo purchase snapshot does not expose an order number for booking ${input.bookingKey}.`);
+    throw createNormalizationError(`Regiondo purchase snapshot does not expose an order number for booking ${input.bookingKey}.`);
   }
 
   const paidAmount = totals.paidAmount > 0 ? totals.paidAmount : 0;
