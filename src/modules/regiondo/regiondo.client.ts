@@ -177,6 +177,75 @@ function mapHttpError(status: number, responseBody: string): RegiondoApiError {
   return new RegiondoApiError(`Regiondo request failed with status ${status}`, status, responseBody);
 }
 
+function stringifyRegiondoIdentifier(value: unknown): string | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return `${value}`;
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+  }
+
+  return null;
+}
+
+function extractNestedRegiondoIdentifier(
+  value: unknown,
+  preferredKeys: string[],
+  depth = 0
+): string | null {
+  const directIdentifier = stringifyRegiondoIdentifier(value);
+  if (directIdentifier) {
+    return directIdentifier;
+  }
+
+  if (depth >= 4 || value === null || value === undefined) {
+    return null;
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const identifier = extractNestedRegiondoIdentifier(entry, preferredKeys, depth + 1);
+      if (identifier) {
+        return identifier;
+      }
+    }
+
+    return null;
+  }
+
+  if (typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+
+  for (const key of preferredKeys) {
+    if (!(key in record)) {
+      continue;
+    }
+
+    const identifier = extractNestedRegiondoIdentifier(record[key], preferredKeys, depth + 1);
+    if (identifier) {
+      return identifier;
+    }
+  }
+
+  for (const fallbackKey of ['id', 'value', 'number']) {
+    if (!(fallbackKey in record)) {
+      continue;
+    }
+
+    const identifier = extractNestedRegiondoIdentifier(record[fallbackKey], preferredKeys, depth + 1);
+    if (identifier) {
+      return identifier;
+    }
+  }
+
+  return null;
+}
+
 export function isRetryableRegiondoError(error: unknown): boolean {
   return (
     error instanceof RegiondoRateLimitError ||
@@ -345,6 +414,58 @@ export class RegiondoClient {
     return body as T;
   }
 
+  private async resolvePurchaseOrderSnapshot(body: unknown): Promise<RegiondoPurchaseData> {
+    const payloadCandidates = [body];
+    const unwrappedBody = this.unwrapObjectResponse(body as RegiondoObjectResponse<unknown> | unknown);
+    if (unwrappedBody !== body) {
+      payloadCandidates.unshift(unwrappedBody);
+    }
+
+    let parsedPurchaseError: ZodError | null = null;
+
+    for (const candidate of payloadCandidates) {
+      const parsedPurchase = regiondoPurchaseDataSchema.safeParse(candidate);
+      if (parsedPurchase.success) {
+        return parsedPurchase.data;
+      }
+
+      parsedPurchaseError = parsedPurchase.error;
+    }
+
+    const orderNumber = extractNestedRegiondoIdentifier(body, ['order_number', 'orderNumber']);
+    if (orderNumber) {
+      const purchaseDataRaw = await this.getObject<RegiondoPurchaseData>('/checkout/purchase', {
+        order_number: orderNumber
+      });
+
+      return parseRegiondoPayload(regiondoPurchaseDataSchema, purchaseDataRaw, 'purchase response');
+    }
+
+    const orderId = extractNestedRegiondoIdentifier(body, ['order_id', 'orderId']);
+    if (orderId) {
+      const supplierBookings = await this.listSupplierBookings({
+        limit: 250,
+        orderIds: [orderId]
+      });
+      const supplierOrderNumber = supplierBookings
+        .map((booking) => stringifyRegiondoIdentifier(booking.order_number))
+        .find((value): value is string => Boolean(value));
+
+      if (supplierOrderNumber) {
+        const purchaseDataRaw = await this.getObject<RegiondoPurchaseData>('/checkout/purchase', {
+          order_number: supplierOrderNumber
+        });
+
+        return parseRegiondoPayload(regiondoPurchaseDataSchema, purchaseDataRaw, 'purchase response');
+      }
+    }
+
+    throw new RegiondoPayloadError(
+      'Regiondo purchase response payload did not match the expected shape.',
+      formatZodErrorDetails(parsedPurchaseError ?? new ZodError([]))
+    );
+  }
+
   async getObject<T>(pathname: string, params: Record<string, string> = {}): Promise<T> {
     const body = await this.requestJson<RegiondoObjectResponse<T> | T>(pathname, { params });
     return this.unwrapObjectResponse(body);
@@ -500,11 +621,7 @@ export class RegiondoClient {
       }
     });
 
-    return parseRegiondoPayload(
-      regiondoPurchaseDataSchema,
-      this.unwrapObjectResponse(purchaseDataRaw),
-      'purchase response'
-    );
+    return this.resolvePurchaseOrderSnapshot(purchaseDataRaw);
   }
 
   async cancelTickets(referenceIds: string[]): Promise<void> {
