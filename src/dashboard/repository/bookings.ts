@@ -8,6 +8,7 @@ import {
   type RegiondoCheckoutCartItem,
   type RegiondoCheckoutContactData
 } from '../../modules/regiondo/regiondo.client.js';
+import { formatRegiondoDateTime } from '../../modules/regiondo/regiondo-datetime.js';
 import { SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID } from '../../sync/mappers.js';
 import type {
   DashboardBooking,
@@ -409,6 +410,11 @@ function buildTaskRegiondoCartItem(
   const dateTime = readRecordText(item, 'date_time', 'dateTime', 'event_date_time', 'eventDateTime');
   const startDate = readRecordText(item, 'start_date', 'startDate');
   const endDate = readRecordText(item, 'end_date', 'endDate');
+  const normalizedDateTime = dateTime ? formatRegiondoDateTime(dateTime) : null;
+
+  if (dateTime && !normalizedDateTime) {
+    throw new DashboardValidationError(`Task booking_data.options[${index}] has an invalid date_time.`);
+  }
 
   let value: string | number | null | undefined = undefined;
   const rawValue = item.value ?? item.value_id ?? item.valueId ?? item.option_value ?? item.optionValue;
@@ -421,7 +427,7 @@ function buildTaskRegiondoCartItem(
   }
 
   return {
-    ...(dateTime ? { date_time: dateTime } : {}),
+    ...(normalizedDateTime ? { date_time: normalizedDateTime } : {}),
     ...(endDate ? { end_date: endDate } : {}),
     ...(externalItemId ? { external_item_id: externalItemId } : {}),
     ...(optionId ? { option_id: toRegiondoRequestIdentifier(optionId) } : {}),
@@ -593,6 +599,31 @@ async function createRegiondoBookingsForTask(
     bookingIds: createdBookingIds,
     primaryBookingId: createdBookingIds[0]
   };
+}
+
+async function seedBookingNotesFromTaskDescription(
+  client: PoolClient,
+  task: DashboardTask,
+  bookingIds: string[]
+): Promise<void> {
+  const taskDescription = normalizeText(task.description);
+  if (!taskDescription || !bookingIds.length) {
+    return;
+  }
+
+  await client.query(
+     `INSERT INTO booking_admin_metadata (booking_id, ops_status, ops_notes)
+     SELECT booking_id, 'normal', $2
+     FROM unnest($1::uuid[]) AS booking_ids(booking_id)
+     ON CONFLICT (booking_id)
+     DO UPDATE SET ops_notes = CASE
+       WHEN EXCLUDED.ops_notes = '' THEN booking_admin_metadata.ops_notes
+       WHEN booking_admin_metadata.ops_notes = '' THEN EXCLUDED.ops_notes
+       WHEN position(EXCLUDED.ops_notes in booking_admin_metadata.ops_notes) > 0 THEN booking_admin_metadata.ops_notes
+       ELSE booking_admin_metadata.ops_notes || E'\n' || EXCLUDED.ops_notes
+     END`,
+    [bookingIds, taskDescription]
+  );
 }
 
 function decodeSelectionNodeValue(value: string): string[] {
@@ -1499,6 +1530,7 @@ export async function createBookingFromTask(
     }
 
     const { bookingIds, primaryBookingId } = await createRegiondoBookingsForTask(client, task);
+    await seedBookingNotesFromTaskDescription(client, task, bookingIds);
 
     await client.query(
       `UPDATE tasks

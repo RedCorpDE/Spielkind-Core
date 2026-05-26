@@ -91,7 +91,7 @@ describe('task booking links', () => {
                   qty: 1
                 }
               },
-              event_date_time: '2026-05-13T09:00:00.000Z',
+              event_date_time: '2026-05-13T07:00:00.000Z',
               reminder_date: null,
               reserved_capacity_date: null,
               column_id: '22222222-2222-2222-2222-222222222222',
@@ -139,7 +139,7 @@ describe('task booking links', () => {
       {
         booking_key: bookingKey,
         order_number: 'order-123',
-        event_date_time: '2026-05-13T09:00:00.000Z',
+        event_date_time: '2026-05-13 09:00:00',
         duration_type: 'hour',
         duration_value: 1,
         product_id: bookingKey === 'booking-key-1' ? 'prod-1' : 'prod-2',
@@ -158,8 +158,8 @@ describe('task booking links', () => {
         raw: null,
         regiondoCustomerId: null
       },
-      dtFrom: '2026-05-13T09:00:00.000Z',
-      dtTo: '2026-05-13T10:00:00.000Z',
+      dtFrom: '2026-05-13T07:00:00.000Z',
+      dtTo: '2026-05-13T08:00:00.000Z',
       guestCount: 1,
       items: [
         {
@@ -201,6 +201,14 @@ describe('task booking links', () => {
       2,
       expect.objectContaining({ bookingKey: 'booking-key-2' })
     );
+    expect(purchaseOrderMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        items: [
+          expect.objectContaining({ date_time: '2026-05-13 09:00:00' }),
+          expect.objectContaining({ date_time: '2026-05-13 09:00:00' })
+        ]
+      })
+    );
 
     const taskBookingLinkInserts = queryMock.mock.calls.filter(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO task_bookings')
@@ -209,6 +217,14 @@ describe('task booking links', () => {
     expect(taskBookingLinkInserts.map(([, values]) => values?.[1])).toEqual([
       'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
       'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+    ]);
+
+    const bookingNotesInsert = queryMock.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO booking_admin_metadata')
+    );
+    expect(bookingNotesInsert?.[1]).toEqual([
+      ['aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'],
+      'Two-product order'
     ]);
   });
 });

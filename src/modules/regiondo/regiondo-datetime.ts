@@ -12,6 +12,8 @@ interface DateTimeParts {
   second: number;
 }
 
+const padDatePart = (value: number) => String(value).padStart(2, '0');
+
 const berlinDateTimeFormatter = new Intl.DateTimeFormat('en-CA', {
   timeZone: REGIONDO_SOURCE_TIME_ZONE,
   hour12: false,
@@ -118,4 +120,18 @@ export function parseRegiondoDateTime(value: string | null | undefined): Date | 
   }
 
   return sameBerlinDateTimeParts(readBerlinDateTimeParts(candidate), naiveParts) ? candidate : null;
+}
+
+export function formatRegiondoDateTime(value: Date | string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value instanceof Date ? value : parseRegiondoDateTime(value);
+  if (!normalized || Number.isNaN(normalized.getTime())) {
+    return null;
+  }
+
+  const parts = readBerlinDateTimeParts(normalized);
+  return `${parts.year}-${padDatePart(parts.month)}-${padDatePart(parts.day)} ${padDatePart(parts.hour)}:${padDatePart(parts.minute)}:${padDatePart(parts.second)}`;
 }
