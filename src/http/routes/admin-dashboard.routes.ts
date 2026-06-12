@@ -57,7 +57,7 @@ const taskRawJsonSchema = z.record(taskRawJsonValueSchema);
 const createTaskSchema = z.object({
   title: z.string().trim().min(1),
   description: z.string().default(''),
-  eventDateTime: z.string().nullable().optional(),
+  eventDateTime: z.string().nullable().default(null),
   reminderDate: z.string().nullable().optional(),
   reservedCapacityDate: z.string().nullable().optional(),
   ownerId: z.string().uuid().nullable().optional(),
@@ -70,7 +70,7 @@ const createTaskSchema = z.object({
 const updateTaskSchema = z.object({
   title: z.string().min(1),
   description: z.string().default(''),
-  eventDateTime: z.string().min(1),
+  eventDateTime: z.string().nullable().default(null),
   reminderDate: z.string().nullable().optional(),
   reservedCapacityDate: z.string().nullable().optional(),
   ownerId: z.string().uuid().nullable().optional(),

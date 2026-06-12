@@ -333,7 +333,7 @@ export interface CreateDashboardTaskInput {
 export interface UpdateDashboardTaskInput {
   title: string;
   description: string;
-  eventDateTime: string;
+  eventDateTime: string | null;
   reminderDate?: string | null;
   reservedCapacityDate?: string | null;
   ownerId?: string | null;
