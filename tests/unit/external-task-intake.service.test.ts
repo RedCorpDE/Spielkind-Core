@@ -79,6 +79,10 @@ describe('external task intake service', () => {
   it('maps parsed client email fields into the dashboard task rawJson shape', () => {
     const taskInput = buildCreateTaskInputFromExternalClientEmail(validInput);
 
+    expect(taskInput.columnId).toBeUndefined();
+    expect(taskInput.ownerId).toBeUndefined();
+    expect(taskInput.reminderDate).toBeUndefined();
+    expect(taskInput.reservedCapacityDate).toBeUndefined();
     expect(taskInput).toMatchObject({
       description: validInput.description,
       eventDateTime: validInput.eventDateTime,
@@ -108,6 +112,21 @@ describe('external task intake service', () => {
         }
       }
     });
+  });
+
+  it('treats blank optional ids and dates as omitted', () => {
+    const taskInput = buildCreateTaskInputFromExternalClientEmail({
+      ...validInput,
+      columnId: '',
+      ownerId: '',
+      reminderDate: '',
+      reservedCapacityDate: ''
+    });
+
+    expect(taskInput.columnId).toBeUndefined();
+    expect(taskInput.ownerId).toBeUndefined();
+    expect(taskInput.reminderDate).toBeUndefined();
+    expect(taskInput.reservedCapacityDate).toBeUndefined();
   });
 
   it('creates a task, records the idempotency key, and uses an external actor', async () => {

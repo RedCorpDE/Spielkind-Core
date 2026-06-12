@@ -62,6 +62,19 @@ function trimOptional(value: string | null | undefined): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function trimToUndefined(value: string | null | undefined): string | undefined {
+  const trimmed = trimOptional(value);
+  return trimmed || undefined;
+}
+
+function normalizeOptionalNullableText(value: string | null | undefined): string | null | undefined {
+  if (value === null) {
+    return null;
+  }
+
+  return trimToUndefined(value);
+}
+
 function normalizeChoiceBlock(value: string | string[] | null | undefined): string[] {
   const entries = Array.isArray(value) ? value : [value];
   const seen = new Set<string>();
@@ -121,7 +134,7 @@ export function normalizeExternalClientEmailTaskInput(
     ...input,
     beveragePackage: trimOptional(input.beveragePackage),
     cateringSize: trimOptional(input.cateringSize),
-    columnId: input.columnId === null ? null : trimOptional(input.columnId),
+    columnId: normalizeOptionalNullableText(input.columnId),
     description: input.description.trim(),
     email: trimOptional(input.email),
     eventDateTime: input.eventDateTime.trim(),
@@ -131,12 +144,12 @@ export function normalizeExternalClientEmailTaskInput(
     lastName: trimOptional(input.lastName),
     options: input.options ?? [],
     originalClientEmail: input.originalClientEmail.trim(),
-    ownerId: input.ownerId === null ? null : trimOptional(input.ownerId),
+    ownerId: normalizeOptionalNullableText(input.ownerId),
     paymentMethod: trimOptional(input.paymentMethod),
     phoneNumber: trimOptional(input.phoneNumber),
     priceCalculation: trimOptional(input.priceCalculation),
-    reminderDate: input.reminderDate === null ? null : trimOptional(input.reminderDate),
-    reservedCapacityDate: input.reservedCapacityDate === null ? null : trimOptional(input.reservedCapacityDate),
+    reminderDate: normalizeOptionalNullableText(input.reminderDate),
+    reservedCapacityDate: normalizeOptionalNullableText(input.reservedCapacityDate),
     secondaryEventTime: trimOptional(input.secondaryEventTime),
     site: input.site.trim(),
     source: trimOptional(input.source) || DEFAULT_SOURCE,
