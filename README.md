@@ -2,6 +2,7 @@
 
 Core is a TypeScript Node.js backend for:
 - Regiondo webhook ingestion
+- external parsed client-email task intake
 - Regiondo catalog sync
 - internal resource occupancy via `consumptions`
 - reminder delivery dispatch through an external provider webhook
@@ -79,6 +80,7 @@ Important operational variables:
 - `REGIONDO_WEBHOOK_SECRET`
 - `WEBHOOK_AUTH_HEADER_NAME`
 - `WEBHOOK_AUTH_HEADER_VALUE`
+- `EXTERNAL_TASK_WEBHOOK_AUTH_HEADER_VALUE`
 - `SCHEDULER_TIMEZONE`
 - `REGIONDO_CATALOG_SYNC_CRON`
 - `REGIONDO_WEBHOOK_CRON`
@@ -96,6 +98,13 @@ System:
 Regiondo webhook:
 - `GET /webhooks/regiondo/bookings`
 - `POST /webhooks/regiondo/bookings`
+
+External client-email task intake:
+- `POST /webhooks/external/client-emails`
+- Header key: `EXTERNAL_TASK_WEBHOOK_AUTH_HEADER_NAME`, default `x-external-task-secret`
+- Header value: `EXTERNAL_TASK_WEBHOOK_AUTH_HEADER_VALUE`
+- The external service must send parsed task fields, including `externalMessageId`, `title`, `description`, `eventDateTime`, `site`, and `originalClientEmail`
+- Reposting the same `externalMessageId` with the same payload returns the existing task; reposting it with changed payload returns `409 Conflict`
 
 Regiondo booking webhook setup:
 - Webhook name: `Spielkind Core Bookings`

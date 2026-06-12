@@ -71,7 +71,7 @@ async function persistTaskColumnPositions(client: PoolClient, columnIdsInOrder: 
   );
 }
 
-async function queryFirstTaskColumn(client: PoolClient): Promise<TaskColumnRow | null> {
+async function queryFirstTaskColumn(client: Queryable): Promise<TaskColumnRow | null> {
   const result = await client.query<TaskColumnRow>(
     `SELECT id, title, booking_related, position
      FROM task_kanban_columns
@@ -82,7 +82,7 @@ async function queryFirstTaskColumn(client: PoolClient): Promise<TaskColumnRow |
   return result.rowCount ? result.rows[0] : null;
 }
 
-async function requireStoredTaskColumn(client: PoolClient, columnId: string): Promise<TaskColumnRow> {
+async function requireStoredTaskColumn(client: Queryable, columnId: string): Promise<TaskColumnRow> {
   const result = await client.query<TaskColumnRow>(
     `SELECT id, title, booking_related, position
      FROM task_kanban_columns
@@ -98,7 +98,7 @@ async function requireStoredTaskColumn(client: PoolClient, columnId: string): Pr
   return result.rows[0];
 }
 
-export async function resolveTaskColumnForCreate(client: PoolClient, columnId?: string | null): Promise<TaskColumnRow> {
+export async function resolveTaskColumnForCreate(client: Queryable, columnId?: string | null): Promise<TaskColumnRow> {
   if (typeof columnId === 'string' && columnId !== UNASSIGNED_TASK_COLUMN.id) {
     return await requireStoredTaskColumn(client, columnId);
   }

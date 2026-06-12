@@ -55,9 +55,9 @@ const taskRawJsonValueSchema: z.ZodType<unknown> = z.lazy(() =>
 const taskRawJsonSchema = z.record(taskRawJsonValueSchema);
 
 const createTaskSchema = z.object({
-  title: z.string().min(1),
+  title: z.string().trim().min(1),
   description: z.string().default(''),
-  eventDateTime: z.string().min(1),
+  eventDateTime: z.string().nullable().optional(),
   reminderDate: z.string().nullable().optional(),
   reservedCapacityDate: z.string().nullable().optional(),
   ownerId: z.string().uuid().nullable().optional(),

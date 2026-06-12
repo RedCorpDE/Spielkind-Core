@@ -67,6 +67,7 @@ function applyTestDefaults(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   normalized.ADMIN_ACCESS_TOKEN_SECRET ??= '0123456789abcdef0123456789abcdef';
   normalized.WEBHOOK_AUTH_HEADER_NAME ??= 'x-test-webhook-auth';
   normalized.WEBHOOK_AUTH_HEADER_VALUE ??= 'test-webhook-token';
+  normalized.EXTERNAL_TASK_WEBHOOK_AUTH_HEADER_VALUE ??= 'test-external-task-token';
   normalized.DASHBOARD_ALLOWED_ORIGIN ??= 'http://localhost:5173';
   return normalized;
 }
@@ -112,6 +113,9 @@ const schema = z
     WEBHOOK_AUTH_HEADER_NAME: z.string().optional(),
     WEBHOOK_AUTH_HEADER_VALUE: z.string().optional(),
     WEBHOOK_BODY_LIMIT_BYTES: z.coerce.number().int().min(1_024).max(1_048_576).default(262_144),
+    EXTERNAL_TASK_WEBHOOK_PATH: z.string().default('/webhooks/external/client-emails'),
+    EXTERNAL_TASK_WEBHOOK_AUTH_HEADER_NAME: z.string().default('x-external-task-secret'),
+    EXTERNAL_TASK_WEBHOOK_AUTH_HEADER_VALUE: z.string().optional(),
 
     REGIONDO_CATALOG_SYNC_CRON: z.string().default('0 3 * * 1'),
     REMINDER_DISPATCH_CRON: z.string().default('*/5 * * * *'),
@@ -145,6 +149,13 @@ const schema = z
         code: z.ZodIssueCode.custom,
         message:
           'At least one Regiondo webhook auth mechanism is required in production: REGIONDO_WEBHOOK_SECRET or WEBHOOK_AUTH_HEADER_NAME + WEBHOOK_AUTH_HEADER_VALUE.'
+      });
+    }
+
+    if (value.NODE_ENV === 'production' && !value.EXTERNAL_TASK_WEBHOOK_AUTH_HEADER_VALUE) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'EXTERNAL_TASK_WEBHOOK_AUTH_HEADER_VALUE is required in production.'
       });
     }
 

@@ -123,11 +123,11 @@ function sanitizeTaskRawJson(rawJson: unknown): DashboardTaskRawJson {
   }, {});
 }
 
-function buildTaskRawJson(site: string, rawJson: unknown, existingRawJson?: unknown): DashboardTaskRawJson {
+function buildTaskRawJson(site: string | undefined, rawJson: unknown, existingRawJson?: unknown): DashboardTaskRawJson {
   return {
     ...sanitizeTaskRawJson(existingRawJson),
     ...sanitizeTaskRawJson(rawJson),
-    site: site.trim()
+    site: site?.trim() ?? ''
   };
 }
 
@@ -286,57 +286,67 @@ export async function listTasksByBookingId(bookingId: string): Promise<Dashboard
   return listTasks({ connectedBookingId: bookingId });
 }
 
+export async function createTaskRecord(
+  client: Queryable,
+  input: CreateDashboardTaskInput,
+  actor?: DashboardTaskMutationActor
+): Promise<string> {
+  const column = await resolveTaskColumnForCreate(client, input.columnId);
+  const owner = await ensureOwner(client, input.ownerId);
+  const eventDateTime = input.eventDateTime ? toIsoStringOrThrow(input.eventDateTime, 'eventDateTime') : null;
+  const rawJson = buildTaskRawJson(input.site, input.rawJson);
+
+  const created = await client.query<{ id: string }>(
+    `INSERT INTO tasks (
+       column_key,
+       title,
+       description,
+       status,
+       assignee_user_id,
+       update_log,
+       raw_json,
+       connected_booking_key,
+       event_date_time,
+       reminder_date,
+       reserved_capacity_date
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     RETURNING id`,
+    [
+      toStoredTaskColumnId(column),
+      input.title.trim(),
+      input.description?.trim() ?? '',
+      column.title,
+      owner?.id ?? null,
+      JSON.stringify(createCreatedActivityLog(actor)),
+      JSON.stringify(rawJson),
+      input.connectedBookingId ?? null,
+      eventDateTime,
+      input.reminderDate ?? null,
+      input.reservedCapacityDate ?? null
+    ]
+  );
+
+  if (input.connectedBookingId) {
+    await appendTaskBookingLinks(client, {
+      taskId: created.rows[0].id,
+      bookingIds: [input.connectedBookingId],
+      primaryBookingId: input.connectedBookingId
+    });
+  }
+
+  return created.rows[0].id;
+}
+
 export async function createTask(input: CreateDashboardTaskInput, actor?: DashboardTaskMutationActor): Promise<DashboardTask> {
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
-    const column = await resolveTaskColumnForCreate(client, input.columnId);
-    const owner = await ensureOwner(client, input.ownerId);
-    const eventDateTime = toIsoStringOrThrow(input.eventDateTime, 'eventDateTime');
-    const rawJson = buildTaskRawJson(input.site, input.rawJson);
-
-    const created = await client.query<{ id: string }>(
-      `INSERT INTO tasks (
-         column_key,
-         title,
-         description,
-         status,
-         assignee_user_id,
-         update_log,
-         raw_json,
-         connected_booking_key,
-         event_date_time,
-         reminder_date,
-         reserved_capacity_date
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-       RETURNING id`,
-      [
-        toStoredTaskColumnId(column),
-        input.title.trim(),
-        input.description.trim(),
-        column.title,
-        owner?.id ?? null,
-        JSON.stringify(createCreatedActivityLog(actor)),
-        JSON.stringify(rawJson),
-        input.connectedBookingId ?? null,
-        eventDateTime,
-        input.reminderDate ?? null,
-        input.reservedCapacityDate ?? null
-      ]
-    );
-
-    if (input.connectedBookingId) {
-      await appendTaskBookingLinks(client, {
-        taskId: created.rows[0].id,
-        bookingIds: [input.connectedBookingId],
-        primaryBookingId: input.connectedBookingId
-      });
-    }
+    const taskId = await createTaskRecord(client, input, actor);
 
     await client.query('COMMIT');
-    return await getTask(created.rows[0].id);
+    return await getTask(taskId);
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;

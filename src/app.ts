@@ -11,6 +11,7 @@ import { registerAdminRegiondoRoutes } from './http/routes/admin-regiondo.routes
 import { registerAdminReminderRoutes } from './http/routes/admin-reminders.routes.js';
 import { registerAdminResourceRoutes } from './http/routes/admin-resources.routes.js';
 import { registerAdminDashboardRoutes } from './http/routes/admin-dashboard.routes.js';
+import { registerExternalTaskIntakeRoutes } from './http/routes/external-task-intake.routes.js';
 import { registerHealthRoutes } from './http/routes/health.routes.js';
 import { registerInternalJobRoutes } from './http/routes/internal-jobs.routes.js';
 import { registerRegiondoWebhookRoutes } from './http/routes/regiondo-webhook.routes.js';
@@ -25,6 +26,7 @@ export function createApp() {
           'headers.authorization',
           'headers.x-api-hash',
           'headers.x-core-signature',
+          'headers.x-external-task-secret',
           'config.REGIONDO_SECRET_KEY',
           'config.REMINDER_PROVIDER_SECRET',
           'config.CRON_SECRET'
@@ -59,6 +61,7 @@ export function createApp() {
   void registerHealthRoutes(app);
   void registerAdminAuthRoutes(app);
   void registerAdminProductRoutes(app);
+  void registerExternalTaskIntakeRoutes(app);
   void registerRegiondoWebhookRoutes(app);
   void registerInternalJobRoutes(app);
   void registerAdminBookingRoutes(app);

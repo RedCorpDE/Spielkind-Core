@@ -319,13 +319,13 @@ export interface DashboardTaskMutationActor {
 
 export interface CreateDashboardTaskInput {
   title: string;
-  description: string;
-  eventDateTime: string;
+  description?: string;
+  eventDateTime?: string | null;
   reminderDate?: string | null;
   reservedCapacityDate?: string | null;
   ownerId?: string | null;
   rawJson?: DashboardTaskRawJson;
-  site: string;
+  site?: string;
   columnId?: string | null;
   connectedBookingId?: string | null;
 }
