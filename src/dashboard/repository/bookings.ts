@@ -454,11 +454,26 @@ function buildTaskRegiondoContactData(task: DashboardTask, bookingData: Record<s
     readRecordText(bookingContact, 'lastname', 'last_name', 'lastName') ??
     readRecordText(bookingData, 'last_name', 'lastName') ??
     readTaskRawText(task, 'last_name');
-  const email = readRecordText(bookingContact, 'email') ?? readRecordText(bookingData, 'email') ?? readTaskRawText(task, 'email');
+  const contactEmail =
+    readRecordText(bookingContact, 'email') ?? readRecordText(bookingData, 'email') ?? readTaskRawText(task, 'email');
+  const sendRegiondoBookingsToAlternateEmail =
+    readRecordBoolean(
+      bookingData,
+      'send_regiondo_bookings_to_alternate_email',
+      'sendRegiondoBookingsToAlternateEmail'
+    ) ?? false;
+  const alternateRegiondoEmail = readRecordText(bookingData, 'regiondo_booking_email', 'regiondoBookingEmail');
+  const email = sendRegiondoBookingsToAlternateEmail ? alternateRegiondoEmail : contactEmail;
   const telephone =
     readRecordText(bookingContact, 'telephone', 'phone_number', 'phoneNumber') ??
     readRecordText(bookingData, 'phone_number', 'phoneNumber') ??
     readTaskRawText(task, 'phone_number');
+
+  if (sendRegiondoBookingsToAlternateEmail && !alternateRegiondoEmail) {
+    throw new DashboardValidationError(
+      'Task booking_data.regiondo_booking_email is required when alternate Regiondo email is enabled.'
+    );
+  }
 
   if (!firstname || !lastname || !email) {
     throw new DashboardValidationError(

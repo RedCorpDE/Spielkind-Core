@@ -40,6 +40,138 @@ vi.mock('../../src/modules/bookings/booking.repository.js', () => ({
 
 import { createBookingFromTask } from '../../src/dashboard/repository/bookings.js';
 
+const createTaskBookingData = (overrides: Record<string, unknown> = {}) => ({
+  contact_data: {
+    email: 'family@example.com',
+    first_name: 'Ada',
+    last_name: 'Lovelace',
+    phone_number: '+491234567'
+  },
+  email: 'family@example.com',
+  options: [
+    {
+      option_id: 'opt-1',
+      product_id: 'prod-1',
+      variation_id: 'var-1'
+    }
+  ],
+  qty: 1,
+  ...overrides
+});
+
+const createTaskRow = (bookingData: Record<string, unknown>, description = 'Single-product order') => ({
+  id: '11111111-1111-1111-1111-111111111111',
+  title: 'Confirm booking',
+  description,
+  created_at: '2026-05-12T10:00:00.000Z',
+  updated_at: '2026-05-12T10:00:00.000Z',
+  connected_booking_key: null,
+  update_log: [],
+  raw_json: {
+    site: 'Berlin',
+    booking_data: bookingData
+  },
+  event_date_time: '2026-05-13T07:00:00.000Z',
+  reminder_date: null,
+  reserved_capacity_date: null,
+  column_id: '22222222-2222-2222-2222-222222222222',
+  column_title: 'Confirmed',
+  column_position: 3,
+  booking_related: true,
+  assignee_user_id: null,
+  owner_name: null,
+  owner_role: null
+});
+
+const mockTaskForBookingCreation = (bookingData: Record<string, unknown>, description?: string) => {
+  queryMock.mockImplementation(async (sql: string) => {
+    if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+      return { rowCount: 0, rows: [] };
+    }
+
+    if (sql.includes('FROM tasks t') && sql.includes('FOR UPDATE OF t')) {
+      return {
+        rowCount: 1,
+        rows: [createTaskRow(bookingData, description)]
+      };
+    }
+
+    return { rowCount: 0, rows: [] };
+  });
+};
+
+const mockSingleRegiondoBookingSuccess = () => {
+  purchaseOrderMock.mockResolvedValue({
+    info_generated_at: '2026-05-12T10:00:01.000Z',
+    items: [
+      {
+        booking_key: 'booking-key-1',
+        payment_status: 'paid',
+        price_per_one_incl_tax: 49,
+        product_id: 'prod-1',
+        row_total_incl_tax: 49,
+        ticket_name: 'Product One',
+        ticket_qty: 1
+      }
+    ],
+    order_number: 'order-123',
+    purchased_at: '2026-05-12T10:00:00.000Z'
+  });
+
+  listSupplierBookingsMock.mockResolvedValue([
+    {
+      booking_key: 'booking-key-1',
+      order_number: 'order-123',
+      event_date_time: '2026-05-13 09:00:00',
+      duration_type: 'hour',
+      duration_value: 1,
+      product_id: 'prod-1',
+      qty: 1,
+      status: 'confirmed'
+    }
+  ]);
+
+  normalizeRegiondoBookingImportMock.mockReturnValue({
+    bookingKey: 'booking-key-1',
+    client: {
+      email: 'family@example.com',
+      firstName: 'Ada',
+      lastName: 'Lovelace',
+      phoneNumber: '+491234567',
+      raw: null,
+      regiondoCustomerId: null
+    },
+    dtFrom: '2026-05-13T07:00:00.000Z',
+    dtTo: '2026-05-13T08:00:00.000Z',
+    guestCount: 1,
+    items: [
+      {
+        quantity: 1,
+        raw: null,
+        regiondoProductId: 'prod-1',
+        title: 'Product One',
+        unitPrice: 49
+      }
+    ],
+    location: {
+      raw: null,
+      regiondoLocationId: null,
+      title: 'Berlin'
+    },
+    orderNumber: 'order-123',
+    paidAmount: 49,
+    payments: [],
+    raw: null,
+    snapshotGeneratedAt: '2026-05-12T10:00:01.000Z',
+    status: 'confirmed',
+    totalAmount: 49
+  });
+
+  upsertNormalizedRegiondoBookingMock.mockResolvedValue({
+    bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+  });
+};
+
 describe('task booking links', () => {
   beforeEach(() => {
     listSupplierBookingsMock.mockReset();
@@ -226,5 +358,66 @@ describe('task booking links', () => {
       ['aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'],
       'Two-product order'
     ]);
+  });
+
+  it('uses the alternate Regiondo booking email when the task flag is enabled', async () => {
+    const bookingData = createTaskBookingData({
+      regiondo_booking_email: 'tickets@example.com',
+      send_regiondo_bookings_to_alternate_email: true
+    });
+    mockTaskForBookingCreation(bookingData);
+    mockSingleRegiondoBookingSuccess();
+
+    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toEqual({
+      bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+    });
+
+    expect(bookingData.email).toBe('family@example.com');
+    expect(purchaseOrderMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contactData: expect.objectContaining({
+          email: 'tickets@example.com',
+          firstname: 'Ada',
+          lastname: 'Lovelace'
+        })
+      })
+    );
+  });
+
+  it('rejects alternate Regiondo email tasks when the alternate address is missing', async () => {
+    mockTaskForBookingCreation(
+      createTaskBookingData({
+        regiondo_booking_email: '',
+        send_regiondo_bookings_to_alternate_email: true
+      })
+    );
+
+    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).rejects.toThrow(
+      'Task booking_data.regiondo_booking_email is required when alternate Regiondo email is enabled.'
+    );
+
+    expect(purchaseOrderMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps using the primary task email when the alternate Regiondo flag is disabled', async () => {
+    mockTaskForBookingCreation(
+      createTaskBookingData({
+        regiondo_booking_email: 'tickets@example.com',
+        send_regiondo_bookings_to_alternate_email: false
+      })
+    );
+    mockSingleRegiondoBookingSuccess();
+
+    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toEqual({
+      bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+    });
+
+    expect(purchaseOrderMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contactData: expect.objectContaining({
+          email: 'family@example.com'
+        })
+      })
+    );
   });
 });
