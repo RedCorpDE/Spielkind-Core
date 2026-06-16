@@ -147,6 +147,29 @@ export interface DashboardTask {
   connectedBookingId: string | null;
 }
 
+export interface DashboardTaskCommentAuthor {
+  id: string | null;
+  name: string;
+  role: string;
+}
+
+export interface DashboardTaskComment {
+  id: string;
+  taskId: string;
+  author: DashboardTaskCommentAuthor;
+  body: string;
+  createdAt: string;
+}
+
+export interface CreateDashboardTaskCommentInput {
+  author: {
+    id: string;
+    name: string;
+    role: string;
+  };
+  body: string;
+}
+
 export type DashboardBookingExternalStatus =
   | 'Pending'
   | 'Processing'

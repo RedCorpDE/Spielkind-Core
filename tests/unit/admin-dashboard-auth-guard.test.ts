@@ -12,8 +12,17 @@ const protectedReadPaths = [
   '/api/admin/task-columns/00000000-0000-0000-0000-000000000001',
   '/api/admin/tasks',
   '/api/admin/tasks/00000000-0000-0000-0000-000000000001',
+  '/api/admin/tasks/00000000-0000-0000-0000-000000000001/comments',
   '/api/admin/bookings/00000000-0000-0000-0000-000000000001/tasks',
   '/api/admin/deleted-tasks'
+] as const;
+
+const protectedWritePaths = [
+  {
+    method: 'POST',
+    path: '/api/admin/tasks/00000000-0000-0000-0000-000000000001/comments',
+    body: { body: 'Looks good.' }
+  }
 ] as const;
 
 describe('admin dashboard read auth guards', () => {
@@ -50,6 +59,29 @@ describe('admin dashboard read auth guards', () => {
         const response = await app.inject({
           method: 'GET',
           url: path
+        });
+
+        expect(response.statusCode).toBe(401);
+        expect(response.json()).toEqual({
+          ok: false,
+          error: 'Missing bearer token.'
+        });
+      } finally {
+        await app.close();
+      }
+    });
+  }
+
+  for (const { body, method, path } of protectedWritePaths) {
+    it(`rejects unauthenticated access to ${method} ${path}`, async () => {
+      const { createApp } = await import('../../src/app.js');
+      const app = createApp();
+
+      try {
+        const response = await app.inject({
+          method,
+          url: path,
+          payload: body
         });
 
         expect(response.statusCode).toBe(401);

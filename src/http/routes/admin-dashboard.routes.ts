@@ -16,6 +16,10 @@ import {
   restoreTask,
   updateTask
 } from '../../dashboard/repository/tasks.js';
+import {
+  createTaskComment,
+  listTaskComments
+} from '../../dashboard/repository/task-comments.js';
 import { createBookingFromTask, getBooking } from '../../dashboard/repository/bookings.js';
 import {
   createTaskColumn,
@@ -78,6 +82,10 @@ const updateTaskSchema = z.object({
   site: z.string().default(''),
   columnId: taskColumnIdSchema.nullable(),
   connectedBookingId: z.string().uuid().nullable().optional()
+});
+
+const createTaskCommentSchema = z.object({
+  body: z.string().trim().min(1)
 });
 
 const createTaskColumnSchema = z.object({
@@ -707,6 +715,17 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
     }
   });
 
+  app.get('/api/admin/tasks/:taskId/comments', async (request) => {
+    await requireAdminPermission(request as AdminFastifyRequest, 'tasks', 'view');
+    const { taskId } = request.params as { taskId: string };
+
+    try {
+      return { items: await listTaskComments(taskId) };
+    } catch (error) {
+      sendError(error);
+    }
+  });
+
   app.post('/api/admin/tasks', async (request) => {
     const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'tasks', 'create');
     const parsed = createTaskSchema.safeParse(request.body);
@@ -731,6 +750,40 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
       details: { title: task.title }
     });
     return { item: task };
+  });
+
+  app.post('/api/admin/tasks/:taskId/comments', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'tasks', 'update');
+    const parsed = createTaskCommentSchema.safeParse(request.body);
+    if (!parsed.success) {
+      throw new ValidationHttpError('Invalid task comment payload.');
+    }
+
+    const { taskId } = request.params as { taskId: string };
+
+    try {
+      const comment = await createTaskComment(taskId, {
+        author: {
+          id: auth.user.id,
+          name: auth.user.displayName,
+          role: auth.user.role
+        },
+        body: parsed.data.body
+      });
+
+      await recordAdminWriteAudit({
+        request,
+        auth,
+        action: 'admin.task_comment.created',
+        entityType: 'task',
+        entityId: taskId,
+        details: { commentId: comment.id }
+      });
+
+      return { item: comment };
+    } catch (error) {
+      sendError(error);
+    }
   });
 
   app.post('/api/admin/tasks/:taskId/booking', async (request) => {
