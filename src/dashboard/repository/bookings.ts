@@ -6,9 +6,11 @@ import { upsertNormalizedRegiondoBooking } from '../../modules/bookings/booking.
 import {
   regiondoClient,
   type RegiondoCheckoutCartItem,
-  type RegiondoCheckoutContactData
+  type RegiondoCheckoutContactData,
+  type RegiondoUpdateBookingInput
 } from '../../modules/regiondo/regiondo.client.js';
 import { formatRegiondoDateTime } from '../../modules/regiondo/regiondo-datetime.js';
+import { rebuildConsumptionsForBooking } from '../../modules/resources/consumption.service.js';
 import { SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID } from '../../sync/mappers.js';
 import type {
   DashboardBooking,
@@ -30,7 +32,6 @@ import type {
 } from '../types.js';
 import {
   type BookingRow,
-  type ExistingBookingRow,
   type Queryable,
   type TaskRow,
   DashboardNotFoundError,
@@ -54,11 +55,84 @@ interface BookingProductRow {
   unit_price: string | number;
 }
 
+interface BookingForUpdateRow {
+  booking_id: string;
+  client_id: string;
+  location_id: string | null;
+  status: string;
+  guest_count: number;
+  total_amount: string | number;
+  paid_amount: string | number;
+  dt_from: Date | string;
+  dt_to: Date | string;
+  source: string | null;
+  regiondo_booking_id: string | null;
+  regiondo_order_number: string | null;
+  regiondo_raw: unknown;
+  updated_at: Date | string;
+  first_name: string | null;
+  last_name: string | null;
+  email: string | null;
+  phone_number: string | null;
+  ops_status: string | null;
+  ops_notes: string | null;
+  last_provider_edit_error: string | null;
+}
+
+interface BookingLocationUpdateRow {
+  location_id: string;
+  title: string;
+  regiondo_location_id: string | null;
+}
+
+interface BookingProductUpdateRow {
+  product_id: string;
+  regiondo_product_id: string | null;
+  title: string;
+  base_amount: string | number;
+}
+
+interface ResolvedBookingProductUpdate {
+  productId: string;
+  regiondoProductId: string | null;
+  title: string;
+  quantity: number;
+  unitPrice: number;
+}
+
+interface ResolvedBookingUpdate {
+  changedFields: string[];
+  clearProviderEditError: boolean;
+  contact: {
+    email: string | null;
+    firstName: string;
+    lastName: string;
+    phoneNumber: string | null;
+  };
+  dtFrom: string;
+  dtTo: string;
+  guestCount: number;
+  locationId: string;
+  opsNotes: string;
+  opsStatus: 'normal' | 'escalated';
+  payment: {
+    amountPaid: number;
+    amountToPay: number;
+    paymentMethod: string | null;
+  };
+  products: ResolvedBookingProductUpdate[];
+  regiondoLocationId: string | null;
+  providerInput: RegiondoUpdateBookingInput | null;
+  raw: unknown;
+  rebuildConsumptions: boolean;
+}
+
 interface BookingSyncRow {
   booking_id: string;
   regiondo_booking_id: string | null;
   regiondo_order_number: string | null;
   regiondo_snapshot_generated_at: Date | string | null;
+  last_provider_edit_error: string | null;
   latest_event_id: string | null;
   latest_event_status: DashboardRegiondoWebhookEventStatus | null;
   latest_event_action_type: string | null;
@@ -1164,6 +1238,8 @@ function buildBookingBaseQuery() {
        b.total_amount,
        b.paid_amount,
        b.dt_from,
+       b.dt_to,
+       b.source,
        b.updated_at,
        b.regiondo_raw AS booking_raw,
        COALESCE(
@@ -1197,6 +1273,7 @@ function buildBookingBaseQuery() {
        location.location_id,
        location.title AS location_title,
        location.regiondo_location_id AS location_regiondo_location_id,
+       admin.last_provider_edit_error,
        admin.ops_status,
        admin.ops_notes
      FROM bookings b
@@ -1402,6 +1479,7 @@ async function queryBookingSyncRow(executor: Queryable, bookingId: string): Prom
        b.regiondo_booking_id,
        b.regiondo_order_number,
        b.regiondo_snapshot_generated_at,
+       admin.last_provider_edit_error,
        latest.event_id AS latest_event_id,
        latest.status AS latest_event_status,
        latest.action_type AS latest_event_action_type,
@@ -1413,6 +1491,7 @@ async function queryBookingSyncRow(executor: Queryable, bookingId: string): Prom
        latest.attempt_count AS latest_event_attempt_count,
        latest.last_error AS latest_event_last_error
      FROM bookings b
+     LEFT JOIN booking_admin_metadata admin ON admin.booking_id = b.booking_id
      LEFT JOIN LATERAL (
        SELECT
          event_id,
@@ -1475,6 +1554,7 @@ function mapBookingSyncRow(row: BookingSyncRow): DashboardBookingSyncInfo {
     latestEventAvailableAt,
     latestEventProcessedAt,
     latestEventAttemptCount: row.latest_event_attempt_count ?? 0,
+    lastProviderEditError: row.last_provider_edit_error,
     lastSyncError: row.latest_event_last_error,
     isQueued,
     isStale
@@ -1701,7 +1781,7 @@ export async function listBookingActivity(bookingId: string): Promise<DashboardB
        LEFT JOIN users ON users.id = log.actor_user_id
        WHERE log.entity_type = 'booking'
          AND log.entity_id = $1
-         AND log.action IN ('dashboard.booking.updated', 'dashboard.booking.reconciled')
+         AND log.action IN ('admin.booking.updated', 'dashboard.booking.updated', 'dashboard.booking.reconciled')
        ORDER BY log.created_at DESC, log.id DESC
        LIMIT 200`,
       [bookingId]
@@ -1737,55 +1817,715 @@ export async function listBookingActivity(bookingId: string): Promise<DashboardB
   );
 }
 
+function normalizeBookingText(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function requireBookingText(value: string | null | undefined, fieldName: string): string {
+  const normalized = normalizeBookingText(value);
+  if (!normalized) {
+    throw new DashboardValidationError(`${fieldName} is required.`);
+  }
+
+  return normalized;
+}
+
+function normalizeMoney(value: number, fieldName: string): number {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new DashboardValidationError(`${fieldName} must be a positive amount.`);
+  }
+
+  return Math.round(value * 100) / 100;
+}
+
+function readStoredMoney(value: string | number, fieldName: string): number {
+  const normalized = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(normalized)) {
+    throw new DashboardValidationError(`${fieldName} is invalid.`);
+  }
+
+  return normalizeMoney(normalized, fieldName);
+}
+
+function compareMoney(left: number, right: number): boolean {
+  return Math.abs(left - right) < 0.005;
+}
+
+function normalizeUpdateDate(value: string, fieldName: string): string {
+  return toIsoStringOrThrow(value, fieldName);
+}
+
+function resolveBookingDateRange(current: BookingForUpdateRow, input: UpdateDashboardBookingInput) {
+  const currentStart = requireIsoString(current.dt_from, 'bookings.dt_from');
+  const currentEnd = requireIsoString(current.dt_to, 'bookings.dt_to');
+  const nextStart = input.bookingDate ? normalizeUpdateDate(input.bookingDate, 'bookingDate') : currentStart;
+  let nextEnd = input.bookingEndDate ? normalizeUpdateDate(input.bookingEndDate, 'bookingEndDate') : currentEnd;
+
+  if (input.bookingDate && !input.bookingEndDate) {
+    const currentDurationMs = new Date(currentEnd).getTime() - new Date(currentStart).getTime();
+    const durationMs = currentDurationMs > 0 ? currentDurationMs : 2 * 60 * 60 * 1000;
+    nextEnd = new Date(new Date(nextStart).getTime() + durationMs).toISOString();
+  }
+
+  if (new Date(nextEnd).getTime() <= new Date(nextStart).getTime()) {
+    throw new DashboardValidationError('bookingEndDate must be after bookingDate.');
+  }
+
+  return {
+    changed: nextStart !== currentStart || nextEnd !== currentEnd,
+    currentEnd,
+    currentStart,
+    nextEnd,
+    nextStart
+  };
+}
+
+function resolveBookingContact(current: BookingForUpdateRow, input: UpdateDashboardBookingInput) {
+  const manual = getManualRecord(current.regiondo_raw);
+  const currentContact = {
+    email: normalizeManualContactField(manual, 'email') ?? normalizeBookingText(current.email),
+    firstName: normalizeManualContactField(manual, 'firstName') ?? normalizeBookingText(current.first_name) ?? 'Unknown',
+    lastName: normalizeManualContactField(manual, 'lastName') ?? normalizeBookingText(current.last_name) ?? 'Unknown',
+    phoneNumber: normalizeManualContactField(manual, 'phoneNumber') ?? normalizeBookingText(current.phone_number)
+  };
+
+  const nextContact = {
+    email: input.contact && 'email' in input.contact ? normalizeBookingText(input.contact.email ?? null) : currentContact.email,
+    firstName:
+      input.contact && 'firstName' in input.contact
+        ? requireBookingText(input.contact.firstName, 'contact.firstName')
+        : currentContact.firstName,
+    lastName:
+      input.contact && 'lastName' in input.contact
+        ? requireBookingText(input.contact.lastName, 'contact.lastName')
+        : currentContact.lastName,
+    phoneNumber:
+      input.contact && 'phoneNumber' in input.contact
+        ? normalizeBookingText(input.contact.phoneNumber ?? null)
+        : currentContact.phoneNumber
+  };
+
+  return {
+    changed:
+      nextContact.email !== currentContact.email ||
+      nextContact.firstName !== currentContact.firstName ||
+      nextContact.lastName !== currentContact.lastName ||
+      nextContact.phoneNumber !== currentContact.phoneNumber,
+    current: currentContact,
+    next: nextContact
+  };
+}
+
+function resolveBookingPayment(current: BookingForUpdateRow, input: UpdateDashboardBookingInput) {
+  const currentPayment = {
+    amountPaid: readStoredMoney(current.paid_amount, 'bookings.paid_amount'),
+    amountToPay: readStoredMoney(current.total_amount, 'bookings.total_amount'),
+    paymentMethod: extractPaymentMethod(current.regiondo_raw)
+  };
+  const nextPayment = {
+    amountPaid:
+      input.payment && input.payment.amountPaid !== undefined
+        ? normalizeMoney(input.payment.amountPaid, 'payment.amountPaid')
+        : currentPayment.amountPaid,
+    amountToPay:
+      input.payment && input.payment.amountToPay !== undefined
+        ? normalizeMoney(input.payment.amountToPay, 'payment.amountToPay')
+        : currentPayment.amountToPay,
+    paymentMethod:
+      input.payment && 'paymentMethod' in input.payment
+        ? normalizeBookingText(input.payment.paymentMethod ?? null)
+        : currentPayment.paymentMethod
+  };
+
+  if (input.payment && nextPayment.amountPaid > nextPayment.amountToPay) {
+    throw new DashboardValidationError('payment.amountPaid cannot exceed payment.amountToPay.');
+  }
+
+  return {
+    changed:
+      !compareMoney(nextPayment.amountPaid, currentPayment.amountPaid) ||
+      !compareMoney(nextPayment.amountToPay, currentPayment.amountToPay) ||
+      nextPayment.paymentMethod !== currentPayment.paymentMethod,
+    current: currentPayment,
+    next: nextPayment
+  };
+}
+
+async function resolveBookingLocationUpdate(
+  executor: Queryable,
+  current: BookingForUpdateRow,
+  input: UpdateDashboardBookingInput
+): Promise<{ changed: boolean; location: BookingLocationUpdateRow }> {
+  const locationId = input.locationId === undefined ? current.location_id : input.locationId;
+  if (!locationId) {
+    throw new DashboardValidationError('locationId is required.');
+  }
+
+  const result = await executor.query<BookingLocationUpdateRow>(
+    `SELECT location_id, title, regiondo_location_id
+     FROM locations
+     WHERE location_id = $1
+     LIMIT 1`,
+    [locationId]
+  );
+
+  if (!result.rowCount) {
+    throw new DashboardValidationError('Selected location does not exist.');
+  }
+
+  const location = result.rows[0];
+  if (input.locationId !== undefined && location.regiondo_location_id === SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID) {
+    throw new DashboardValidationError('Selected location must use an internal location.');
+  }
+
+  return {
+    changed: location.location_id !== current.location_id,
+    location
+  };
+}
+
+async function resolveBookingProductUpdates(
+  executor: Queryable,
+  currentProducts: DashboardBookingProduct[],
+  input: UpdateDashboardBookingInput
+): Promise<{ changed: boolean; products: ResolvedBookingProductUpdate[] }> {
+  if (!input.products) {
+    return {
+      changed: false,
+      products: currentProducts.map((product) => ({
+        productId: product.productId,
+        quantity: product.quantity,
+        regiondoProductId: product.regiondoProductId,
+        title: product.title,
+        unitPrice: product.unitPrice
+      }))
+    };
+  }
+
+  if (!input.products.length) {
+    throw new DashboardValidationError('At least one product is required.');
+  }
+
+  const seenProductIds = new Set<string>();
+  const products: ResolvedBookingProductUpdate[] = [];
+
+  for (const productInput of input.products) {
+    const productId = requireBookingText(productInput.productId, 'products.productId');
+    if (seenProductIds.has(productId)) {
+      throw new DashboardValidationError('Each product can only be selected once.');
+    }
+    seenProductIds.add(productId);
+
+    if (!Number.isInteger(productInput.quantity) || productInput.quantity <= 0) {
+      throw new DashboardValidationError('products.quantity must be a positive integer.');
+    }
+
+    const productResult = await executor.query<BookingProductUpdateRow>(
+      `SELECT product_id, regiondo_product_id, title, base_amount
+       FROM products
+       WHERE product_id = $1
+       LIMIT 1`,
+      [productId]
+    );
+
+    if (!productResult.rowCount) {
+      throw new DashboardValidationError('Selected product does not exist.');
+    }
+
+    const product = productResult.rows[0];
+    const defaultUnitPrice = readStoredMoney(product.base_amount, 'products.base_amount');
+    const unitPrice =
+      productInput.unitPrice === undefined || productInput.unitPrice === null
+        ? defaultUnitPrice
+        : normalizeMoney(productInput.unitPrice, 'products.unitPrice');
+
+    products.push({
+      productId: product.product_id,
+      quantity: productInput.quantity,
+      regiondoProductId: product.regiondo_product_id,
+      title: product.title,
+      unitPrice
+    });
+  }
+
+  const currentComparable = currentProducts
+    .map((product) => `${product.productId}:${product.quantity}:${product.unitPrice.toFixed(2)}`)
+    .sort()
+    .join('|');
+  const nextComparable = products
+    .map((product) => `${product.productId}:${product.quantity}:${product.unitPrice.toFixed(2)}`)
+    .sort()
+    .join('|');
+
+  return {
+    changed: currentComparable !== nextComparable,
+    products
+  };
+}
+
+function resolveOpsMetadata(current: BookingForUpdateRow, input: UpdateDashboardBookingInput) {
+  const currentOpsStatus: 'normal' | 'escalated' = current.ops_status === 'escalated' ? 'escalated' : 'normal';
+  const nextOpsStatus: 'normal' | 'escalated' =
+    input.opsStatus === 'Escalated'
+      ? 'escalated'
+      : input.opsStatus === 'Normal'
+        ? 'normal'
+        : currentOpsStatus;
+  const currentOpsNotes = current.ops_notes ?? '';
+  const nextOpsNotes = typeof input.opsNotes === 'string' ? input.opsNotes.trim() : currentOpsNotes;
+
+  return {
+    notesChanged: nextOpsNotes !== currentOpsNotes,
+    statusChanged: nextOpsStatus !== currentOpsStatus,
+    nextOpsNotes,
+    nextOpsStatus
+  };
+}
+
+function cloneBookingRaw(rawValue: unknown): Record<string, unknown> {
+  if (!isRecord(rawValue)) {
+    return {};
+  }
+
+  return JSON.parse(JSON.stringify(rawValue)) as Record<string, unknown>;
+}
+
+function buildManualBookingRaw(input: ResolvedBookingUpdate): Record<string, unknown> {
+  const raw = cloneBookingRaw(input.raw);
+  const manual = isRecord(raw.manual) ? { ...raw.manual } : {};
+  manual.contact = input.contact;
+  manual.payment = input.payment;
+  manual.regiondoSelections = input.products.map((product, index) => ({
+    id: `manual-selection-${index + 1}`,
+    productId: product.productId,
+    productTitle: product.title,
+    quantity: product.quantity,
+    regiondoProductId: product.regiondoProductId
+  }));
+  raw.manual = manual;
+  raw.source = normalizeBookingText(raw.source as string | null | undefined) ?? 'manual_admin';
+  return raw;
+}
+
+function mapPaymentMethodToType(paymentMethod: string | null): 'cash' | 'card' | 'paypal' | 'sepa' | 'bank_transfer' | 'voucher' | 'other' {
+  const normalized = paymentMethod?.toLowerCase() ?? '';
+  if (normalized.includes('paypal')) {
+    return 'paypal';
+  }
+  if (normalized.includes('sepa')) {
+    return 'sepa';
+  }
+  if (normalized.includes('bank') || normalized.includes('transfer') || normalized.includes('invoice')) {
+    return 'bank_transfer';
+  }
+  if (normalized.includes('voucher') || normalized.includes('coupon')) {
+    return 'voucher';
+  }
+  if (normalized.includes('cash') || normalized.includes('bar')) {
+    return 'cash';
+  }
+  if (normalized.includes('card') || normalized.includes('karte')) {
+    return 'card';
+  }
+
+  return 'other';
+}
+
+function buildRegiondoUpdateInput(
+  current: BookingForUpdateRow,
+  update: ResolvedBookingUpdate,
+  changes: {
+    attendees: boolean;
+    contact: boolean;
+    location: boolean;
+    payment: boolean;
+    products: boolean;
+    schedule: boolean;
+  }
+): RegiondoUpdateBookingInput | null {
+  if (!current.regiondo_booking_id) {
+    return null;
+  }
+
+  const providerInput: RegiondoUpdateBookingInput = {
+    bookingKey: current.regiondo_booking_id,
+    orderNumber: current.regiondo_order_number
+  };
+  let hasProviderMutation = false;
+
+  if (changes.contact) {
+    providerInput.contactData = {
+      ...(update.contact.email ? { email: update.contact.email } : {}),
+      firstname: update.contact.firstName,
+      lastname: update.contact.lastName,
+      ...(update.contact.phoneNumber ? { telephone: update.contact.phoneNumber } : {})
+    };
+    hasProviderMutation = true;
+  }
+
+  if (changes.schedule) {
+    const startsAt = formatRegiondoDateTime(update.dtFrom);
+    const endsAt = formatRegiondoDateTime(update.dtTo);
+    if (!startsAt || !endsAt) {
+      throw new DashboardValidationError('Booking date/time is invalid for Regiondo.');
+    }
+    providerInput.startsAt = startsAt;
+    providerInput.endsAt = endsAt;
+    hasProviderMutation = true;
+  }
+
+  if (changes.attendees) {
+    providerInput.guestCount = update.guestCount;
+    hasProviderMutation = true;
+  }
+
+  if (changes.location) {
+    if (!update.regiondoLocationId) {
+      throw new DashboardValidationError('Selected location cannot be updated in Regiondo because it has no Regiondo location ID.');
+    }
+    providerInput.locationId = update.regiondoLocationId;
+    hasProviderMutation = true;
+  }
+
+  if (changes.products) {
+    const itemDateTime = formatRegiondoDateTime(update.dtFrom);
+    if (!itemDateTime) {
+      throw new DashboardValidationError('Booking date/time is invalid for Regiondo products.');
+    }
+
+    providerInput.items = update.products.map((product) => {
+      if (!product.regiondoProductId) {
+        throw new DashboardValidationError('Selected products must be synced with Regiondo before updating a Regiondo booking.');
+      }
+
+      return {
+        date_time: itemDateTime,
+        product_id: product.regiondoProductId,
+        qty: product.quantity,
+        unit_price: product.unitPrice
+      } satisfies RegiondoCheckoutCartItem;
+    });
+    hasProviderMutation = true;
+  }
+
+  if (changes.payment) {
+    providerInput.payment = {
+      amountPaid: update.payment.amountPaid,
+      amountToPay: update.payment.amountToPay,
+      paymentMethod: update.payment.paymentMethod
+    };
+    hasProviderMutation = true;
+  }
+
+  return hasProviderMutation ? providerInput : null;
+}
+
+async function queryBookingForUpdate(executor: Queryable, bookingId: string): Promise<BookingForUpdateRow | null> {
+  const result = await executor.query<BookingForUpdateRow>(
+    `SELECT
+       b.booking_id,
+       b.client_id,
+       b.location_id,
+       b.status,
+       b.guest_count,
+       b.total_amount,
+       b.paid_amount,
+       b.dt_from,
+       b.dt_to,
+       b.source,
+       b.regiondo_booking_id,
+       b.regiondo_order_number,
+       b.regiondo_raw,
+       b.updated_at,
+       c.first_name,
+       c.last_name,
+       c.email::text AS email,
+       c.phone_number,
+       admin.ops_status,
+       admin.ops_notes,
+       admin.last_provider_edit_error
+     FROM bookings b
+     INNER JOIN clients c ON c.client_id = b.client_id
+     LEFT JOIN booking_admin_metadata admin ON admin.booking_id = b.booking_id
+     WHERE b.booking_id = $1
+     LIMIT 1
+     FOR UPDATE OF b, c`,
+    [bookingId]
+  );
+
+  return result.rowCount ? result.rows[0] : null;
+}
+
+async function assertClientEmailAvailable(executor: Queryable, clientId: string, email: string | null): Promise<void> {
+  if (!email) {
+    return;
+  }
+
+  const result = await executor.query<{ client_id: string }>(
+    `SELECT client_id
+     FROM clients
+     WHERE email = $1
+       AND client_id <> $2
+     LIMIT 1`,
+    [email, clientId]
+  );
+
+  if (result.rowCount) {
+    throw new DashboardValidationError('Another client already uses this email address.');
+  }
+}
+
+async function buildResolvedBookingUpdate(
+  executor: Queryable,
+  current: BookingForUpdateRow,
+  currentProducts: DashboardBookingProduct[],
+  input: UpdateDashboardBookingInput
+): Promise<ResolvedBookingUpdate> {
+  if (input.expectedLastUpdated) {
+    const expectedLastUpdated = toIsoStringOrThrow(input.expectedLastUpdated, 'expectedLastUpdated');
+    const currentLastUpdated = requireIsoString(current.updated_at, 'bookings.updated_at');
+    if (expectedLastUpdated !== currentLastUpdated) {
+      throw new DashboardValidationError('Booking was updated by another process. Reload before saving.');
+    }
+  }
+
+  const dateRange = resolveBookingDateRange(current, input);
+  const contact = resolveBookingContact(current, input);
+  await assertClientEmailAvailable(executor, current.client_id, contact.next.email);
+  const payment = resolveBookingPayment(current, input);
+  const location = await resolveBookingLocationUpdate(executor, current, input);
+  const products = await resolveBookingProductUpdates(executor, currentProducts, input);
+  const ops = resolveOpsMetadata(current, input);
+  const guestCount = input.attendees === undefined ? current.guest_count : input.attendees;
+  if (!Number.isInteger(guestCount) || guestCount <= 0) {
+    throw new DashboardValidationError('attendees must be a positive integer.');
+  }
+
+  const attendeeChanged = guestCount !== current.guest_count;
+  const changedFields = [
+    ...(contact.changed ? ['contact'] : []),
+    ...(dateRange.changed ? ['schedule'] : []),
+    ...(attendeeChanged ? ['attendees'] : []),
+    ...(location.changed ? ['location'] : []),
+    ...(products.changed ? ['products'] : []),
+    ...(payment.changed ? ['payment'] : []),
+    ...(ops.statusChanged ? ['opsStatus'] : []),
+    ...(ops.notesChanged ? ['opsNotes'] : [])
+  ];
+  const isRegiondoBooking = current.source === 'regiondo' || Boolean(current.regiondo_booking_id);
+  const resolved: ResolvedBookingUpdate = {
+    changedFields,
+    clearProviderEditError: !isRegiondoBooking,
+    contact: contact.next,
+    dtFrom: dateRange.nextStart,
+    dtTo: dateRange.nextEnd,
+    guestCount,
+    locationId: location.location.location_id,
+    opsNotes: ops.nextOpsNotes,
+    opsStatus: ops.nextOpsStatus,
+    payment: payment.next,
+    products: products.products,
+    providerInput: null,
+    raw: current.regiondo_raw,
+    regiondoLocationId: location.location.regiondo_location_id,
+    rebuildConsumptions: dateRange.changed || products.changed
+  };
+
+  resolved.providerInput = buildRegiondoUpdateInput(current, resolved, {
+    attendees: attendeeChanged,
+    contact: contact.changed,
+    location: location.changed,
+    payment: payment.changed,
+    products: products.changed,
+    schedule: dateRange.changed
+  });
+  resolved.clearProviderEditError = resolved.clearProviderEditError || Boolean(resolved.providerInput);
+
+  return resolved;
+}
+
+async function upsertBookingAdminMetadata(
+  executor: Queryable,
+  bookingId: string,
+  input: {
+    lastProviderEditError: string | null;
+    opsNotes: string;
+    opsStatus: 'normal' | 'escalated';
+  }
+): Promise<void> {
+  await executor.query(
+    `INSERT INTO booking_admin_metadata (booking_id, ops_status, ops_notes, last_provider_edit_error)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (booking_id)
+     DO UPDATE SET ops_status = EXCLUDED.ops_status,
+                   ops_notes = EXCLUDED.ops_notes,
+                   last_provider_edit_error = EXCLUDED.last_provider_edit_error,
+                   updated_at = now()`,
+    [bookingId, input.opsStatus, input.opsNotes, input.lastProviderEditError]
+  );
+}
+
+async function recordBookingProviderEditError(bookingId: string, message: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO booking_admin_metadata (booking_id, last_provider_edit_error)
+     VALUES ($1, $2)
+     ON CONFLICT (booking_id)
+     DO UPDATE SET last_provider_edit_error = EXCLUDED.last_provider_edit_error,
+                   updated_at = now()`,
+    [bookingId, message]
+  );
+}
+
+function getProviderEditErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'Regiondo booking update failed.';
+}
+
+async function updateManualBooking(
+  executor: Queryable,
+  bookingId: string,
+  current: BookingForUpdateRow,
+  update: ResolvedBookingUpdate,
+  updateProducts: boolean,
+  updatePayment: boolean
+): Promise<void> {
+  await executor.query(
+    `UPDATE clients
+     SET first_name = $2,
+         last_name = $3,
+         email = $4,
+         phone_number = $5,
+         updated_at = now()
+     WHERE client_id = $1`,
+    [current.client_id, update.contact.firstName, update.contact.lastName, update.contact.email, update.contact.phoneNumber]
+  );
+
+  await executor.query(
+    `UPDATE bookings
+     SET location_id = $2,
+         guest_count = $3,
+         total_amount = $4,
+         paid_amount = $5,
+         dt_from = $6::timestamptz,
+         dt_to = $7::timestamptz,
+         regiondo_raw = $8::jsonb,
+         updated_at = now()
+     WHERE booking_id = $1`,
+    [
+      bookingId,
+      update.locationId,
+      update.guestCount,
+      update.payment.amountToPay,
+      update.payment.amountPaid,
+      update.dtFrom,
+      update.dtTo,
+      JSON.stringify(buildManualBookingRaw(update))
+    ]
+  );
+
+  if (updateProducts) {
+    await executor.query('DELETE FROM booking_products WHERE booking_id = $1', [bookingId]);
+    for (const product of update.products) {
+      await executor.query(
+        `INSERT INTO booking_products (booking_id, product_id, quantity, unit_price)
+         VALUES ($1, $2, $3, $4)`,
+        [bookingId, product.productId, product.quantity, product.unitPrice]
+      );
+    }
+  }
+
+  if (updatePayment) {
+    await executor.query('DELETE FROM payments WHERE booking_id = $1', [bookingId]);
+    if (update.payment.amountPaid > 0) {
+      await executor.query(
+        `INSERT INTO payments (booking_id, amount, type, provider_ref)
+         VALUES ($1, $2, $3, NULL)`,
+        [bookingId, update.payment.amountPaid, mapPaymentMethodToType(update.payment.paymentMethod)]
+      );
+    }
+  }
+}
+
 export async function updateBooking(bookingId: string, input: UpdateDashboardBookingInput): Promise<DashboardBookingDetail> {
   const client = await pool.connect();
+  let providerEditError: string | null = null;
+  let rebuildConsumptions = false;
 
   try {
     await client.query("BEGIN");
-    const existing = await client.query<ExistingBookingRow>(
-      `SELECT
-         b.booking_id,
-         b.dt_from,
-         b.dt_to,
-         admin.ops_status,
-         admin.ops_notes
-       FROM bookings b
-       LEFT JOIN booking_admin_metadata admin ON admin.booking_id = b.booking_id
-       WHERE b.booking_id = $1
-       LIMIT 1
-       FOR UPDATE`,
-      [bookingId]
-    );
-
-    if (!existing.rowCount) {
+    const current = await queryBookingForUpdate(client, bookingId);
+    if (!current) {
       throw new DashboardNotFoundError("Booking not found.");
     }
 
-    const current = existing.rows[0];
-    const nextOpsStatus =
-      input.opsStatus === "Escalated"
-        ? "escalated"
-        : input.opsStatus === "Normal"
-          ? "normal"
-          : current.ops_status ?? "normal";
-    const nextOpsNotes = typeof input.opsNotes === "string" ? input.opsNotes.trim() : current.ops_notes ?? "";
+    const currentProducts = await queryBookingProducts(client, bookingId);
+    const update = await buildResolvedBookingUpdate(client, current, currentProducts, input);
+    const isRegiondoBooking = current.source === 'regiondo' || Boolean(current.regiondo_booking_id);
+    const hasBookingMutation = update.changedFields.some((field) => !['opsNotes', 'opsStatus'].includes(field));
 
-    await client.query(
-      `INSERT INTO booking_admin_metadata (booking_id, ops_status, ops_notes)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (booking_id)
-       DO UPDATE SET ops_status = EXCLUDED.ops_status,
-                     ops_notes = EXCLUDED.ops_notes,
-                     updated_at = now()`,
-      [bookingId, nextOpsStatus, nextOpsNotes]
-    );
+    if (isRegiondoBooking && hasBookingMutation) {
+      if (!update.providerInput || !current.regiondo_booking_id) {
+        throw new DashboardValidationError('This Regiondo booking does not support the requested update.');
+      }
+
+      try {
+        await regiondoClient.updateBooking(update.providerInput);
+        const snapshot = await regiondoClient.hydrateBookingOrder({
+          bookingKey: current.regiondo_booking_id,
+          orderNumber: current.regiondo_order_number
+        });
+        const normalizedBooking = normalizeRegiondoBookingImport({
+          bookingKey: current.regiondo_booking_id,
+          purchaseData: snapshot.purchaseData,
+          supplierBookings: snapshot.supplierBookings,
+          webhookPayload: null
+        });
+        await upsertNormalizedRegiondoBooking(client, normalizedBooking);
+      } catch (error) {
+        providerEditError = getProviderEditErrorMessage(error);
+        throw error;
+      }
+    } else if (!isRegiondoBooking && hasBookingMutation) {
+      await updateManualBooking(
+        client,
+        bookingId,
+        current,
+        update,
+        update.changedFields.includes('products'),
+        update.changedFields.includes('payment')
+      );
+    }
+
+    await upsertBookingAdminMetadata(client, bookingId, {
+      lastProviderEditError: update.clearProviderEditError ? null : current.last_provider_edit_error,
+      opsNotes: update.opsNotes,
+      opsStatus: update.opsStatus
+    });
+
+    rebuildConsumptions = update.rebuildConsumptions;
 
     await client.query("COMMIT");
-    return await getBooking(bookingId);
   } catch (error) {
-    await client.query("ROLLBACK");
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Ignore rollback failures so the original error remains visible.
+    }
+    if (providerEditError) {
+      await recordBookingProviderEditError(bookingId, providerEditError);
+    }
     throw error;
   } finally {
     client.release();
   }
+
+  if (rebuildConsumptions) {
+    await rebuildConsumptionsForBooking(bookingId);
+  }
+
+  return await getBooking(bookingId);
 }

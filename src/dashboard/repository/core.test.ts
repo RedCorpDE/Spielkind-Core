@@ -23,6 +23,8 @@ test('mapBookingRow surfaces placeholder provider data explicitly', () => {
     total_amount: '20.00',
     paid_amount: '0.00',
     dt_from: '2026-04-27T10:00:00.000Z',
+    dt_to: '2026-04-27T12:00:00.000Z',
+    source: 'regiondo',
     updated_at: '2026-04-27T11:00:00.000Z',
     booking_raw: null,
     first_name: null,
@@ -36,6 +38,7 @@ test('mapBookingRow surfaces placeholder provider data explicitly', () => {
     location_id: 'location-1',
     location_title: 'Unknown Location',
     location_regiondo_location_id: SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID,
+    last_provider_edit_error: null,
     ops_status: 'normal',
     ops_notes: ''
   } satisfies BookingRow);
@@ -56,6 +59,8 @@ test('mapBookingRow surfaces manual task payload details', () => {
     total_amount: '80.00',
     paid_amount: '0.00',
     dt_from: '2026-05-05T10:00:00.000Z',
+    dt_to: '2026-05-05T12:00:00.000Z',
+    source: 'manual',
     updated_at: '2026-05-05T10:30:00.000Z',
     booking_raw: {
       source: 'manual_task',
@@ -87,6 +92,7 @@ test('mapBookingRow surfaces manual task payload details', () => {
     location_id: 'location-2',
     location_title: 'Berlin Mitte',
     location_regiondo_location_id: 'manual-location',
+    last_provider_edit_error: null,
     ops_status: 'normal',
     ops_notes: ''
   } satisfies BookingRow);

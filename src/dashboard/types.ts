@@ -201,6 +201,7 @@ export interface DashboardBooking {
   customerDataStatus: 'known' | 'unknown';
   experience: string;
   bookingDate: string;
+  bookingEndDate: string;
   status: DashboardBookingStatus;
   externalStatus: DashboardBookingExternalStatus;
   opsStatus: DashboardBookingOpsStatus;
@@ -216,6 +217,17 @@ export interface DashboardBooking {
   regiondoBookingId: string | null;
   regiondoOrderNumber: string | null;
   lastUpdated: string;
+  updateCapabilities: DashboardBookingUpdateCapabilities;
+}
+
+export interface DashboardBookingUpdateCapabilities {
+  attendees: boolean;
+  contact: boolean;
+  location: boolean;
+  opsMetadata: boolean;
+  payment: boolean;
+  products: boolean;
+  schedule: boolean;
 }
 
 export interface DashboardBookingProduct {
@@ -267,6 +279,7 @@ export interface DashboardBookingSyncInfo {
   latestEventAvailableAt: string | null;
   latestEventProcessedAt: string | null;
   latestEventAttemptCount: number;
+  lastProviderEditError: string | null;
   lastSyncError: string | null;
   isQueued: boolean;
   isStale: boolean;
@@ -367,8 +380,29 @@ export interface UpdateDashboardTaskInput {
 }
 
 export interface UpdateDashboardBookingInput {
+  attendees?: number;
+  bookingDate?: string;
+  bookingEndDate?: string;
+  contact?: {
+    email?: string | null;
+    firstName?: string;
+    lastName?: string;
+    phoneNumber?: string | null;
+  };
+  expectedLastUpdated?: string;
+  locationId?: string | null;
   opsStatus?: DashboardBookingOpsStatus;
   opsNotes?: string;
+  payment?: {
+    amountPaid?: number;
+    amountToPay?: number;
+    paymentMethod?: string | null;
+  };
+  products?: Array<{
+    productId: string;
+    quantity: number;
+    unitPrice?: number | null;
+  }>;
 }
 
 export interface ListDashboardTasksFilters {

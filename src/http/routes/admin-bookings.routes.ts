@@ -42,6 +42,53 @@ const updateBookingMetadataSchema = z
     message: 'At least one booking metadata field must be provided.'
   });
 
+const nullableTextSchema = z.string().nullable();
+
+const updateBookingSchema = z
+  .object({
+    attendees: z.coerce.number().int().positive().optional(),
+    bookingDate: z.string().optional(),
+    bookingEndDate: z.string().optional(),
+    contact: z
+      .object({
+        email: z.string().trim().email().nullable().optional(),
+        firstName: z.string().trim().min(1).optional(),
+        lastName: z.string().trim().min(1).optional(),
+        phoneNumber: nullableTextSchema.optional()
+      })
+      .optional(),
+    expectedLastUpdated: z.string().optional(),
+    locationId: z.string().uuid().nullable().optional(),
+    opsNotes: z.string().optional(),
+    opsStatus: bookingOpsStatusSchema.optional(),
+    payment: z
+      .object({
+        amountPaid: z.coerce.number().nonnegative().optional(),
+        amountToPay: z.coerce.number().nonnegative().optional(),
+        paymentMethod: nullableTextSchema.optional()
+      })
+      .optional(),
+    products: z
+      .array(
+        z.object({
+          productId: z.string().uuid(),
+          quantity: z.coerce.number().int().positive(),
+          unitPrice: z.coerce.number().nonnegative().nullable().optional()
+        })
+      )
+      .optional()
+  })
+  .refine((value) => Object.keys(value).some((key) => key !== 'expectedLastUpdated'), {
+    message: 'At least one booking field must be provided.'
+  });
+
+function buildBookingUpdateAuditDetails(input: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...input,
+    changedFields: Object.keys(input).filter((key) => key !== 'expectedLastUpdated')
+  };
+}
+
 function sendError(error: unknown): never {
   if (error instanceof DashboardNotFoundError) {
     throw new HttpError(404, error.message);
@@ -71,6 +118,32 @@ export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<
     return { ok: true, item: await getBooking(bookingId) };
   });
 
+  app.patch('/api/admin/bookings/:bookingId', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'update');
+    const parsed = updateBookingSchema.safeParse(request.body);
+    if (!parsed.success) {
+      throw new ValidationHttpError('Invalid booking update payload.');
+    }
+
+    const { bookingId } = request.params as { bookingId: string };
+
+    try {
+      const booking = await updateBooking(bookingId, parsed.data);
+      await recordAdminWriteAudit({
+        request,
+        auth,
+        action: 'admin.booking.updated',
+        entityType: 'booking',
+        entityId: booking.id,
+        details: buildBookingUpdateAuditDetails(parsed.data as Record<string, unknown>)
+      });
+
+      return { ok: true, item: booking };
+    } catch (error) {
+      sendError(error);
+    }
+  });
+
   app.patch('/api/admin/bookings/:bookingId/admin-metadata', async (request) => {
     const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'update');
     const parsed = updateBookingMetadataSchema.safeParse(request.body);
@@ -79,17 +152,21 @@ export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<
     }
 
     const { bookingId } = request.params as { bookingId: string };
-    const booking = await updateBooking(bookingId, parsed.data);
-    await recordAdminWriteAudit({
-      request,
-      auth,
-      action: 'admin.booking.metadata_updated',
-      entityType: 'booking',
-      entityId: booking.id,
-      details: parsed.data as Record<string, unknown>
-    });
+    try {
+      const booking = await updateBooking(bookingId, parsed.data);
+      await recordAdminWriteAudit({
+        request,
+        auth,
+        action: 'admin.booking.updated',
+        entityType: 'booking',
+        entityId: booking.id,
+        details: buildBookingUpdateAuditDetails(parsed.data as Record<string, unknown>)
+      });
 
-    return { ok: true, item: booking };
+      return { ok: true, item: booking };
+    } catch (error) {
+      sendError(error);
+    }
   });
 
   app.post('/api/admin/bookings/:bookingId/rebuild-consumptions', async (request) => {

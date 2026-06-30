@@ -19,6 +19,11 @@ const protectedReadPaths = [
 
 const protectedWritePaths = [
   {
+    method: 'PATCH',
+    path: '/api/admin/bookings/00000000-0000-0000-0000-000000000001',
+    body: { opsNotes: 'Follow up with provider.' }
+  },
+  {
     method: 'POST',
     path: '/api/admin/tasks/00000000-0000-0000-0000-000000000001/comments',
     body: { body: 'Looks good.' }

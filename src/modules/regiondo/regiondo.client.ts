@@ -84,6 +84,22 @@ export interface RegiondoPurchaseOrderInput {
   syncTicketsProcessing?: boolean;
 }
 
+export interface RegiondoUpdateBookingInput {
+  bookingKey: string;
+  orderNumber?: string | null;
+  contactData?: Partial<RegiondoCheckoutContactData>;
+  startsAt?: string;
+  endsAt?: string;
+  guestCount?: number;
+  locationId?: string | null;
+  items?: RegiondoCheckoutCartItem[];
+  payment?: {
+    amountPaid?: number;
+    amountToPay?: number;
+    paymentMethod?: string | null;
+  };
+}
+
 export interface RegiondoListSupplierBookingsInput {
   bookingKey?: string;
   dateRange?: string;
@@ -692,6 +708,37 @@ export class RegiondoClient {
     });
 
     return this.resolvePurchaseOrderSnapshot(purchaseDataRaw);
+  }
+
+  async updateBooking(input: RegiondoUpdateBookingInput): Promise<unknown> {
+    const body = {
+      booking_key: input.bookingKey,
+      ...(input.orderNumber ? { order_number: input.orderNumber } : {}),
+      ...(input.contactData ? { contact_data: input.contactData } : {}),
+      ...(input.startsAt ? { date_time: input.startsAt, dt_from: input.startsAt } : {}),
+      ...(input.endsAt ? { dt_to: input.endsAt } : {}),
+      ...(input.guestCount !== undefined ? { guest_count: input.guestCount } : {}),
+      ...(input.locationId ? { location_id: input.locationId } : {}),
+      ...(input.items ? { items: input.items } : {}),
+      ...(input.payment
+        ? {
+            payment: {
+              ...(input.payment.amountPaid !== undefined ? { amount_paid: input.payment.amountPaid } : {}),
+              ...(input.payment.amountToPay !== undefined ? { amount_to_pay: input.payment.amountToPay } : {}),
+              ...(input.payment.paymentMethod !== undefined ? { payment_method: input.payment.paymentMethod } : {})
+            }
+          }
+        : {})
+    };
+
+    return this.requestJson<unknown>(`/supplier/bookings/${encodeURIComponent(input.bookingKey)}`, {
+      body,
+      method: 'PUT',
+      params: {
+        ...(input.orderNumber ? { order_number: input.orderNumber } : {}),
+        store_locale: this.language
+      }
+    });
   }
 
   async cancelTickets(referenceIds: string[]): Promise<void> {

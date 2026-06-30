@@ -134,6 +134,97 @@ describe('RegiondoClient checkout actions', () => {
     expect(observedUrl?.searchParams.get('reference_ids')).toBe('ref-1,ref-2');
   });
 
+  it('puts Regiondo booking updates with signed query params and JSON body', async () => {
+    let observedMethod = '';
+    let observedUrl: URL | null = null;
+    let observedBody: Record<string, unknown> | null = null;
+
+    const client = new RegiondoClient({
+      baseUrl: 'https://example.com/v1',
+      currency: 'EUR',
+      fetchImplementation: async (input, init) => {
+        observedMethod = init?.method ?? '';
+        observedUrl = new URL(typeof input === 'string' ? input : input.toString());
+        observedBody = init?.body ? JSON.parse(String(init.body)) : null;
+
+        return new Response(JSON.stringify({ result: 'ok' }), {
+          headers: { 'content-type': 'application/json' },
+          status: 200
+        });
+      },
+      language: 'de-DE',
+      maxRetries: 0,
+      publicKey: 'public-key',
+      requestThrottleMs: 0,
+      requestTimeoutMs: 1_000,
+      retryBaseDelayMs: 1,
+      secretKey: 'secret-key',
+      sleep: async () => undefined,
+      supplierId: '15241'
+    });
+
+    await client.updateBooking({
+      bookingKey: 'booking-key-1',
+      contactData: {
+        email: 'booking@example.com',
+        firstname: 'Jamie',
+        lastname: 'Rivera',
+        telephone: '+491234567'
+      },
+      endsAt: '2026-05-10 20:00:00',
+      guestCount: 2,
+      items: [
+        {
+          date_time: '2026-05-10 18:00:00',
+          product_id: 297021,
+          qty: 2,
+          unit_price: 19.9
+        }
+      ],
+      locationId: 'regiondo-location-1',
+      orderNumber: 'R-10001',
+      payment: {
+        amountPaid: 20,
+        amountToPay: 39.8,
+        paymentMethod: 'card'
+      },
+      startsAt: '2026-05-10 18:00:00'
+    });
+
+    expect(observedMethod).toBe('PUT');
+    expect(observedUrl?.pathname).toBe('/v1/supplier/bookings/booking-key-1');
+    expect(observedUrl?.searchParams.get('order_number')).toBe('R-10001');
+    expect(observedUrl?.searchParams.get('store_locale')).toBe('de-DE');
+    expect(observedBody).toEqual({
+      booking_key: 'booking-key-1',
+      contact_data: {
+        email: 'booking@example.com',
+        firstname: 'Jamie',
+        lastname: 'Rivera',
+        telephone: '+491234567'
+      },
+      date_time: '2026-05-10 18:00:00',
+      dt_from: '2026-05-10 18:00:00',
+      dt_to: '2026-05-10 20:00:00',
+      guest_count: 2,
+      items: [
+        {
+          date_time: '2026-05-10 18:00:00',
+          product_id: 297021,
+          qty: 2,
+          unit_price: 19.9
+        }
+      ],
+      location_id: 'regiondo-location-1',
+      order_number: 'R-10001',
+      payment: {
+        amount_paid: 20,
+        amount_to_pay: 39.8,
+        payment_method: 'card'
+      }
+    });
+  });
+
   it('unwraps wrapped checkout purchase payloads before validating them', async () => {
     const client = new RegiondoClient({
       baseUrl: 'https://example.com/v1',

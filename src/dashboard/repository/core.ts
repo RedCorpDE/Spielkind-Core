@@ -77,6 +77,8 @@ export interface BookingRow {
   total_amount: string | number;
   paid_amount: string | number;
   dt_from: Date | string;
+  dt_to: Date | string;
+  source: string | null;
   updated_at: Date | string;
   booking_raw: unknown;
   first_name: string | null;
@@ -90,6 +92,7 @@ export interface BookingRow {
   location_id: string | null;
   location_title: string | null;
   location_regiondo_location_id: string | null;
+  last_provider_edit_error: string | null;
   ops_status: string | null;
   ops_notes: string | null;
 }
@@ -558,6 +561,7 @@ export function mapBookingRow(row: BookingRow): DashboardBooking {
     customerDataStatus,
     experience: row.product_title ?? extractBookingProductTitle(row.booking_raw) ?? 'Booking',
     bookingDate: requireIsoString(row.dt_from, 'bookings.dt_from'),
+    bookingEndDate: requireIsoString(row.dt_to, 'bookings.dt_to'),
     status,
     externalStatus,
     opsStatus,
@@ -572,7 +576,16 @@ export function mapBookingRow(row: BookingRow): DashboardBooking {
     locationDataStatus,
     regiondoBookingId: row.regiondo_booking_id,
     regiondoOrderNumber: row.regiondo_order_number,
-    lastUpdated: requireIsoString(row.updated_at, 'bookings.updated_at')
+    lastUpdated: requireIsoString(row.updated_at, 'bookings.updated_at'),
+    updateCapabilities: {
+      attendees: true,
+      contact: true,
+      location: true,
+      opsMetadata: true,
+      payment: true,
+      products: true,
+      schedule: true
+    }
   };
 }
 
