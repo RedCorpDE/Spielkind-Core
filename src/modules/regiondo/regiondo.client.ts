@@ -32,6 +32,21 @@ type RegiondoObjectResponse<T> = {
   result?: T;
 };
 
+const REGIONDO_OBJECT_ENVELOPE_KEYS = [
+  'data',
+  'item',
+  'result',
+  'product',
+  'full_purchase_data',
+  'fullPurchaseData',
+  'purchase_data',
+  'purchaseData',
+  'purchase',
+  'order',
+  'booking',
+  'payload'
+];
+
 interface RegiondoRequestOptions {
   method?: 'DELETE' | 'GET' | 'POST' | 'PUT';
   params?: Record<string, string>;
@@ -161,6 +176,56 @@ function parseRegiondoPayload<T>(schema: ZodType<T, any, any>, payload: unknown,
   );
 }
 
+function collectRegiondoObjectPayloadCandidates(
+  value: unknown,
+  depth = 0,
+  visited: WeakSet<object> = new WeakSet()
+): unknown[] {
+  const candidates = [value];
+
+  if (depth >= 5 || value === null || typeof value !== 'object') {
+    return candidates;
+  }
+
+  if (visited.has(value)) {
+    return candidates;
+  }
+  visited.add(value);
+
+  const record = value as Record<string, unknown>;
+  for (const key of REGIONDO_OBJECT_ENVELOPE_KEYS) {
+    if (!(key in record) || record[key] === undefined) {
+      continue;
+    }
+
+    for (const candidate of collectRegiondoObjectPayloadCandidates(record[key], depth + 1, visited)) {
+      if (!candidates.includes(candidate)) {
+        candidates.push(candidate);
+      }
+    }
+  }
+
+  return candidates;
+}
+
+function parseRegiondoPurchasePayload(payload: unknown): RegiondoPurchaseData {
+  let parsedPurchaseError: ZodError | null = null;
+
+  for (const candidate of collectRegiondoObjectPayloadCandidates(payload)) {
+    const parsedPurchase = regiondoPurchaseDataSchema.safeParse(candidate);
+    if (parsedPurchase.success) {
+      return parsedPurchase.data;
+    }
+
+    parsedPurchaseError = parsedPurchase.error;
+  }
+
+  throw new RegiondoPayloadError(
+    'Regiondo purchase response payload did not match the expected shape.',
+    formatZodErrorDetails(parsedPurchaseError ?? new ZodError([]))
+  );
+}
+
 function mapHttpError(status: number, responseBody: string): RegiondoApiError {
   if (status === 429) {
     return new RegiondoRateLimitError(status, responseBody);
@@ -232,12 +297,23 @@ function extractNestedRegiondoIdentifier(
     }
   }
 
-  for (const fallbackKey of ['id', 'value', 'number']) {
+  for (const fallbackKey of ['number', 'value', 'id']) {
     if (!(fallbackKey in record)) {
       continue;
     }
 
     const identifier = extractNestedRegiondoIdentifier(record[fallbackKey], preferredKeys, depth + 1);
+    if (identifier) {
+      return identifier;
+    }
+  }
+
+  return null;
+}
+
+function extractFirstNestedRegiondoIdentifier(value: unknown, preferredKeys: string[]): string | null {
+  for (const candidate of collectRegiondoObjectPayloadCandidates(value)) {
+    const identifier = extractNestedRegiondoIdentifier(candidate, preferredKeys);
     if (identifier) {
       return identifier;
     }
@@ -415,33 +491,26 @@ export class RegiondoClient {
   }
 
   private async resolvePurchaseOrderSnapshot(body: unknown): Promise<RegiondoPurchaseData> {
-    const payloadCandidates = [body];
-    const unwrappedBody = this.unwrapObjectResponse(body as RegiondoObjectResponse<unknown> | unknown);
-    if (unwrappedBody !== body) {
-      payloadCandidates.unshift(unwrappedBody);
-    }
-
-    let parsedPurchaseError: ZodError | null = null;
-
-    for (const candidate of payloadCandidates) {
-      const parsedPurchase = regiondoPurchaseDataSchema.safeParse(candidate);
-      if (parsedPurchase.success) {
-        return parsedPurchase.data;
+    try {
+      return parseRegiondoPurchasePayload(body);
+    } catch (error) {
+      if (!(error instanceof RegiondoPayloadError)) {
+        throw error;
       }
-
-      parsedPurchaseError = parsedPurchase.error;
     }
 
-    const orderNumber = extractNestedRegiondoIdentifier(body, ['order_number', 'orderNumber']);
+    const orderNumber = extractFirstNestedRegiondoIdentifier(body, ['order_number', 'orderNumber', 'order_no', 'orderNo']);
     if (orderNumber) {
-      const purchaseDataRaw = await this.getObject<RegiondoPurchaseData>('/checkout/purchase', {
-        order_number: orderNumber
+      const purchaseDataRaw = await this.requestJson<RegiondoObjectResponse<unknown> | unknown>('/checkout/purchase', {
+        params: {
+          order_number: orderNumber
+        }
       });
 
-      return parseRegiondoPayload(regiondoPurchaseDataSchema, purchaseDataRaw, 'purchase response');
+      return parseRegiondoPurchasePayload(purchaseDataRaw);
     }
 
-    const orderId = extractNestedRegiondoIdentifier(body, ['order_id', 'orderId']);
+    const orderId = extractFirstNestedRegiondoIdentifier(body, ['order_id', 'orderId']);
     if (orderId) {
       const supplierBookings = await this.listSupplierBookings({
         limit: 250,
@@ -452,18 +521,17 @@ export class RegiondoClient {
         .find((value): value is string => Boolean(value));
 
       if (supplierOrderNumber) {
-        const purchaseDataRaw = await this.getObject<RegiondoPurchaseData>('/checkout/purchase', {
-          order_number: supplierOrderNumber
+        const purchaseDataRaw = await this.requestJson<RegiondoObjectResponse<unknown> | unknown>('/checkout/purchase', {
+          params: {
+            order_number: supplierOrderNumber
+          }
         });
 
-        return parseRegiondoPayload(regiondoPurchaseDataSchema, purchaseDataRaw, 'purchase response');
+        return parseRegiondoPurchasePayload(purchaseDataRaw);
       }
     }
 
-    throw new RegiondoPayloadError(
-      'Regiondo purchase response payload did not match the expected shape.',
-      formatZodErrorDetails(parsedPurchaseError ?? new ZodError([]))
-    );
+    return parseRegiondoPurchasePayload(body);
   }
 
   async getObject<T>(pathname: string, params: Record<string, string> = {}): Promise<T> {
@@ -588,13 +656,15 @@ export class RegiondoClient {
     }
 
     const orderNumber = input.orderNumber ?? String(supplierBookings[0].order_number);
-    const purchaseDataRaw = await this.getObject<RegiondoPurchaseData>('/checkout/purchase', {
-      order_number: orderNumber
+    const purchaseDataRaw = await this.requestJson<RegiondoObjectResponse<unknown> | unknown>('/checkout/purchase', {
+      params: {
+        order_number: orderNumber
+      }
     });
 
     return {
       supplierBookings,
-      purchaseData: parseRegiondoPayload(regiondoPurchaseDataSchema, purchaseDataRaw, 'purchase response')
+      purchaseData: parseRegiondoPurchasePayload(purchaseDataRaw)
     };
   }
 

@@ -220,7 +220,8 @@ describe('task booking links', () => {
                       variation_id: 'var-2'
                     }
                   ],
-                  qty: 1
+                  qty: 1,
+                  secondary_event_time: '12:30'
                 }
               },
               event_date_time: '2026-05-13T07:00:00.000Z',
@@ -337,7 +338,7 @@ describe('task booking links', () => {
       expect.objectContaining({
         items: [
           expect.objectContaining({ date_time: '2026-05-13 09:00:00' }),
-          expect.objectContaining({ date_time: '2026-05-13 09:00:00' })
+          expect.objectContaining({ date_time: '2026-05-13 12:30:00' })
         ]
       })
     );
@@ -358,6 +359,130 @@ describe('task booking links', () => {
       ['aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'],
       'Two-product order'
     ]);
+  });
+
+  it('falls back to the primary event date/time when the secondary event time is blank', async () => {
+    mockTaskForBookingCreation(
+      createTaskBookingData({
+        options: [
+          {
+            option_id: 'opt-1',
+            product_id: 'prod-1',
+            variation_id: 'var-1'
+          },
+          {
+            option_id: 'opt-2',
+            product_id: 'prod-2',
+            variation_id: 'var-2'
+          }
+        ],
+        secondary_event_time: ''
+      }),
+      'Two-product order'
+    );
+    mockSingleRegiondoBookingSuccess();
+
+    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toEqual({
+      bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+    });
+
+    expect(purchaseOrderMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        items: [
+          expect.objectContaining({ date_time: '2026-05-13 09:00:00' }),
+          expect.objectContaining({ date_time: '2026-05-13 09:00:00' })
+        ]
+      })
+    );
+  });
+
+  it('keeps explicit item-level date/time values instead of applying task defaults', async () => {
+    mockTaskForBookingCreation(
+      createTaskBookingData({
+        options: [
+          {
+            dateTime: '2026-05-14T08:00:00.000Z',
+            option_id: 'opt-1',
+            product_id: 'prod-1',
+            variation_id: 'var-1'
+          }
+        ],
+        secondary_event_time: '12:30'
+      })
+    );
+    mockSingleRegiondoBookingSuccess();
+
+    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toEqual({
+      bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+    });
+
+    expect(purchaseOrderMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        items: [expect.objectContaining({ date_time: '2026-05-14 10:00:00' })]
+      })
+    );
+  });
+
+  it('schedules the secondary event time on the next day when it is not after the primary time', async () => {
+    mockTaskForBookingCreation(
+      createTaskBookingData({
+        options: [
+          {
+            option_id: 'opt-1',
+            product_id: 'prod-1',
+            variation_id: 'var-1'
+          },
+          {
+            option_id: 'opt-2',
+            product_id: 'prod-2',
+            variation_id: 'var-2'
+          }
+        ],
+        secondary_event_time: '08:30'
+      }),
+      'Two-product order'
+    );
+    mockSingleRegiondoBookingSuccess();
+
+    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toEqual({
+      bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+    });
+
+    expect(purchaseOrderMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        items: [
+          expect.objectContaining({ date_time: '2026-05-13 09:00:00' }),
+          expect.objectContaining({ date_time: '2026-05-14 08:30:00' })
+        ]
+      })
+    );
+  });
+
+  it('rejects malformed secondary event times before creating a Regiondo purchase', async () => {
+    mockTaskForBookingCreation(
+      createTaskBookingData({
+        options: [
+          {
+            option_id: 'opt-1',
+            product_id: 'prod-1',
+            variation_id: 'var-1'
+          },
+          {
+            option_id: 'opt-2',
+            product_id: 'prod-2',
+            variation_id: 'var-2'
+          }
+        ],
+        secondary_event_time: '25:99'
+      }),
+      'Two-product order'
+    );
+
+    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).rejects.toThrow(
+      'Task booking_data.secondary_event_time must use HH:mm format.'
+    );
+
+    expect(purchaseOrderMock).not.toHaveBeenCalled();
   });
 
   it('uses the alternate Regiondo booking email when the task flag is enabled', async () => {

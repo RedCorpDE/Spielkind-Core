@@ -385,6 +385,65 @@ function toRegiondoRequestIdentifier(value: string): number | string {
   return /^\d+$/.test(value) ? Number(value) : value;
 }
 
+const TASK_SECONDARY_EVENT_TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
+const REGIONDO_FORMATTED_DATE_TIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/;
+const TASK_REGIONDO_ITEM_DATE_TIME_KEYS = ['date_time', 'dateTime', 'event_date_time', 'eventDateTime'] as const;
+
+function addOneUtcCalendarDay(dateParts: { year: number; month: number; day: number }): string {
+  const nextDate = new Date(Date.UTC(dateParts.year, dateParts.month - 1, dateParts.day + 1));
+  return `${nextDate.getUTCFullYear()}-${String(nextDate.getUTCMonth() + 1).padStart(2, '0')}-${String(
+    nextDate.getUTCDate()
+  ).padStart(2, '0')}`;
+}
+
+function buildTaskSecondaryRegiondoDateTime(task: DashboardTask, bookingData: Record<string, unknown>): string | null {
+  const secondaryEventTime = readRecordText(bookingData, 'secondary_event_time', 'secondaryEventTime');
+  if (!secondaryEventTime) {
+    return null;
+  }
+
+  const secondaryMatch = TASK_SECONDARY_EVENT_TIME_PATTERN.exec(secondaryEventTime);
+  if (!secondaryMatch) {
+    throw new DashboardValidationError('Task booking_data.secondary_event_time must use HH:mm format.');
+  }
+
+  if (!task.eventDateTime) {
+    throw new DashboardValidationError('Task event date/time is required before using secondary event time.');
+  }
+
+  const primaryRegiondoDateTime = formatRegiondoDateTime(task.eventDateTime);
+  const primaryMatch = primaryRegiondoDateTime
+    ? REGIONDO_FORMATTED_DATE_TIME_PATTERN.exec(primaryRegiondoDateTime)
+    : null;
+
+  if (!primaryMatch) {
+    throw new DashboardValidationError('Task event date/time is invalid.');
+  }
+
+  const secondaryHours = Number(secondaryMatch[1]);
+  const secondaryMinutes = Number(secondaryMatch[2]);
+  const primaryHours = Number(primaryMatch[4]);
+  const primaryMinutes = Number(primaryMatch[5]);
+  const primarySeconds = Number(primaryMatch[6]);
+  const secondaryTotalSeconds = secondaryHours * 60 * 60 + secondaryMinutes * 60;
+  const primaryTotalSeconds = primaryHours * 60 * 60 + primaryMinutes * 60 + primarySeconds;
+  const primaryDate = {
+    year: Number(primaryMatch[1]),
+    month: Number(primaryMatch[2]),
+    day: Number(primaryMatch[3])
+  };
+  const regiondoDate =
+    secondaryTotalSeconds <= primaryTotalSeconds
+      ? addOneUtcCalendarDay(primaryDate)
+      : `${primaryMatch[1]}-${primaryMatch[2]}-${primaryMatch[3]}`;
+
+  return `${regiondoDate} ${secondaryMatch[1]}:${secondaryMatch[2]}:00`;
+}
+
+function hasExplicitTaskRegiondoCartItemDateTime(item: Record<string, unknown>): boolean {
+  return readRecordText(item, ...TASK_REGIONDO_ITEM_DATE_TIME_KEYS) !== null;
+}
+
 function buildTaskRegiondoCartItem(
   item: Record<string, unknown>,
   index: number,
@@ -504,18 +563,22 @@ function buildTaskRegiondoBookingPayload(task: DashboardTask): TaskRegiondoBooki
         : [];
   const defaultQuantity = readRecordPositiveInteger(bookingData, 'qty', 'quantity') ?? 1;
   const defaultExternalItemId = readRecordText(bookingData, 'external_item_id', 'externalItemId');
+  const secondaryDateTime = buildTaskSecondaryRegiondoDateTime(task, bookingData);
 
   const items = cartItemsSource.flatMap((entry, index) => {
     if (!isRecord(entry)) {
       return [];
     }
 
+    const defaultDateTime = index === 1 && secondaryDateTime ? secondaryDateTime : task.eventDateTime;
+    const hasExplicitDateTime = hasExplicitTaskRegiondoCartItemDateTime(entry);
+
     return [
       buildTaskRegiondoCartItem(
         {
           ...entry,
           ...(defaultExternalItemId ? { external_item_id: defaultExternalItemId } : {}),
-          ...(task.eventDateTime ? { date_time: task.eventDateTime } : {})
+          ...(defaultDateTime && !hasExplicitDateTime ? { date_time: defaultDateTime } : {})
         },
         index,
         defaultQuantity
