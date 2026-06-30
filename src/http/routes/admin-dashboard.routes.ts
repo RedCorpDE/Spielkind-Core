@@ -39,6 +39,7 @@ import {
 import { getDashboardSummary } from '../../dashboard/repository/summary.js';
 import { listUsers, updateUserRole } from '../../dashboard/repository/users.js';
 import { createRole, deleteRole, listRoles, updateRole } from '../../dashboard/repository/roles.js';
+import { listTaskBookingOptions } from '../../dashboard/repository/task-booking-options.js';
 import {
   DashboardNotFoundError,
   DashboardValidationError
@@ -218,9 +219,14 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
     const canViewTaskColumns =
       hasRoutePermission(accessContext.permissions, 'task_columns', 'view') ||
       hasRoutePermission(accessContext.permissions, 'tasks', 'view');
+    const canViewTaskBookingOptions =
+      hasRoutePermission(accessContext.permissions, 'task_booking_options', 'view') ||
+      hasRoutePermission(accessContext.permissions, 'tasks', 'view') ||
+      hasRoutePermission(accessContext.permissions, 'tasks', 'create') ||
+      hasRoutePermission(accessContext.permissions, 'tasks', 'update');
     const canViewDashboard = hasRoutePermission(accessContext.permissions, 'dashboard', 'view');
 
-    const [users, roles, locations, taskColumns, summary] = await Promise.all([
+    const [users, roles, locations, taskColumns, taskBookingOptions, summary] = await Promise.all([
       loadBootstrapSection({
         enabled: canViewUsers,
         fallback: [],
@@ -254,6 +260,14 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
         section: 'taskColumns'
       }),
       loadBootstrapSection({
+        enabled: canViewTaskBookingOptions,
+        fallback: [],
+        loader: () => listTaskBookingOptions(),
+        requestId: request.id,
+        requestLog: request.log,
+        section: 'taskBookingOptions'
+      }),
+      loadBootstrapSection({
         enabled: canViewDashboard,
         fallback: EMPTY_SUMMARY,
         loader: () => getDashboardSummary(),
@@ -269,6 +283,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
       roles,
       users,
       locations,
+      taskBookingOptions,
       taskColumns,
       summary
     };

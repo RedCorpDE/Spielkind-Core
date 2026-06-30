@@ -11,7 +11,10 @@ import {
 } from '../../modules/regiondo/regiondo.client.js';
 import { formatRegiondoDateTime } from '../../modules/regiondo/regiondo-datetime.js';
 import { rebuildConsumptionsForBooking } from '../../modules/resources/consumption.service.js';
-import { SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID } from '../../sync/mappers.js';
+import {
+  SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID,
+  SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID
+} from '../../sync/mappers.js';
 import type {
   DashboardBooking,
   DashboardBookingActivityEntry,
@@ -46,6 +49,10 @@ import {
 import { appendTaskBookingLinks } from './tasks.js';
 
 const DEFAULT_BOOKINGS_PAGE_SIZE = 50;
+const SYSTEM_LOCATION_PROVIDER_IDS = new Set([
+  SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID,
+  SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID
+]);
 
 interface BookingProductRow {
   product_id: string;
@@ -77,6 +84,7 @@ interface BookingForUpdateRow {
   ops_status: string | null;
   ops_notes: string | null;
   last_provider_edit_error: string | null;
+  location_override: string | null;
 }
 
 interface BookingLocationUpdateRow {
@@ -84,6 +92,8 @@ interface BookingLocationUpdateRow {
   title: string;
   regiondo_location_id: string | null;
 }
+
+type BookingLocationOverride = 'none' | null;
 
 interface BookingProductUpdateRow {
   product_id: string;
@@ -113,6 +123,7 @@ interface ResolvedBookingUpdate {
   dtTo: string;
   guestCount: number;
   locationId: string;
+  locationOverride: BookingLocationOverride;
   opsNotes: string;
   opsStatus: 'normal' | 'escalated';
   payment: {
@@ -1273,6 +1284,7 @@ function buildBookingBaseQuery() {
        location.location_id,
        location.title AS location_title,
        location.regiondo_location_id AS location_regiondo_location_id,
+       admin.location_override,
        admin.last_provider_edit_error,
        admin.ops_status,
        admin.ops_notes
@@ -1956,11 +1968,36 @@ function resolveBookingPayment(current: BookingForUpdateRow, input: UpdateDashbo
   };
 }
 
+async function ensureNoLocationPlaceholder(executor: Queryable): Promise<BookingLocationUpdateRow> {
+  const result = await executor.query<BookingLocationUpdateRow>(
+    `INSERT INTO locations (title, description, regiondo_location_id, regiondo_raw)
+     VALUES ('No location', NULL, $1, $2::jsonb)
+     ON CONFLICT (regiondo_location_id)
+     DO UPDATE SET title = EXCLUDED.title,
+                   description = EXCLUDED.description,
+                   regiondo_raw = EXCLUDED.regiondo_raw,
+                   updated_at = now()
+     RETURNING location_id, title, regiondo_location_id`,
+    [SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID, JSON.stringify({ source: 'system', kind: 'no_location' })]
+  );
+
+  return result.rows[0];
+}
+
 async function resolveBookingLocationUpdate(
   executor: Queryable,
   current: BookingForUpdateRow,
   input: UpdateDashboardBookingInput
-): Promise<{ changed: boolean; location: BookingLocationUpdateRow }> {
+): Promise<{ changed: boolean; location: BookingLocationUpdateRow; locationOverride: BookingLocationOverride }> {
+  if (input.locationId === null) {
+    const location = await ensureNoLocationPlaceholder(executor);
+    return {
+      changed: location.location_id !== current.location_id || current.location_override !== 'none',
+      location,
+      locationOverride: 'none'
+    };
+  }
+
   const locationId = input.locationId === undefined ? current.location_id : input.locationId;
   if (!locationId) {
     throw new DashboardValidationError('locationId is required.');
@@ -1979,13 +2016,14 @@ async function resolveBookingLocationUpdate(
   }
 
   const location = result.rows[0];
-  if (input.locationId !== undefined && location.regiondo_location_id === SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID) {
-    throw new DashboardValidationError('Selected location must use an internal location.');
+  if (input.locationId !== undefined && location.regiondo_location_id && SYSTEM_LOCATION_PROVIDER_IDS.has(location.regiondo_location_id)) {
+    throw new DashboardValidationError('System location placeholders must be selected through the No location option.');
   }
 
   return {
-    changed: location.location_id !== current.location_id,
-    location
+    changed: location.location_id !== current.location_id || (input.locationId !== undefined && current.location_override === 'none'),
+    location,
+    locationOverride: input.locationId === undefined && current.location_override === 'none' ? 'none' : null
   };
 }
 
@@ -2248,7 +2286,8 @@ async function queryBookingForUpdate(executor: Queryable, bookingId: string): Pr
        c.phone_number,
        admin.ops_status,
        admin.ops_notes,
-       admin.last_provider_edit_error
+       admin.last_provider_edit_error,
+       admin.location_override
      FROM bookings b
      INNER JOIN clients c ON c.client_id = b.client_id
      LEFT JOIN booking_admin_metadata admin ON admin.booking_id = b.booking_id
@@ -2326,6 +2365,7 @@ async function buildResolvedBookingUpdate(
     dtTo: dateRange.nextEnd,
     guestCount,
     locationId: location.location.location_id,
+    locationOverride: location.locationOverride,
     opsNotes: ops.nextOpsNotes,
     opsStatus: ops.nextOpsStatus,
     payment: payment.next,
@@ -2339,7 +2379,7 @@ async function buildResolvedBookingUpdate(
   resolved.providerInput = buildRegiondoUpdateInput(current, resolved, {
     attendees: attendeeChanged,
     contact: contact.changed,
-    location: location.changed,
+    location: location.changed && location.locationOverride !== 'none',
     payment: payment.changed,
     products: products.changed,
     schedule: dateRange.changed
@@ -2354,19 +2394,21 @@ async function upsertBookingAdminMetadata(
   bookingId: string,
   input: {
     lastProviderEditError: string | null;
+    locationOverride: BookingLocationOverride;
     opsNotes: string;
     opsStatus: 'normal' | 'escalated';
   }
 ): Promise<void> {
   await executor.query(
-    `INSERT INTO booking_admin_metadata (booking_id, ops_status, ops_notes, last_provider_edit_error)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO booking_admin_metadata (booking_id, ops_status, ops_notes, last_provider_edit_error, location_override)
+     VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (booking_id)
      DO UPDATE SET ops_status = EXCLUDED.ops_status,
                    ops_notes = EXCLUDED.ops_notes,
                    last_provider_edit_error = EXCLUDED.last_provider_edit_error,
+                   location_override = EXCLUDED.location_override,
                    updated_at = now()`,
-    [bookingId, input.opsStatus, input.opsNotes, input.lastProviderEditError]
+    [bookingId, input.opsStatus, input.opsNotes, input.lastProviderEditError, input.locationOverride]
   );
 }
 
@@ -2450,6 +2492,24 @@ async function updateManualBooking(
   }
 }
 
+async function applyBookingLocationOverride(
+  executor: Queryable,
+  bookingId: string,
+  update: ResolvedBookingUpdate
+): Promise<void> {
+  if (update.locationOverride !== 'none') {
+    return;
+  }
+
+  await executor.query(
+    `UPDATE bookings
+     SET location_id = $2,
+         updated_at = now()
+     WHERE booking_id = $1`,
+    [bookingId, update.locationId]
+  );
+}
+
 export async function updateBooking(bookingId: string, input: UpdateDashboardBookingInput): Promise<DashboardBookingDetail> {
   const client = await pool.connect();
   let providerEditError: string | null = null;
@@ -2466,28 +2526,39 @@ export async function updateBooking(bookingId: string, input: UpdateDashboardBoo
     const update = await buildResolvedBookingUpdate(client, current, currentProducts, input);
     const isRegiondoBooking = current.source === 'regiondo' || Boolean(current.regiondo_booking_id);
     const hasBookingMutation = update.changedFields.some((field) => !['opsNotes', 'opsStatus'].includes(field));
+    const hasLocalNoLocationOverride = update.locationOverride === 'none' && update.changedFields.includes('location');
 
     if (isRegiondoBooking && hasBookingMutation) {
-      if (!update.providerInput || !current.regiondo_booking_id) {
+      if (!update.providerInput && !hasLocalNoLocationOverride) {
         throw new DashboardValidationError('This Regiondo booking does not support the requested update.');
       }
 
-      try {
-        await regiondoClient.updateBooking(update.providerInput);
-        const snapshot = await regiondoClient.hydrateBookingOrder({
-          bookingKey: current.regiondo_booking_id,
-          orderNumber: current.regiondo_order_number
-        });
-        const normalizedBooking = normalizeRegiondoBookingImport({
-          bookingKey: current.regiondo_booking_id,
-          purchaseData: snapshot.purchaseData,
-          supplierBookings: snapshot.supplierBookings,
-          webhookPayload: null
-        });
-        await upsertNormalizedRegiondoBooking(client, normalizedBooking);
-      } catch (error) {
-        providerEditError = getProviderEditErrorMessage(error);
-        throw error;
+      if (update.providerInput) {
+        if (!current.regiondo_booking_id) {
+          throw new DashboardValidationError('This Regiondo booking does not support the requested update.');
+        }
+
+        try {
+          await regiondoClient.updateBooking(update.providerInput);
+          const snapshot = await regiondoClient.hydrateBookingOrder({
+            bookingKey: current.regiondo_booking_id,
+            orderNumber: current.regiondo_order_number
+          });
+          const normalizedBooking = normalizeRegiondoBookingImport({
+            bookingKey: current.regiondo_booking_id,
+            purchaseData: snapshot.purchaseData,
+            supplierBookings: snapshot.supplierBookings,
+            webhookPayload: null
+          });
+          await upsertNormalizedRegiondoBooking(client, normalizedBooking);
+        } catch (error) {
+          providerEditError = getProviderEditErrorMessage(error);
+          throw error;
+        }
+      }
+
+      if (hasLocalNoLocationOverride) {
+        await applyBookingLocationOverride(client, bookingId, update);
       }
     } else if (!isRegiondoBooking && hasBookingMutation) {
       await updateManualBooking(
@@ -2502,6 +2573,7 @@ export async function updateBooking(bookingId: string, input: UpdateDashboardBoo
 
     await upsertBookingAdminMetadata(client, bookingId, {
       lastProviderEditError: update.clearProviderEditError ? null : current.last_provider_edit_error,
+      locationOverride: update.locationOverride,
       opsNotes: update.opsNotes,
       opsStatus: update.opsStatus
     });

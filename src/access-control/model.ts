@@ -7,6 +7,7 @@ export type PermissionResource =
   | 'dashboard'
   | 'settings'
   | 'tasks'
+  | 'task_booking_options'
   | 'task_columns'
   | 'locations'
   | 'bookings'
@@ -85,6 +86,12 @@ export const permissionDefinitions: PermissionDefinition[] = [
     label: 'Tasks',
     description: 'View and manage internal task boards and task records.',
     actions: ['view', 'create', 'update', 'delete']
+  },
+  {
+    resource: 'task_booking_options',
+    label: 'Task Booking Options',
+    description: 'Manage selectable task booking form options for catering and choice blocks.',
+    actions: ['view', 'create', 'update', 'delete', 'manage']
   },
   {
     resource: 'task_columns',
@@ -199,6 +206,7 @@ const defaultRoleGrants: Record<string, PermissionGrant[]> = {
     ...grant('dashboard', { view: 'all' }),
     ...grant('settings', { view: 'all', manage: 'all' }),
     ...grant('tasks', { view: 'all', create: 'all', update: 'all', delete: 'all' }),
+    ...grant('task_booking_options', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all' }),
     ...grant('task_columns', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all' }),
     ...grant('locations', { view: 'all', create: 'all', update: 'all', delete: 'all' }),
     ...grant('bookings', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all', export: 'all' }),

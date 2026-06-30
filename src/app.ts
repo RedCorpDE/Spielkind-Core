@@ -10,6 +10,7 @@ import { registerAdminProductRoutes } from './http/routes/admin-products.routes.
 import { registerAdminRegiondoRoutes } from './http/routes/admin-regiondo.routes.js';
 import { registerAdminReminderRoutes } from './http/routes/admin-reminders.routes.js';
 import { registerAdminResourceRoutes } from './http/routes/admin-resources.routes.js';
+import { registerAdminTaskBookingOptionRoutes } from './http/routes/admin-task-booking-options.routes.js';
 import { registerAdminDashboardRoutes } from './http/routes/admin-dashboard.routes.js';
 import { registerExternalTaskIntakeRoutes } from './http/routes/external-task-intake.routes.js';
 import { registerHealthRoutes } from './http/routes/health.routes.js';
@@ -70,6 +71,7 @@ export function createApp() {
   void registerAdminReminderRoutes(app);
   void registerAdminRegiondoRoutes(app);
   void registerAdminResourceRoutes(app);
+  void registerAdminTaskBookingOptionRoutes(app);
   void registerAdminDashboardRoutes(app);
 
   return app;

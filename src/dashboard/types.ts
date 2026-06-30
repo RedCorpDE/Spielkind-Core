@@ -47,7 +47,7 @@ export interface DashboardLocation {
   imageUrl: string | null;
   regiondoLocationId: string | null;
   isSystemPlaceholder: boolean;
-  providerDataStatus: 'known' | 'unknown';
+  providerDataStatus: 'known' | 'unknown' | 'none';
   createdAt: string;
   updatedAt: string;
 }
@@ -71,6 +71,38 @@ export interface DashboardTaskColumn {
   title: string;
   bookingRelated: boolean;
   position: number;
+}
+
+export type DashboardTaskBookingOptionGroup = 'catering_size' | 'beverage_package' | 'choice_block';
+
+export interface DashboardTaskBookingOption {
+  id: string;
+  groupKey: DashboardTaskBookingOptionGroup;
+  value: string;
+  labelEn: string;
+  labelDe: string;
+  position: number;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateDashboardTaskBookingOptionInput {
+  groupKey: DashboardTaskBookingOptionGroup;
+  labelEn: string;
+  labelDe: string;
+  isActive?: boolean;
+}
+
+export interface UpdateDashboardTaskBookingOptionInput {
+  labelEn?: string;
+  labelDe?: string;
+  isActive?: boolean;
+}
+
+export interface ReorderDashboardTaskBookingOptionsInput {
+  groupKey: DashboardTaskBookingOptionGroup;
+  orderedOptionIds: string[];
 }
 
 export interface CreateDashboardTaskColumnInput {
@@ -213,7 +245,7 @@ export interface DashboardBooking {
   opsNotes: string;
   locationId: string | null;
   locationTitle: string;
-  locationDataStatus: 'known' | 'unknown';
+  locationDataStatus: 'known' | 'unknown' | 'none';
   regiondoBookingId: string | null;
   regiondoOrderNumber: string | null;
   lastUpdated: string;
@@ -449,6 +481,7 @@ export interface DashboardBootstrapResponse {
   roles: DashboardRole[];
   users: DashboardUser[];
   locations: DashboardLocation[];
+  taskBookingOptions: DashboardTaskBookingOption[];
   taskColumns: DashboardTaskColumn[];
   summary: DashboardSummary;
 }

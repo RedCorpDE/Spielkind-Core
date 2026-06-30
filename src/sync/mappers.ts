@@ -8,6 +8,7 @@ import { parseRegiondoDateTime } from '../modules/regiondo/regiondo-datetime.js'
 
 export const SHARED_REGIONDO_PLACEHOLDER_CUSTOMER_ID = '__unknown_regiondo_customer__';
 export const SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID = '__unknown_regiondo_location__';
+export const SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID = '__no_location__';
 
 const durationUnitToMs: Record<string, number> = {
   minute: 60 * 1000,

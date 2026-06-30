@@ -2,6 +2,7 @@ import type { PoolClient } from 'pg';
 import { createHash } from 'node:crypto';
 import { pool } from '../db/client.js';
 import {
+  SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID,
   SHARED_REGIONDO_PLACEHOLDER_CUSTOMER_ID,
   SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID,
   aggregateBookingStatus,
@@ -89,6 +90,7 @@ interface ExistingBookingSnapshotRow {
   booking_id: string;
   dt_from: Date | string;
   dt_to: Date | string;
+  location_override: string | null;
   regiondo_snapshot_generated_at: Date | string | null;
 }
 
@@ -353,6 +355,22 @@ async function findOrCreateLocation(
      DO UPDATE SET regiondo_raw = EXCLUDED.regiondo_raw, updated_at = now()
      RETURNING location_id`,
     [SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID, JSON.stringify(input.raw)]
+  );
+
+  return result.rows[0].location_id;
+}
+
+async function findOrCreateNoLocationPlaceholder(client: PoolClient): Promise<string> {
+  const result = await client.query<{ location_id: string }>(
+    `INSERT INTO locations (title, description, regiondo_location_id, regiondo_raw)
+     VALUES ('No location', NULL, $1, $2::jsonb)
+     ON CONFLICT (regiondo_location_id)
+     DO UPDATE SET title = EXCLUDED.title,
+                   description = EXCLUDED.description,
+                   regiondo_raw = EXCLUDED.regiondo_raw,
+                   updated_at = now()
+     RETURNING location_id`,
+    [SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID, JSON.stringify({ source: 'system', kind: 'no_location' })]
   );
 
   return result.rows[0].location_id;
@@ -740,11 +758,17 @@ export async function importCanonicalRegiondoBooking(input: {
     await client.query('BEGIN');
 
     const existing = await client.query<ExistingBookingSnapshotRow>(
-      `SELECT booking_id, dt_from, dt_to, regiondo_snapshot_generated_at
-       FROM bookings
-       WHERE regiondo_booking_id = $1
+      `SELECT
+         b.booking_id,
+         b.dt_from,
+         b.dt_to,
+         admin.location_override,
+         b.regiondo_snapshot_generated_at
+       FROM bookings b
+       LEFT JOIN booking_admin_metadata admin ON admin.booking_id = b.booking_id
+       WHERE b.regiondo_booking_id = $1
        LIMIT 1
-       FOR UPDATE`,
+       FOR UPDATE OF b`,
       [input.bookingKey]
     );
 
@@ -782,13 +806,15 @@ export async function importCanonicalRegiondoBooking(input: {
       }
     });
 
-    const locationId = await findOrCreateLocation(client, {
+    const providerLocationId = await findOrCreateLocation(client, {
       regiondoLocationId: legacyLocation.regiondoLocationId,
       title: legacyLocation.title,
       raw: legacyLocation.regiondoLocationId
         ? { source: 'regiondo', webhookLocation: legacyLocation, bookingKey: input.bookingKey }
         : { source: 'regiondo_placeholder', bookingKey: input.bookingKey }
     });
+    const locationId =
+      existingRow?.location_override === 'none' ? await findOrCreateNoLocationPlaceholder(client) : providerLocationId;
 
     const currentDurationMs =
       existingRow && toIsoString(existingRow.dt_from) && toIsoString(existingRow.dt_to)

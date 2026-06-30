@@ -6,6 +6,17 @@ import {
   resolveHighestScope
 } from '../../src/access-control/model.js';
 
+const taskBookingOptionActions = ['view', 'create', 'update', 'delete', 'manage'] as const;
+
+const expectFullTaskBookingOptionAccess = (permissions: ReturnType<typeof getDefaultRolePermissions>) => {
+  for (const action of taskBookingOptionActions) {
+    expect(
+      permissions.find((permission) => permission.resource === 'task_booking_options' && permission.action === action)
+        ?.scope
+    ).toBe('all');
+  }
+};
+
 describe('access control model', () => {
   it('hydrates default admin permissions with full scope', () => {
     const permissions = getDefaultRolePermissions('admin');
@@ -22,6 +33,7 @@ describe('access control model', () => {
     expect(bookingsCreatePermission?.scope).toBe('all');
     expect(bookingsDeletePermission?.scope).toBe('all');
     expect(bookingsManagePermission?.scope).toBe('all');
+    expectFullTaskBookingOptionAccess(permissions);
   });
 
   it('preserves booking create and cancel access for operational roles', () => {
@@ -33,6 +45,12 @@ describe('access control model', () => {
     expect(
       permissions.find((permission) => permission.resource === 'bookings' && permission.action === 'delete')?.scope
     ).toBe('all');
+  });
+
+  it('allows operations leads to manage task booking options by default', () => {
+    const permissions = getDefaultRolePermissions('operations_lead');
+
+    expectFullTaskBookingOptionAccess(permissions);
   });
 
   it('fills unsupported permissions with none when normalizing a partial set', () => {

@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { SHARED_REGIONDO_PLACEHOLDER_CUSTOMER_ID, SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID } from '../../sync/mappers.js';
+import {
+  SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID,
+  SHARED_REGIONDO_PLACEHOLDER_CUSTOMER_ID,
+  SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID
+} from '../../sync/mappers.js';
 import type { BookingRow } from './core.js';
 import { mapBookingRow, requireIsoString, toIsoString } from './core.js';
 
@@ -38,6 +42,7 @@ test('mapBookingRow surfaces placeholder provider data explicitly', () => {
     location_id: 'location-1',
     location_title: 'Unknown Location',
     location_regiondo_location_id: SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID,
+    location_override: null,
     last_provider_edit_error: null,
     ops_status: 'normal',
     ops_notes: ''
@@ -49,6 +54,40 @@ test('mapBookingRow surfaces placeholder provider data explicitly', () => {
   assert.equal(booking.childName, 'Unknown child');
   assert.equal(booking.locationId, null);
   assert.equal(booking.locationTitle, 'Unknown Regiondo location');
+});
+
+test('mapBookingRow surfaces admin no-location overrides separately from unknown provider locations', () => {
+  const booking = mapBookingRow({
+    id: 'booking-no-location',
+    status: 'confirmed',
+    guest_count: 2,
+    total_amount: '20.00',
+    paid_amount: '20.00',
+    dt_from: '2026-04-27T10:00:00.000Z',
+    dt_to: '2026-04-27T12:00:00.000Z',
+    source: 'regiondo',
+    updated_at: '2026-04-27T11:00:00.000Z',
+    booking_raw: null,
+    first_name: 'Ada',
+    last_name: 'Lovelace',
+    email: 'ada@example.com',
+    phone_number: null,
+    product_title: 'Workshop',
+    regiondo_booking_id: 'regiondo-booking-1',
+    regiondo_order_number: 'order-1',
+    client_regiondo_customer_id: 'customer-1',
+    location_id: 'location-no-location',
+    location_title: 'No location',
+    location_regiondo_location_id: SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID,
+    location_override: 'none',
+    last_provider_edit_error: null,
+    ops_status: 'normal',
+    ops_notes: ''
+  } satisfies BookingRow);
+
+  assert.equal(booking.locationDataStatus, 'none');
+  assert.equal(booking.locationId, null);
+  assert.equal(booking.locationTitle, 'No location');
 });
 
 test('mapBookingRow surfaces manual task payload details', () => {
@@ -92,6 +131,7 @@ test('mapBookingRow surfaces manual task payload details', () => {
     location_id: 'location-2',
     location_title: 'Berlin Mitte',
     location_regiondo_location_id: 'manual-location',
+    location_override: null,
     last_provider_edit_error: null,
     ops_status: 'normal',
     ops_notes: ''

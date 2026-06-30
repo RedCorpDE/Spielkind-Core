@@ -1,10 +1,12 @@
 import type { PoolClient } from 'pg';
 import { pool } from '../../db/pool.js';
 import { withTransaction } from '../../db/transaction.js';
+import {
+  SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID,
+  SHARED_REGIONDO_PLACEHOLDER_CUSTOMER_ID,
+  SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID
+} from '../../sync/mappers.js';
 import type { NormalizedRegiondoBookingImport } from './booking-normalizer.js';
-
-const UNKNOWN_REGIONDO_CUSTOMER_ID = '__unknown_regiondo_customer__';
-const UNKNOWN_REGIONDO_LOCATION_ID = '__unknown_regiondo_location__';
 
 async function upsertClient(client: PoolClient, input: NormalizedRegiondoBookingImport['client']): Promise<string> {
   if (input.regiondoCustomerId) {
@@ -48,7 +50,7 @@ async function upsertClient(client: PoolClient, input: NormalizedRegiondoBooking
      ON CONFLICT (regiondo_customer_id)
      DO UPDATE SET regiondo_raw = EXCLUDED.regiondo_raw, updated_at = now()
      RETURNING client_id`,
-    [input.firstName, input.lastName, UNKNOWN_REGIONDO_CUSTOMER_ID, JSON.stringify(input.raw)]
+    [input.firstName, input.lastName, SHARED_REGIONDO_PLACEHOLDER_CUSTOMER_ID, JSON.stringify(input.raw)]
   );
 
   return result.rows[0].client_id;
@@ -97,10 +99,40 @@ async function resolveLocation(
      ON CONFLICT (regiondo_location_id)
      DO UPDATE SET regiondo_raw = EXCLUDED.regiondo_raw, updated_at = now()
      RETURNING location_id`,
-    [UNKNOWN_REGIONDO_LOCATION_ID, JSON.stringify(input.location.raw)]
+    [SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID, JSON.stringify(input.location.raw)]
   );
 
   return placeholder.rows[0].location_id;
+}
+
+async function resolveNoLocationPlaceholder(client: PoolClient): Promise<string> {
+  const result = await client.query<{ location_id: string }>(
+    `INSERT INTO locations (title, description, regiondo_location_id, regiondo_raw)
+     VALUES ('No location', NULL, $1, $2::jsonb)
+     ON CONFLICT (regiondo_location_id)
+     DO UPDATE SET title = EXCLUDED.title,
+                   description = EXCLUDED.description,
+                   regiondo_raw = EXCLUDED.regiondo_raw,
+                   updated_at = now()
+     RETURNING location_id`,
+    [SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID, JSON.stringify({ source: 'system', kind: 'no_location' })]
+  );
+
+  return result.rows[0].location_id;
+}
+
+async function hasNoLocationOverride(client: PoolClient, bookingKey: string): Promise<boolean> {
+  const result = await client.query<{ location_override: string | null }>(
+    `SELECT admin.location_override
+     FROM bookings b
+     LEFT JOIN booking_admin_metadata admin ON admin.booking_id = b.booking_id
+     WHERE b.regiondo_booking_id = $1
+     LIMIT 1
+     FOR UPDATE OF b`,
+    [bookingKey]
+  );
+
+  return result.rows[0]?.location_override === 'none';
 }
 
 async function ensureProductStub(
@@ -130,10 +162,13 @@ export async function upsertNormalizedRegiondoBooking(
   input: NormalizedRegiondoBookingImport
 ): Promise<{ bookingId: string }> {
   const clientId = await upsertClient(client, input.client);
-  const locationId = await resolveLocation(client, {
+  const providerLocationId = await resolveLocation(client, {
     location: input.location,
     regiondoProductIds: input.items.map((item) => item.regiondoProductId)
   });
+  const locationId = (await hasNoLocationOverride(client, input.bookingKey))
+    ? await resolveNoLocationPlaceholder(client)
+    : providerLocationId;
 
   const bookingResult = await client.query<{ booking_id: string }>(
     `INSERT INTO bookings (

@@ -16,6 +16,7 @@ import type {
   UpdateDashboardTaskInput
 } from '../types.js';
 import {
+  SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID,
   SHARED_REGIONDO_PLACEHOLDER_CUSTOMER_ID,
   SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID
 } from '../../sync/mappers.js';
@@ -92,6 +93,7 @@ export interface BookingRow {
   location_id: string | null;
   location_title: string | null;
   location_regiondo_location_id: string | null;
+  location_override: string | null;
   last_provider_edit_error: string | null;
   ops_status: string | null;
   ops_notes: string | null;
@@ -541,12 +543,13 @@ export function mapBookingRow(row: BookingRow): DashboardBooking {
   )
     ? 'unknown'
     : 'known';
-  const locationDataStatus = isPlaceholderProviderId(
-    row.location_regiondo_location_id,
-    SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID
-  )
-    ? 'unknown'
-    : 'known';
+  const locationDataStatus =
+    row.location_override === 'none' ||
+    isPlaceholderProviderId(row.location_regiondo_location_id, SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID)
+      ? 'none'
+      : isPlaceholderProviderId(row.location_regiondo_location_id, SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID)
+        ? 'unknown'
+        : 'known';
 
   return {
     id: row.id,
@@ -571,8 +574,13 @@ export function mapBookingRow(row: BookingRow): DashboardBooking {
     specialRequirements: extractBookingNotes(row.booking_raw),
     depositPaid: Number(row.paid_amount) > 0 || Number(row.paid_amount) >= Number(row.total_amount),
     opsNotes: row.ops_notes ?? '',
-    locationId: locationDataStatus === 'unknown' ? null : row.location_id,
-    locationTitle: locationDataStatus === 'unknown' ? 'Unknown Regiondo location' : row.location_title ?? 'Unknown Location',
+    locationId: locationDataStatus === 'known' ? row.location_id : null,
+    locationTitle:
+      locationDataStatus === 'none'
+        ? 'No location'
+        : locationDataStatus === 'unknown'
+          ? 'Unknown Regiondo location'
+          : row.location_title ?? 'Unknown Location',
     locationDataStatus,
     regiondoBookingId: row.regiondo_booking_id,
     regiondoOrderNumber: row.regiondo_order_number,

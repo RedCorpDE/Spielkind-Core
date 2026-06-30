@@ -1,6 +1,9 @@
 import { pool } from '../../db/client.js';
 import type { CreateDashboardLocationInput, DashboardLocation, UpdateDashboardLocationInput } from '../types.js';
-import { SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID } from '../../sync/mappers.js';
+import {
+  SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID,
+  SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID
+} from '../../sync/mappers.js';
 import { DashboardNotFoundError, DashboardValidationError, requireIsoString } from './core.js';
 
 interface LocationRow {
@@ -13,17 +16,24 @@ interface LocationRow {
   updated_at: Date | string;
 }
 
+const SYSTEM_LOCATION_PROVIDER_IDS = new Set([
+  SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID,
+  SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID
+]);
+
 function mapLocationRow(row: LocationRow): DashboardLocation {
-  const isSystemPlaceholder = row.regiondo_location_id === SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID;
+  const isNoLocationPlaceholder = row.regiondo_location_id === SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID;
+  const isUnknownRegiondoPlaceholder = row.regiondo_location_id === SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID;
+  const isSystemPlaceholder = isNoLocationPlaceholder || isUnknownRegiondoPlaceholder;
 
   return {
     id: row.location_id,
-    title: isSystemPlaceholder ? 'Unknown Regiondo location' : row.title,
+    title: isNoLocationPlaceholder ? 'No location' : isUnknownRegiondoPlaceholder ? 'Unknown Regiondo location' : row.title,
     description: row.description ?? '',
     imageUrl: row.image_url,
     regiondoLocationId: isSystemPlaceholder ? null : row.regiondo_location_id,
     isSystemPlaceholder,
-    providerDataStatus: isSystemPlaceholder ? 'unknown' : 'known',
+    providerDataStatus: isNoLocationPlaceholder ? 'none' : isUnknownRegiondoPlaceholder ? 'unknown' : 'known',
     createdAt: requireIsoString(row.created_at, 'locations.created_at'),
     updatedAt: requireIsoString(row.updated_at, 'locations.updated_at')
   };
@@ -36,6 +46,12 @@ function normalizeOptionalText(value: string | null | undefined): string | null 
 
   const normalized = value.trim();
   return normalized ? normalized : null;
+}
+
+function assertNotSystemProviderId(regiondoLocationId: string | null | undefined): void {
+  if (regiondoLocationId && SYSTEM_LOCATION_PROVIDER_IDS.has(regiondoLocationId)) {
+    throw new DashboardValidationError('System location placeholders cannot be edited through location settings.');
+  }
 }
 
 function isDatabaseError(error: unknown): error is { code?: string; constraint?: string } {
@@ -67,7 +83,10 @@ export async function listLocations(): Promise<DashboardLocation[]> {
        created_at,
        updated_at
      FROM locations
-     ORDER BY title ASC, created_at ASC`
+     WHERE regiondo_location_id IS NULL
+       OR regiondo_location_id <> ALL($1::text[])
+     ORDER BY title ASC, created_at ASC`,
+    [[SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID, SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID]]
   );
 
   return result.rows.map(mapLocationRow);
@@ -97,6 +116,9 @@ export async function getLocation(locationId: string): Promise<DashboardLocation
 }
 
 export async function createLocation(input: CreateDashboardLocationInput): Promise<DashboardLocation> {
+  const regiondoLocationId = normalizeOptionalText(input.regiondoLocationId);
+  assertNotSystemProviderId(regiondoLocationId);
+
   try {
     const result = await pool.query<LocationRow>(
       `INSERT INTO locations (
@@ -118,7 +140,7 @@ export async function createLocation(input: CreateDashboardLocationInput): Promi
         input.title.trim(),
         normalizeOptionalText(input.description),
         normalizeOptionalText(input.imageUrl),
-        normalizeOptionalText(input.regiondoLocationId)
+        regiondoLocationId
       ]
     );
 
@@ -133,11 +155,16 @@ export async function updateLocation(
   input: UpdateDashboardLocationInput
 ): Promise<DashboardLocation> {
   const existing = await getLocation(locationId);
+  if (existing.isSystemPlaceholder) {
+    throw new DashboardValidationError('System location placeholders cannot be edited through location settings.');
+  }
+
   const nextTitle = typeof input.title === 'string' ? input.title.trim() : existing.title;
   const nextDescription = input.description === undefined ? existing.description : normalizeOptionalText(input.description);
   const nextImageUrl = input.imageUrl === undefined ? existing.imageUrl : normalizeOptionalText(input.imageUrl);
   const nextRegiondoLocationId =
     input.regiondoLocationId === undefined ? existing.regiondoLocationId : normalizeOptionalText(input.regiondoLocationId);
+  assertNotSystemProviderId(nextRegiondoLocationId);
 
   try {
     const result = await pool.query<LocationRow>(
@@ -170,6 +197,11 @@ export async function updateLocation(
 }
 
 export async function deleteLocation(locationId: string): Promise<void> {
+  const existing = await getLocation(locationId);
+  if (existing.isSystemPlaceholder) {
+    throw new DashboardValidationError('System location placeholders cannot be deleted.');
+  }
+
   try {
     const result = await pool.query(
       `DELETE FROM locations
