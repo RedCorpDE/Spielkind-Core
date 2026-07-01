@@ -249,7 +249,7 @@ const TASK_SELECT_QUERY = `SELECT
   LEFT JOIN task_kanban_columns c ON c.id = t.column_key
   LEFT JOIN users u ON u.id = t.assignee_user_id`;
 
-const TASK_BOOKING_ALLOWED_COLUMN_POSITIONS = new Set([3, 4, 5]);
+const TASK_BOOKING_ALLOWED_COLUMN_POSITIONS = new Set([0, 1, 2, 3, 4, 5, 6, 7]);
 
 interface BookingListCursor {
   sort: DashboardBookingSort;
