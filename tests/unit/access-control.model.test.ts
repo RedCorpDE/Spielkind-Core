@@ -3,10 +3,12 @@ import {
   getDefaultRolePermissions,
   hasPermission,
   normalizePermissionSet,
+  permissionDefinitions,
   resolveHighestScope
 } from '../../src/access-control/model.js';
 
 const taskBookingOptionActions = ['view', 'create', 'update', 'delete', 'manage'] as const;
+const taskCommentActions = ['view', 'create'] as const;
 
 const expectFullTaskBookingOptionAccess = (permissions: ReturnType<typeof getDefaultRolePermissions>) => {
   for (const action of taskBookingOptionActions) {
@@ -17,7 +19,22 @@ const expectFullTaskBookingOptionAccess = (permissions: ReturnType<typeof getDef
   }
 };
 
+const expectFullTaskCommentAccess = (permissions: ReturnType<typeof getDefaultRolePermissions>) => {
+  for (const action of taskCommentActions) {
+    expect(
+      permissions.find((permission) => permission.resource === 'task_comments' && permission.action === action)?.scope
+    ).toBe('all');
+  }
+};
+
 describe('access control model', () => {
+  it('defines append-only task comment permissions', () => {
+    expect(permissionDefinitions.find((definition) => definition.resource === 'task_comments')?.actions).toEqual([
+      'view',
+      'create'
+    ]);
+  });
+
   it('hydrates default admin permissions with full scope', () => {
     const permissions = getDefaultRolePermissions('admin');
     const bookingsCreatePermission = permissions.find(
@@ -33,6 +50,7 @@ describe('access control model', () => {
     expect(bookingsCreatePermission?.scope).toBe('all');
     expect(bookingsDeletePermission?.scope).toBe('all');
     expect(bookingsManagePermission?.scope).toBe('all');
+    expectFullTaskCommentAccess(permissions);
     expectFullTaskBookingOptionAccess(permissions);
   });
 
@@ -45,6 +63,13 @@ describe('access control model', () => {
     expect(
       permissions.find((permission) => permission.resource === 'bookings' && permission.action === 'delete')?.scope
     ).toBe('all');
+    expectFullTaskCommentAccess(permissions);
+  });
+
+  it('preserves task comment access for operational roles', () => {
+    expectFullTaskCommentAccess(getDefaultRolePermissions('operations'));
+    expectFullTaskCommentAccess(getDefaultRolePermissions('operations_lead'));
+    expectFullTaskCommentAccess(getDefaultRolePermissions('program_manager'));
   });
 
   it('allows operations leads to manage task booking options by default', () => {
@@ -61,6 +86,12 @@ describe('access control model', () => {
 
     expect(
       permissions.find((permission) => permission.resource === 'tasks' && permission.action === 'delete')?.scope
+    ).toBe('none');
+    expect(
+      permissions.find((permission) => permission.resource === 'task_comments' && permission.action === 'view')?.scope
+    ).toBe('none');
+    expect(
+      permissions.find((permission) => permission.resource === 'task_comments' && permission.action === 'create')?.scope
     ).toBe('none');
   });
 

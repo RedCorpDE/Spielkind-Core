@@ -7,6 +7,7 @@ export type PermissionResource =
   | 'dashboard'
   | 'settings'
   | 'tasks'
+  | 'task_comments'
   | 'task_booking_options'
   | 'task_columns'
   | 'locations'
@@ -86,6 +87,12 @@ export const permissionDefinitions: PermissionDefinition[] = [
     label: 'Tasks',
     description: 'View and manage internal task boards and task records.',
     actions: ['view', 'create', 'update', 'delete']
+  },
+  {
+    resource: 'task_comments',
+    label: 'Task Comments',
+    description: 'Read and add append-only comments on task records.',
+    actions: ['view', 'create']
   },
   {
     resource: 'task_booking_options',
@@ -192,6 +199,7 @@ const defaultRoleGrants: Record<string, PermissionGrant[]> = {
     ...grant('dashboard', { view: 'all' }),
     ...grant('settings', { view: 'all' }),
     ...grant('tasks', { view: 'all', create: 'all', update: 'all', delete: 'all' }),
+    ...grant('task_comments', { view: 'all', create: 'all' }),
     ...grant('task_columns', { view: 'all' }),
     ...grant('locations', { view: 'all' }),
     ...grant('bookings', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all', export: 'all' }),
@@ -206,6 +214,7 @@ const defaultRoleGrants: Record<string, PermissionGrant[]> = {
     ...grant('dashboard', { view: 'all' }),
     ...grant('settings', { view: 'all', manage: 'all' }),
     ...grant('tasks', { view: 'all', create: 'all', update: 'all', delete: 'all' }),
+    ...grant('task_comments', { view: 'all', create: 'all' }),
     ...grant('task_booking_options', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all' }),
     ...grant('task_columns', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all' }),
     ...grant('locations', { view: 'all', create: 'all', update: 'all', delete: 'all' }),
@@ -222,6 +231,7 @@ const defaultRoleGrants: Record<string, PermissionGrant[]> = {
   program_manager: [
     ...grant('dashboard', { view: 'all' }),
     ...grant('tasks', { view: 'all', create: 'all', update: 'all' }),
+    ...grant('task_comments', { view: 'all', create: 'all' }),
     ...grant('bookings', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all' }),
     ...grant('products', { view: 'all' }),
     ...grant('messages', { view: 'all', create: 'all', update: 'all' }),

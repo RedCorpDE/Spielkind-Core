@@ -732,6 +732,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
 
   app.get('/api/admin/tasks/:taskId/comments', async (request) => {
     await requireAdminPermission(request as AdminFastifyRequest, 'tasks', 'view');
+    await requireAdminPermission(request as AdminFastifyRequest, 'task_comments', 'view');
     const { taskId } = request.params as { taskId: string };
 
     try {
@@ -768,7 +769,8 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   app.post('/api/admin/tasks/:taskId/comments', async (request) => {
-    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'tasks', 'update');
+    await requireAdminPermission(request as AdminFastifyRequest, 'tasks', 'view');
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'task_comments', 'create');
     const parsed = createTaskCommentSchema.safeParse(request.body);
     if (!parsed.success) {
       throw new ValidationHttpError('Invalid task comment payload.');
