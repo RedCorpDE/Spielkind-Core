@@ -3,6 +3,7 @@ import { DashboardNotFoundError, DashboardValidationError } from '../dashboard/r
 import {
   RegiondoApiError,
   RegiondoAuthError,
+  RegiondoPurchaseRecoveryRequiredError,
   RegiondoRateLimitError,
   RegiondoTransientError
 } from '../modules/regiondo/regiondo.client.js';
@@ -92,6 +93,20 @@ export function registerErrorHandler() {
 
     if (error instanceof OverbookingError || error instanceof MissingProductResourceMappingError) {
       reply.status(409).send({ ok: false, error: error.message });
+      return;
+    }
+
+    if (error instanceof RegiondoPurchaseRecoveryRequiredError) {
+      reply.status(502).send({
+        ok: false,
+        code: 'REGIONDO_PURCHASE_RECONCILIATION_REQUIRED',
+        retryable: false,
+        error: error.message,
+        reason: error.reason,
+        ...(error.subId ? { subId: error.subId } : {}),
+        ...(error.orderNumber ? { orderNumber: error.orderNumber } : {}),
+        ...(error.orderId ? { orderId: error.orderId } : {})
+      });
       return;
     }
 

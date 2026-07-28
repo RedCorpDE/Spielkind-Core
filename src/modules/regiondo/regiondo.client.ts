@@ -1,4 +1,5 @@
 import { appConfig } from '../../config/env.js';
+import { logger } from '../../config/logger.js';
 import { ZodError, type ZodType } from 'zod';
 import { signRegiondoRequest } from './regiondo.auth.js';
 import { RegiondoCatalogSyncError } from './regiondo-catalog.errors.js';
@@ -51,6 +52,8 @@ interface RegiondoRequestOptions {
   method?: 'DELETE' | 'GET' | 'POST' | 'PUT';
   params?: Record<string, string>;
   body?: unknown;
+  maxRetries?: number;
+  timeoutMs?: number;
 }
 
 export interface RegiondoCheckoutCartItem {
@@ -123,6 +126,9 @@ interface RegiondoClientOptions {
   requestTimeoutMs: number;
   maxRetries: number;
   retryBaseDelayMs: number;
+  purchaseHydrationMaxAttempts: number;
+  purchaseHydrationRetryBaseDelayMs: number;
+  purchaseHydrationTimeoutMs: number;
   requestThrottleMs: number;
   supplierId: string;
   fetchImplementation: typeof fetch;
@@ -170,6 +176,46 @@ export class RegiondoPayloadError extends RegiondoApiError {
   }
 }
 
+export type RegiondoPurchaseRecoveryReason = 'post_outcome_unknown' | 'snapshot_unavailable';
+
+interface RegiondoPurchaseRecoveryRequiredErrorInput {
+  reason: RegiondoPurchaseRecoveryReason;
+  subId?: string;
+  orderNumber?: string | null;
+  orderId?: string | null;
+  attemptCount?: number;
+  upstreamStatus?: number;
+  cause?: unknown;
+}
+
+const REGIONDO_PURCHASE_RECOVERY_MESSAGE =
+  'The Regiondo purchase may already exist. Do not submit it again until the existing attempt is reconciled.';
+
+export class RegiondoPurchaseRecoveryRequiredError extends RegiondoApiError {
+  readonly retryable = false;
+  readonly reason: RegiondoPurchaseRecoveryReason;
+  readonly subId: string | null;
+  readonly orderNumber: string | null;
+  readonly orderId: string | null;
+  readonly attemptCount: number | null;
+  readonly upstreamStatus: number | null;
+
+  constructor(input: RegiondoPurchaseRecoveryRequiredErrorInput) {
+    super(REGIONDO_PURCHASE_RECOVERY_MESSAGE, 502);
+    this.name = 'RegiondoPurchaseRecoveryRequiredError';
+    this.reason = input.reason;
+    this.subId = input.subId?.trim() || null;
+    this.orderNumber = input.orderNumber?.trim() || null;
+    this.orderId = input.orderId?.trim() || null;
+    this.attemptCount = input.attemptCount ?? null;
+    this.upstreamStatus = input.upstreamStatus ?? null;
+
+    if (input.cause !== undefined) {
+      this.cause = input.cause;
+    }
+  }
+}
+
 function sleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
@@ -178,6 +224,17 @@ function formatZodErrorDetails(error: ZodError): string {
   return error.issues
     .map((issue) => `${issue.path.join('.') || 'payload'}: ${issue.message}`)
     .join('; ');
+}
+
+function tryParseJson(value: string): { parsed: true; value: unknown } | { parsed: false } {
+  try {
+    return {
+      parsed: true,
+      value: JSON.parse(value)
+    };
+  } catch {
+    return { parsed: false };
+  }
 }
 
 function parseRegiondoPayload<T>(schema: ZodType<T, any, any>, payload: unknown, context: string): T {
@@ -198,6 +255,15 @@ function collectRegiondoObjectPayloadCandidates(
   visited: WeakSet<object> = new WeakSet()
 ): unknown[] {
   const candidates = [value];
+
+  if (typeof value === 'string') {
+    const parsedJson = tryParseJson(value);
+    if (parsedJson.parsed && parsedJson.value !== value) {
+      candidates.push(...collectRegiondoObjectPayloadCandidates(parsedJson.value, depth + 1, visited));
+    }
+
+    return candidates;
+  }
 
   if (depth >= 5 || value === null || typeof value !== 'object') {
     return candidates;
@@ -233,7 +299,9 @@ function parseRegiondoPurchasePayload(payload: unknown): RegiondoPurchaseData {
       return parsedPurchase.data;
     }
 
-    parsedPurchaseError = parsedPurchase.error;
+    if (parsedPurchaseError === null || (candidate !== null && typeof candidate === 'object')) {
+      parsedPurchaseError = parsedPurchase.error;
+    }
   }
 
   throw new RegiondoPayloadError(
@@ -251,7 +319,7 @@ function mapHttpError(status: number, responseBody: string): RegiondoApiError {
     return new RegiondoAuthError(status, responseBody);
   }
 
-  if ([408, 500, 502, 503, 504].includes(status)) {
+  if (status === 408 || status === 425 || status >= 500) {
     return new RegiondoTransientError(status, responseBody);
   }
 
@@ -313,7 +381,10 @@ function extractNestedRegiondoIdentifier(
     }
   }
 
-  for (const fallbackKey of ['number', 'value', 'id']) {
+  const prefersNumber = preferredKeys.some((key) => key.toLowerCase().includes('number'));
+  const fallbackKeys = prefersNumber ? ['number', 'value', 'id'] : ['id', 'value', 'number'];
+
+  for (const fallbackKey of fallbackKeys) {
     if (!(fallbackKey in record)) {
       continue;
     }
@@ -329,6 +400,10 @@ function extractNestedRegiondoIdentifier(
 
 function extractFirstNestedRegiondoIdentifier(value: unknown, preferredKeys: string[]): string | null {
   for (const candidate of collectRegiondoObjectPayloadCandidates(value)) {
+    if (candidate === null || typeof candidate !== 'object') {
+      continue;
+    }
+
     const identifier = extractNestedRegiondoIdentifier(candidate, preferredKeys);
     if (identifier) {
       return identifier;
@@ -347,6 +422,34 @@ export function isRetryableRegiondoError(error: unknown): boolean {
   );
 }
 
+function isRetryableRegiondoRequestError(error: unknown): boolean {
+  return (
+    error instanceof RegiondoRateLimitError ||
+    error instanceof RegiondoTransientError ||
+    (error instanceof Error && (error.name === 'AbortError' || error instanceof TypeError))
+  );
+}
+
+function isRetryablePurchaseHydrationError(error: unknown): boolean {
+  return error instanceof RegiondoPayloadError || isRetryableRegiondoRequestError(error);
+}
+
+function isAmbiguousPurchaseSubmissionError(error: unknown): boolean {
+  return (
+    error instanceof RegiondoTransientError ||
+    error instanceof SyntaxError ||
+    (error instanceof Error && (error.name === 'AbortError' || error instanceof TypeError))
+  );
+}
+
+function getRegiondoUpstreamStatus(error: unknown): number | undefined {
+  if (error instanceof RegiondoApiError && !(error instanceof RegiondoPayloadError)) {
+    return error.status;
+  }
+
+  return undefined;
+}
+
 export function getRegiondoRetryDelayMs(attemptNumber: number, baseDelayMs: number): number {
   return Math.min(5_000, baseDelayMs * 2 ** Math.max(0, attemptNumber));
 }
@@ -361,6 +464,9 @@ export class RegiondoClient {
   private readonly requestTimeoutMs: number;
   private readonly maxRetries: number;
   private readonly retryBaseDelayMs: number;
+  private readonly purchaseHydrationMaxAttempts: number;
+  private readonly purchaseHydrationRetryBaseDelayMs: number;
+  private readonly purchaseHydrationTimeoutMs: number;
   private readonly requestThrottleMs: number;
   private readonly supplierId: string;
   private readonly fetchImplementation: typeof fetch;
@@ -378,6 +484,12 @@ export class RegiondoClient {
     this.requestTimeoutMs = options.requestTimeoutMs ?? appConfig.REGIONDO_REQUEST_TIMEOUT_MS;
     this.maxRetries = options.maxRetries ?? appConfig.REGIONDO_REQUEST_MAX_RETRIES;
     this.retryBaseDelayMs = options.retryBaseDelayMs ?? appConfig.REGIONDO_REQUEST_RETRY_BASE_DELAY_MS;
+    this.purchaseHydrationMaxAttempts =
+      options.purchaseHydrationMaxAttempts ?? appConfig.REGIONDO_PURCHASE_HYDRATION_MAX_ATTEMPTS;
+    this.purchaseHydrationRetryBaseDelayMs =
+      options.purchaseHydrationRetryBaseDelayMs ?? appConfig.REGIONDO_PURCHASE_HYDRATION_RETRY_BASE_DELAY_MS;
+    this.purchaseHydrationTimeoutMs =
+      options.purchaseHydrationTimeoutMs ?? appConfig.REGIONDO_PURCHASE_HYDRATION_TIMEOUT_MS;
     this.requestThrottleMs = options.requestThrottleMs ?? appConfig.REGIONDO_REQUEST_THROTTLE_MS;
     this.supplierId = options.supplierId ?? appConfig.REGIONDO_PRODUCT_SUPPLIER_ID;
     this.fetchImplementation = options.fetchImplementation ?? fetch;
@@ -414,11 +526,13 @@ export class RegiondoClient {
 
   private async requestJson<T>(pathname: string, options: RegiondoRequestOptions = {}): Promise<T> {
     const method = options.method ?? 'GET';
+    const maxRetries = options.maxRetries ?? (method === 'GET' ? this.maxRetries : 0);
+    const timeoutMs = Math.max(1, Math.floor(options.timeoutMs ?? this.requestTimeoutMs));
     const queryParams = this.buildQueryParams(options.params ?? {});
     const url = new URL(pathname.replace(/^\//, ''), this.baseUrl);
     url.search = queryParams.toString();
 
-    for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       try {
         await this.throttleRequest();
 
@@ -441,7 +555,7 @@ export class RegiondoClient {
             ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' })
           },
           method,
-          signal: AbortSignal.timeout(this.requestTimeoutMs)
+          signal: AbortSignal.timeout(timeoutMs)
         });
 
         if (!response.ok) {
@@ -458,25 +572,52 @@ export class RegiondoClient {
         }
 
         const contentType = response.headers.get('content-type') ?? '';
+        const parsedJson = tryParseJson(responseBody);
         if (contentType.includes('application/json')) {
-          return JSON.parse(responseBody) as T;
+          if (!parsedJson.parsed) {
+            throw new SyntaxError('Regiondo returned invalid JSON with an application/json content type.');
+          }
+
+          return parsedJson.value as T;
+        }
+
+        if (parsedJson.parsed) {
+          return parsedJson.value as T;
         }
 
         return responseBody as T;
       } catch (error) {
-        if (attempt >= this.maxRetries || !isRetryableRegiondoError(error)) {
+        if (attempt >= maxRetries || !isRetryableRegiondoRequestError(error)) {
           throw error;
         }
 
-        await this.sleepImplementation(getRegiondoRetryDelayMs(attempt, this.retryBaseDelayMs));
+        const delayMs = getRegiondoRetryDelayMs(attempt, this.retryBaseDelayMs);
+        logger.warn(
+          {
+            event: 'regiondo_request_retry_scheduled',
+            method,
+            pathname,
+            attempt: attempt + 1,
+            maxAttempts: maxRetries + 1,
+            delayMs,
+            errorName: error instanceof Error ? error.name : typeof error,
+            status: error instanceof RegiondoApiError ? error.status : undefined
+          },
+          'Regiondo request retry scheduled.'
+        );
+        await this.sleepImplementation(delayMs);
       }
     }
 
     throw new RegiondoApiError(`Regiondo request failed without a response for ${pathname}`);
   }
 
-  async getCollection<T>(pathname: string, params: Record<string, string> = {}): Promise<T[]> {
-    const body = await this.requestJson<RegiondoCollectionResponse<T>>(pathname, { params });
+  async getCollection<T>(
+    pathname: string,
+    params: Record<string, string> = {},
+    requestOptions: Pick<RegiondoRequestOptions, 'maxRetries' | 'timeoutMs'> = {}
+  ): Promise<T[]> {
+    const body = await this.requestJson<RegiondoCollectionResponse<T>>(pathname, { ...requestOptions, params });
     return body.data ?? body.items ?? [];
   }
 
@@ -506,48 +647,176 @@ export class RegiondoClient {
     return body as T;
   }
 
-  private async resolvePurchaseOrderSnapshot(body: unknown): Promise<RegiondoPurchaseData> {
+  private createPurchaseRecoveryRequiredError(input: RegiondoPurchaseRecoveryRequiredErrorInput) {
+    const error = new RegiondoPurchaseRecoveryRequiredError(input);
+
+    logger.error(
+      {
+        event: 'regiondo_purchase_reconciliation_required',
+        reason: error.reason,
+        subId: error.subId,
+        orderNumber: error.orderNumber,
+        orderId: error.orderId,
+        attemptCount: error.attemptCount,
+        upstreamStatus: error.upstreamStatus,
+        causeName: input.cause instanceof Error ? input.cause.name : undefined
+      },
+      error.message
+    );
+
+    return error;
+  }
+
+  private async pollPurchaseOrderSnapshot(input: {
+    orderNumber?: string | null;
+    orderId?: string | null;
+    subId?: string;
+  }): Promise<RegiondoPurchaseData> {
+    const startedAt = Date.now();
+    const deadline = startedAt + this.purchaseHydrationTimeoutMs;
+    let orderNumber = input.orderNumber ?? null;
+    let lastError: unknown = null;
+    let completedAttempts = 0;
+
+    for (let attempt = 1; attempt <= this.purchaseHydrationMaxAttempts; attempt += 1) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        break;
+      }
+      completedAttempts = attempt;
+
+      try {
+        if (!orderNumber && input.orderId) {
+          const supplierBookings = await this.listSupplierBookings(
+            {
+              limit: 250,
+              orderIds: [input.orderId]
+            },
+            {
+              maxRetries: 0,
+              timeoutMs: Math.min(this.requestTimeoutMs, remainingMs)
+            }
+          );
+          orderNumber =
+            supplierBookings
+              .map((booking) => stringifyRegiondoIdentifier(booking.order_number))
+              .find((value): value is string => Boolean(value)) ?? null;
+
+          if (!orderNumber) {
+            throw new RegiondoTransientError(
+              503,
+              `Regiondo has not exposed an order number for order id ${input.orderId} yet.`
+            );
+          }
+        }
+
+        if (!orderNumber) {
+          break;
+        }
+
+        const purchaseRequestRemainingMs = deadline - Date.now();
+        if (purchaseRequestRemainingMs <= 0) {
+          throw new RegiondoTransientError(503, 'Regiondo purchase hydration deadline was reached.');
+        }
+
+        const purchaseDataRaw = await this.requestJson<RegiondoObjectResponse<unknown> | unknown>(
+          '/checkout/purchase',
+          {
+            maxRetries: 0,
+            params: {
+              order_number: orderNumber
+            },
+            timeoutMs: Math.min(this.requestTimeoutMs, purchaseRequestRemainingMs)
+          }
+        );
+        const purchaseData = parseRegiondoPurchasePayload(purchaseDataRaw);
+
+        logger.info(
+          {
+            event: 'regiondo_purchase_snapshot_hydrated',
+            subId: input.subId,
+            orderId: input.orderId,
+            orderNumber,
+            attempt,
+            elapsedMs: Date.now() - startedAt
+          },
+          'Regiondo purchase snapshot hydrated.'
+        );
+
+        return purchaseData;
+      } catch (error) {
+        if (!isRetryablePurchaseHydrationError(error)) {
+          throw error;
+        }
+
+        lastError = error;
+        const delayMs = getRegiondoRetryDelayMs(attempt - 1, this.purchaseHydrationRetryBaseDelayMs);
+        const remainingAfterAttemptMs = deadline - Date.now();
+        if (attempt >= this.purchaseHydrationMaxAttempts || delayMs >= remainingAfterAttemptMs) {
+          break;
+        }
+
+        logger.warn(
+          {
+            event: 'regiondo_purchase_snapshot_poll_retry',
+            subId: input.subId,
+            orderId: input.orderId,
+            orderNumber,
+            attempt,
+            maxAttempts: this.purchaseHydrationMaxAttempts,
+            delayMs,
+            elapsedMs: Date.now() - startedAt,
+            errorName: error instanceof Error ? error.name : typeof error,
+            status: error instanceof RegiondoApiError ? error.status : undefined
+          },
+          'Regiondo purchase snapshot is not ready; retrying.'
+        );
+        await this.sleepImplementation(delayMs);
+      }
+    }
+
+    throw this.createPurchaseRecoveryRequiredError({
+      reason: 'snapshot_unavailable',
+      subId: input.subId,
+      orderNumber,
+      orderId: input.orderId,
+      attemptCount: completedAttempts,
+      upstreamStatus: getRegiondoUpstreamStatus(lastError),
+      cause: lastError
+    });
+  }
+
+  private async resolvePurchaseOrderSnapshot(
+    body: unknown,
+    context: { subId?: string } = {}
+  ): Promise<RegiondoPurchaseData> {
+    let initialPayloadError: RegiondoPayloadError;
+
     try {
       return parseRegiondoPurchasePayload(body);
     } catch (error) {
       if (!(error instanceof RegiondoPayloadError)) {
         throw error;
       }
+      initialPayloadError = error;
     }
 
     const orderNumber = extractFirstNestedRegiondoIdentifier(body, ['order_number', 'orderNumber', 'order_no', 'orderNo']);
-    if (orderNumber) {
-      const purchaseDataRaw = await this.requestJson<RegiondoObjectResponse<unknown> | unknown>('/checkout/purchase', {
-        params: {
-          order_number: orderNumber
-        }
-      });
-
-      return parseRegiondoPurchasePayload(purchaseDataRaw);
-    }
-
     const orderId = extractFirstNestedRegiondoIdentifier(body, ['order_id', 'orderId']);
-    if (orderId) {
-      const supplierBookings = await this.listSupplierBookings({
-        limit: 250,
-        orderIds: [orderId]
+    if (orderNumber || orderId) {
+      return this.pollPurchaseOrderSnapshot({
+        subId: context.subId,
+        orderNumber,
+        orderId
       });
-      const supplierOrderNumber = supplierBookings
-        .map((booking) => stringifyRegiondoIdentifier(booking.order_number))
-        .find((value): value is string => Boolean(value));
-
-      if (supplierOrderNumber) {
-        const purchaseDataRaw = await this.requestJson<RegiondoObjectResponse<unknown> | unknown>('/checkout/purchase', {
-          params: {
-            order_number: supplierOrderNumber
-          }
-        });
-
-        return parseRegiondoPurchasePayload(purchaseDataRaw);
-      }
     }
 
-    return parseRegiondoPurchasePayload(body);
+    throw this.createPurchaseRecoveryRequiredError({
+      reason: 'snapshot_unavailable',
+      subId: context.subId,
+      attemptCount: 0,
+      cause: initialPayloadError
+    });
   }
 
   async getObject<T>(pathname: string, params: Record<string, string> = {}): Promise<T> {
@@ -642,19 +911,26 @@ export class RegiondoClient {
     });
   }
 
-  async listSupplierBookings(input: RegiondoListSupplierBookingsInput = {}): Promise<RegiondoSupplierBooking[]> {
-    const supplierBookingsRaw = await this.getCollection<RegiondoSupplierBooking>('/supplier/bookings', {
-      ...(input.bookingKey ? { booking_key: input.bookingKey } : {}),
-      ...(input.dateRange ? { date_range: input.dateRange } : {}),
-      ...(input.dateRangeBy ? { date_range_by: input.dateRangeBy } : {}),
-      ...(typeof input.limit === 'number' ? { limit: `${input.limit}` } : {}),
-      ...(typeof input.offset === 'number' ? { offset: `${input.offset}` } : {}),
-      ...(input.orderIds?.length ? { order_ids: input.orderIds.join(',') } : {}),
-      ...(input.productIds?.length ? { product_ids: input.productIds.join(',') } : {}),
-      ...(input.resourceIds?.length ? { resource_ids: input.resourceIds.join(',') } : {}),
-      ...(input.status ? { status: input.status } : {}),
-      ...(input.type ? { type: input.type } : {})
-    });
+  async listSupplierBookings(
+    input: RegiondoListSupplierBookingsInput = {},
+    requestOptions: Pick<RegiondoRequestOptions, 'maxRetries' | 'timeoutMs'> = {}
+  ): Promise<RegiondoSupplierBooking[]> {
+    const supplierBookingsRaw = await this.getCollection<RegiondoSupplierBooking>(
+      '/supplier/bookings',
+      {
+        ...(input.bookingKey ? { booking_key: input.bookingKey } : {}),
+        ...(input.dateRange ? { date_range: input.dateRange } : {}),
+        ...(input.dateRangeBy ? { date_range_by: input.dateRangeBy } : {}),
+        ...(typeof input.limit === 'number' ? { limit: `${input.limit}` } : {}),
+        ...(typeof input.offset === 'number' ? { offset: `${input.offset}` } : {}),
+        ...(input.orderIds?.length ? { order_ids: input.orderIds.join(',') } : {}),
+        ...(input.productIds?.length ? { product_ids: input.productIds.join(',') } : {}),
+        ...(input.resourceIds?.length ? { resource_ids: input.resourceIds.join(',') } : {}),
+        ...(input.status ? { status: input.status } : {}),
+        ...(input.type ? { type: input.type } : {})
+      },
+      requestOptions
+    );
 
     return parseRegiondoPayload(regiondoSupplierBookingsSchema, supplierBookingsRaw, 'supplier bookings response');
   }
@@ -685,29 +961,46 @@ export class RegiondoClient {
   }
 
   async purchaseOrder(input: RegiondoPurchaseOrderInput): Promise<RegiondoPurchaseData> {
-    const purchaseDataRaw = await this.requestJson<RegiondoObjectResponse<unknown> | unknown>('/checkout/purchase', {
-      body: {
-        ...(input.attendeeData?.length ? { attendee_data: input.attendeeData } : {}),
-        ...(input.buyerData?.length ? { buyer_data: input.buyerData } : {}),
-        ...(input.comment ? { comment: input.comment } : {}),
-        contact_data: input.contactData,
-        items: input.items,
-        ...(input.sendTicketsToCustomer !== undefined
-          ? { send_tickets_to_customer: input.sendTicketsToCustomer }
-          : {}),
-        ...(input.subId ? { sub_id: input.subId } : {}),
-        ...(input.syncTicketsProcessing !== undefined
-          ? { sync_tickets_processing: input.syncTicketsProcessing }
-          : {})
-      },
-      method: 'POST',
-      params: {
-        currency: this.currency,
-        store_locale: input.storeLocale ?? this.language
-      }
-    });
+    let purchaseDataRaw: RegiondoObjectResponse<unknown> | unknown;
 
-    return this.resolvePurchaseOrderSnapshot(purchaseDataRaw);
+    try {
+      purchaseDataRaw = await this.requestJson<RegiondoObjectResponse<unknown> | unknown>('/checkout/purchase', {
+        body: {
+          ...(input.attendeeData?.length ? { attendee_data: input.attendeeData } : {}),
+          ...(input.buyerData?.length ? { buyer_data: input.buyerData } : {}),
+          ...(input.comment ? { comment: input.comment } : {}),
+          contact_data: input.contactData,
+          items: input.items,
+          ...(input.sendTicketsToCustomer !== undefined
+            ? { send_tickets_to_customer: input.sendTicketsToCustomer }
+            : {}),
+          ...(input.subId ? { sub_id: input.subId } : {}),
+          ...(input.syncTicketsProcessing !== undefined
+            ? { sync_tickets_processing: input.syncTicketsProcessing }
+            : {})
+        },
+        maxRetries: 0,
+        method: 'POST',
+        params: {
+          currency: this.currency,
+          store_locale: input.storeLocale ?? this.language
+        }
+      });
+    } catch (error) {
+      if (!isAmbiguousPurchaseSubmissionError(error)) {
+        throw error;
+      }
+
+      throw this.createPurchaseRecoveryRequiredError({
+        reason: 'post_outcome_unknown',
+        subId: input.subId,
+        attemptCount: 1,
+        upstreamStatus: getRegiondoUpstreamStatus(error),
+        cause: error
+      });
+    }
+
+    return this.resolvePurchaseOrderSnapshot(purchaseDataRaw, { subId: input.subId });
   }
 
   async updateBooking(input: RegiondoUpdateBookingInput): Promise<unknown> {

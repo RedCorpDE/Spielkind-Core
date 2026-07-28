@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { registerErrorHandler } from '../../src/http/errors.js';
-import { RegiondoApiError, RegiondoTransientError } from '../../src/modules/regiondo/regiondo.client.js';
+import {
+  RegiondoApiError,
+  RegiondoPurchaseRecoveryRequiredError,
+  RegiondoTransientError
+} from '../../src/modules/regiondo/regiondo.client.js';
 
 function createReplyDouble() {
   const reply = {
@@ -58,5 +62,39 @@ describe('registerErrorHandler', () => {
       error: 'Regiondo transient failure: 503',
       details: 'Regiondo is temporarily unavailable.'
     });
+  });
+
+  it('returns a non-retryable reconciliation response without provider or customer payloads', async () => {
+    const handler = registerErrorHandler();
+    const reply = createReplyDouble();
+    const request = createRequestDouble();
+    const error = new RegiondoPurchaseRecoveryRequiredError({
+      reason: 'snapshot_unavailable',
+      subId: 'task-1',
+      orderNumber: 'R-10001',
+      orderId: '4711',
+      attemptCount: 5,
+      upstreamStatus: 503,
+      cause: new RegiondoApiError(
+        'Provider failure containing booking@example.com',
+        503,
+        '{"contact_data":{"email":"booking@example.com"}}'
+      )
+    });
+
+    await handler(error, request as never, reply as never);
+
+    expect(reply.status).toHaveBeenCalledWith(502);
+    expect(reply.send).toHaveBeenCalledWith({
+      ok: false,
+      code: 'REGIONDO_PURCHASE_RECONCILIATION_REQUIRED',
+      retryable: false,
+      error: 'The Regiondo purchase may already exist. Do not submit it again until the existing attempt is reconciled.',
+      reason: 'snapshot_unavailable',
+      subId: 'task-1',
+      orderNumber: 'R-10001',
+      orderId: '4711'
+    });
+    expect(JSON.stringify(reply.send.mock.calls)).not.toContain('booking@example.com');
   });
 });

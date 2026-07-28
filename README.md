@@ -184,6 +184,8 @@ Each job uses PostgreSQL advisory locking and records `job_runs`.
 
 The Regiondo catalog sync now defaults to `REGIONDO_CATALOG_SYNC_CRON=0 3 * * 1`, which runs every Monday at 03:00 in `SCHEDULER_TIMEZONE` (default `Europe/Berlin`).
 
+Regiondo checkout purchase submissions are never retried automatically because a timeout can occur after Regiondo has already created the order. When checkout returns only an order receipt, Core polls the read-only purchase endpoints until the canonical snapshot is available. Configure that bounded polling with `REGIONDO_PURCHASE_HYDRATION_MAX_ATTEMPTS` (default `5`), `REGIONDO_PURCHASE_HYDRATION_RETRY_BASE_DELAY_MS` (default `500`), and `REGIONDO_PURCHASE_HYDRATION_TIMEOUT_MS` (default `15000`). If hydration still fails, the API returns `REGIONDO_PURCHASE_RECONCILIATION_REQUIRED`; operators must check Regiondo before submitting the booking again.
+
 For later external cron jobs, keep using the same internal job handler instead of duplicating logic:
 - `POST /internal/jobs/sync-regiondo-catalog`
 - Header: `Authorization: Bearer <CRON_SECRET>`

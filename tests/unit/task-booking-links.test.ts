@@ -23,12 +23,17 @@ vi.mock('../../src/db/client.js', () => ({
   }
 }));
 
-vi.mock('../../src/modules/regiondo/regiondo.client.js', () => ({
-  regiondoClient: {
-    listSupplierBookings: listSupplierBookingsMock,
-    purchaseOrder: purchaseOrderMock
-  }
-}));
+vi.mock('../../src/modules/regiondo/regiondo.client.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/modules/regiondo/regiondo.client.js')>();
+
+  return {
+    ...actual,
+    regiondoClient: {
+      listSupplierBookings: listSupplierBookingsMock,
+      purchaseOrder: purchaseOrderMock
+    }
+  };
+});
 
 vi.mock('../../src/modules/bookings/booking-normalizer.js', () => ({
   normalizeRegiondoBookingImport: normalizeRegiondoBookingImportMock
@@ -39,6 +44,7 @@ vi.mock('../../src/modules/bookings/booking.repository.js', () => ({
 }));
 
 import { createBookingFromTask } from '../../src/dashboard/repository/bookings.js';
+import { RegiondoPurchaseRecoveryRequiredError } from '../../src/modules/regiondo/regiondo.client.js';
 
 const createTaskBookingData = (overrides: Record<string, unknown> = {}) => ({
   contact_data: {
@@ -544,5 +550,27 @@ describe('task booking links', () => {
         })
       })
     );
+  });
+
+  it('rolls back local booking work when the Regiondo purchase requires reconciliation', async () => {
+    mockTaskForBookingCreation(createTaskBookingData());
+    const recoveryError = new RegiondoPurchaseRecoveryRequiredError({
+      reason: 'snapshot_unavailable',
+      subId: '11111111-1111-1111-1111-111111111111',
+      orderNumber: 'R-10001',
+      attemptCount: 5
+    });
+    purchaseOrderMock.mockRejectedValue(recoveryError);
+
+    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).rejects.toBe(recoveryError);
+
+    expect(queryMock).toHaveBeenCalledWith('ROLLBACK');
+    expect(listSupplierBookingsMock).not.toHaveBeenCalled();
+    expect(upsertNormalizedRegiondoBookingMock).not.toHaveBeenCalled();
+    expect(
+      queryMock.mock.calls.some(
+        ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO task_bookings')
+      )
+    ).toBe(false);
   });
 });
