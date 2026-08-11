@@ -5,6 +5,7 @@ import {
   SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID
 } from '../../sync/mappers.js';
 import { DashboardNotFoundError, DashboardValidationError, requireIsoString } from './core.js';
+import { getProductLocation, type RegiondoProductLocationType } from '../../modules/regiondo/regiondo.types.js';
 
 interface LocationRow {
   location_id: string;
@@ -19,6 +20,7 @@ interface LocationRow {
 export interface RegiondoLocationCandidate {
   addresses: string[];
   id: string;
+  locationType: RegiondoProductLocationType;
   locationNames: string[];
   title: string;
 }
@@ -188,38 +190,67 @@ export async function listLocations(): Promise<DashboardLocation[]> {
 }
 
 export async function listRegiondoLocationCandidates(): Promise<RegiondoLocationCandidate[]> {
-  const result = await pool.query<{
-    addresses: string[] | null;
-    location_id: string;
-    location_title: string | null;
-    location_names: string[] | null;
-  }>(
-    `SELECT
-       p.regiondo_raw ->> 'location_id' AS location_id,
-       MAX(COALESCE(
-         NULLIF(BTRIM(p.regiondo_raw ->> 'location_name'), ''),
-         NULLIF(BTRIM(p.regiondo_raw ->> 'city'), '')
-       )) AS location_title,
-       ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(p.regiondo_raw ->> 'location_name'), '')), NULL) AS location_names,
-       ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(p.regiondo_raw ->> 'location_address'), '')), NULL) AS addresses
-     FROM products p
-     WHERE p.regiondo_product_id IS NOT NULL
-       AND NULLIF(BTRIM(p.regiondo_raw ->> 'location_id'), '') IS NOT NULL
-       AND NOT EXISTS (
-         SELECT 1 FROM locations l
-         WHERE l.regiondo_location_id = p.regiondo_raw ->> 'location_id'
-       )
-     GROUP BY p.regiondo_raw ->> 'location_id'
-     ORDER BY MAX(NULLIF(BTRIM(p.regiondo_raw ->> 'location_name'), '')) ASC NULLS LAST,
-              p.regiondo_raw ->> 'location_id' ASC`
-  );
+  const [productsResult, mappedResult] = await Promise.all([
+    pool.query<{ regiondo_raw: unknown }>(
+      `SELECT regiondo_raw
+       FROM products
+       WHERE regiondo_product_id IS NOT NULL
+         AND regiondo_raw IS NOT NULL
+         AND (regiondo_raw ? 'city_id' OR regiondo_raw ? 'region_id')`
+    ),
+    pool.query<{ regiondo_location_id: string }>(
+      `SELECT regiondo_location_id
+       FROM locations
+       WHERE regiondo_location_id IS NOT NULL`
+    )
+  ]);
+  const mappedIds = new Set(mappedResult.rows.map((row) => row.regiondo_location_id));
+  const candidates = new Map<string, RegiondoLocationCandidate>();
 
-  return result.rows.map((row) => ({
-    addresses: row.addresses ?? [],
-    id: row.location_id,
-    locationNames: row.location_names ?? [],
-    title: row.location_title ?? row.location_names?.[0] ?? `Regiondo location ${row.location_id}`
-  }));
+  for (const row of productsResult.rows) {
+    if (typeof row.regiondo_raw !== 'object' || row.regiondo_raw === null || Array.isArray(row.regiondo_raw)) continue;
+    const raw = row.regiondo_raw as Record<string, unknown>;
+
+    for (const locationType of ['city', 'region'] as const) {
+      let reference: ReturnType<typeof getProductLocation>;
+      try {
+        reference = getProductLocation(raw, locationType);
+      } catch {
+        continue;
+      }
+
+      const id = `${reference.locationId}`;
+      if (mappedIds.has(id)) continue;
+      const key = `${reference.locationType}:${id}`;
+      const existing = candidates.get(key);
+      const locationName = typeof raw.location_name === 'string' && raw.location_name.trim()
+        ? raw.location_name.trim()
+        : null;
+      const cityName = typeof raw.city === 'string' && raw.city.trim() ? raw.city.trim() : null;
+      const address = typeof raw.location_address === 'string' && raw.location_address.trim()
+        ? raw.location_address.trim()
+        : null;
+      const fallbackTitle = reference.locationType === 'city' ? cityName : null;
+
+      if (existing) {
+        if (locationName && !existing.locationNames.includes(locationName)) existing.locationNames.push(locationName);
+        if (address && !existing.addresses.includes(address)) existing.addresses.push(address);
+        continue;
+      }
+
+      candidates.set(key, {
+        addresses: address ? [address] : [],
+        id,
+        locationNames: locationName ? [locationName] : [],
+        locationType: reference.locationType,
+        title: fallbackTitle ?? locationName ?? `Regiondo ${reference.locationType} ${id}`
+      });
+    }
+  }
+
+  return [...candidates.values()].sort((left, right) =>
+    left.title.localeCompare(right.title) || left.id.localeCompare(right.id)
+  );
 }
 
 export async function getLocation(locationId: string): Promise<DashboardLocation> {

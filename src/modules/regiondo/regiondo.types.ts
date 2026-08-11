@@ -39,6 +39,50 @@ const optionalRegiondoNumberSchema = z.preprocess((value) => {
   return value;
 }, z.coerce.number().finite().optional());
 
+export const regiondoLocationTypeSchema = z.enum(['continent', 'country', 'region', 'poi', 'city']);
+
+export const regiondoLocationSchema = z
+  .object({
+    id: z.coerce.number().int().positive(),
+    location_type: regiondoLocationTypeSchema,
+    is_general: z.coerce.number().int(),
+    location_name: z.string().trim().min(1),
+    country_code: z.string().trim().min(1),
+    url_key: z.string(),
+    url_path: z.string(),
+    center_latitude: optionalRegiondoNumberSchema,
+    center_longitude: optionalRegiondoNumberSchema,
+    location_name_alternative: optionalTrimmedStringSchema,
+    location_poi_type: optionalTrimmedStringSchema
+  })
+  .passthrough();
+
+export const regiondoLocationsSchema = z.array(regiondoLocationSchema);
+
+export type RegiondoProductLocationType = 'city' | 'region';
+
+export function getProductLocation(
+  product: unknown,
+  type: RegiondoProductLocationType
+): { locationId: number; locationType: RegiondoProductLocationType } {
+  if (typeof product !== 'object' || product === null || Array.isArray(product)) {
+    throw new TypeError('Regiondo product location data must be an object.');
+  }
+
+  const field = type === 'city' ? 'city_id' : 'region_id';
+  const value = (product as Record<string, unknown>)[field];
+  if (value === null || value === undefined || (typeof value === 'string' && value.trim() === '')) {
+    throw new TypeError(`Regiondo product is missing ${field}.`);
+  }
+
+  const locationId = typeof value === 'number' ? value : Number(String(value).trim());
+  if (!Number.isInteger(locationId) || locationId <= 0) {
+    throw new TypeError(`Regiondo product ${field} must be a positive integer.`);
+  }
+
+  return { locationId, locationType: type };
+}
+
 export const regiondoCatalogVariationOptionSchema = z
   .object({
     option_id: requiredRegiondoIdentifierSchema,
@@ -222,3 +266,5 @@ export type RegiondoWebhookPayload = z.infer<typeof regiondoWebhookPayloadSchema
 export type RegiondoPurchaseData = z.infer<typeof regiondoPurchaseDataSchema>;
 export type RegiondoSoldItem = z.infer<typeof regiondoSoldItemSchema>;
 export type RegiondoSupplierBooking = z.infer<typeof regiondoSupplierBookingSchema>;
+export type RegiondoLocationType = z.infer<typeof regiondoLocationTypeSchema>;
+export type RegiondoLocation = z.infer<typeof regiondoLocationSchema>;

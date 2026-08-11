@@ -5,9 +5,13 @@ import { signRegiondoRequest } from './regiondo.auth.js';
 import { RegiondoCatalogSyncError } from './regiondo-catalog.errors.js';
 import {
   regiondoCatalogProductsSchema,
+  regiondoLocationSchema,
+  regiondoLocationsSchema,
   regiondoPurchaseDataSchema,
   regiondoSupplierBookingsSchema,
   type RegiondoCatalogProduct,
+  type RegiondoLocation,
+  type RegiondoLocationType,
   type RegiondoPurchaseData,
   type RegiondoSupplierBooking
 } from './regiondo.types.js';
@@ -116,6 +120,14 @@ export interface RegiondoListSupplierBookingsInput {
   type?: string;
 }
 
+export interface RegiondoListLocationsInput {
+  limit?: number;
+  offset?: number;
+  locationType?: RegiondoLocationType;
+  isGeneral?: 0 | 1;
+  countryCode?: string;
+}
+
 interface RegiondoClientOptions {
   baseUrl: string;
   catalogPageSize: number;
@@ -173,6 +185,16 @@ export class RegiondoPayloadError extends RegiondoApiError {
   constructor(message: string, details: string) {
     super(message, 502, details);
     this.name = 'RegiondoPayloadError';
+  }
+}
+
+export class RegiondoLocationValidationError extends RegiondoApiError {
+  constructor(message: string, cause?: unknown) {
+    super(message, 400);
+    this.name = 'RegiondoLocationValidationError';
+    if (cause !== undefined) {
+      this.cause = cause;
+    }
   }
 }
 
@@ -837,6 +859,56 @@ export class RegiondoClient {
   async getObject<T>(pathname: string, params: Record<string, string> = {}): Promise<T> {
     const body = await this.requestJson<RegiondoObjectResponse<T> | T>(pathname, { params });
     return this.unwrapObjectResponse(body);
+  }
+
+  async getLocations(input: RegiondoListLocationsInput = {}): Promise<RegiondoLocation[]> {
+    const requestedLimit = input.limit ?? 250;
+    const requestedOffset = input.offset ?? 0;
+    if (!Number.isInteger(requestedLimit) || requestedLimit <= 0) {
+      throw new RegiondoLocationValidationError('Regiondo location list limit must be a positive integer.');
+    }
+    if (!Number.isInteger(requestedOffset) || requestedOffset < 0) {
+      throw new RegiondoLocationValidationError('Regiondo location list offset must be a non-negative integer.');
+    }
+
+    const rawLocations = await this.getCollection<unknown>('/locations', {
+      limit: `${Math.min(requestedLimit, 250)}`,
+      ...(requestedOffset > 0 ? { offset: `${requestedOffset}` } : {}),
+      ...(input.locationType ? { location_type: input.locationType } : {}),
+      ...(input.isGeneral !== undefined ? { is_general: `${input.isGeneral}` } : {}),
+      ...(input.countryCode?.trim() ? { country_code: input.countryCode.trim() } : {})
+    });
+
+    return parseRegiondoPayload(regiondoLocationsSchema, rawLocations, 'locations response');
+  }
+
+  async getLocation(locationId: number): Promise<RegiondoLocation> {
+    if (!Number.isInteger(locationId) || locationId <= 0) {
+      throw new RegiondoLocationValidationError('Regiondo location ID must be a positive integer.');
+    }
+
+    try {
+      const rawLocation = await this.getObject<unknown>(`/locations/${locationId}`);
+      return parseRegiondoPayload(regiondoLocationSchema, rawLocation, 'location response');
+    } catch (error) {
+      if (error instanceof RegiondoApiError && error.status === 404) {
+        throw new RegiondoLocationValidationError(`Regiondo location ID ${locationId} was not found.`, error);
+      }
+      throw error;
+    }
+  }
+
+  async validateLocation(
+    locationId: number,
+    expectedType?: RegiondoLocationType
+  ): Promise<RegiondoLocation> {
+    const location = await this.getLocation(locationId);
+    if (expectedType && location.location_type !== expectedType) {
+      throw new RegiondoLocationValidationError(
+        `Regiondo location ID ${locationId} is a ${location.location_type}, not a ${expectedType}.`
+      );
+    }
+    return location;
   }
 
   async getCatalogProducts(): Promise<RegiondoCatalogProduct[]> {

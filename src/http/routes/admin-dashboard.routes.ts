@@ -54,6 +54,8 @@ import {
   DashboardValidationError
 } from '../../dashboard/repository/core.js';
 import type { DashboardTaskRawJson } from '../../dashboard/types.js';
+import { regiondoClient } from '../../modules/regiondo/regiondo.client.js';
+import { regiondoLocationTypeSchema } from '../../modules/regiondo/regiondo.types.js';
 
 const taskColumnIdSchema = z.union([z.string().uuid(), z.literal('none')]);
 const taskRawJsonValueSchema: z.ZodType<unknown> = z.lazy(() =>
@@ -205,10 +207,14 @@ const mapLocationToRegiondoSchema = z
   .object({
     sourceLocationId: z.string().uuid().optional(),
     regiondoLocationId: z.string().trim().min(1).optional(),
+    regiondoLocationType: regiondoLocationTypeSchema.optional(),
     title: z.string().trim().min(1).optional()
   })
   .refine((value) => Boolean(value.sourceLocationId) !== Boolean(value.regiondoLocationId), {
     message: 'Provide either a discovered Regiondo location or a Regiondo location ID.'
+  })
+  .refine((value) => !value.regiondoLocationType || Boolean(value.regiondoLocationId), {
+    message: 'Regiondo location type requires a Regiondo location ID.'
   });
 
 const listTasksQuerySchema = z.object({
@@ -655,7 +661,13 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
     }
 
     try {
-      const location = await createLocation(parsed.data);
+      const validatedRegiondoLocation = parsed.data.regiondoLocationId
+        ? await regiondoClient.validateLocation(Number(parsed.data.regiondoLocationId))
+        : null;
+      const location = await createLocation({
+        ...parsed.data,
+        ...(validatedRegiondoLocation ? { regiondoLocationId: `${validatedRegiondoLocation.id}` } : {})
+      });
       await recordAdminWriteAudit({
         request,
         auth,
@@ -679,11 +691,16 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
 
     try {
       const { locationId } = request.params as { locationId: string };
+      const validatedRegiondoLocation = parsed.data.regiondoLocationId
+        ? await regiondoClient.validateLocation(Number(parsed.data.regiondoLocationId))
+        : null;
       const location = await updateLocation(locationId, {
         title: parsed.data.title,
         description: parsed.data.description ?? undefined,
         imageUrl: parsed.data.imageUrl ?? undefined,
-        regiondoLocationId: parsed.data.regiondoLocationId ?? undefined
+        regiondoLocationId: validatedRegiondoLocation
+          ? `${validatedRegiondoLocation.id}`
+          : parsed.data.regiondoLocationId
       });
       await recordAdminWriteAudit({
         request,
@@ -701,7 +718,21 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
 
   app.get('/api/admin/regiondo/location-candidates', async (request) => {
     await requireAdminPermission(request as AdminFastifyRequest, 'locations', 'view');
-    return { items: await listRegiondoLocationCandidates() };
+    const candidates = await listRegiondoLocationCandidates();
+    const items = await Promise.all(candidates.map(async (candidate) => {
+      const location = await regiondoClient.validateLocation(Number(candidate.id), candidate.locationType);
+      return {
+        ...candidate,
+        id: `${location.id}`,
+        locationNames: [
+          location.location_name,
+          ...(location.location_name_alternative ? [location.location_name_alternative] : []),
+          ...candidate.locationNames
+        ].filter((value, index, values) => values.indexOf(value) === index),
+        title: location.location_name
+      };
+    }));
+    return { items };
   });
 
   app.post('/api/admin/locations/:locationId/regiondo-mapping', async (request) => {
@@ -711,15 +742,19 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
 
     try {
       const { locationId } = request.params as { locationId: string };
-      const { regiondoLocationId, sourceLocationId, title } = parsed.data;
+      const { regiondoLocationId, regiondoLocationType, sourceLocationId, title } = parsed.data;
       let location;
       if (sourceLocationId) {
         await requireAdminPermission(request as AdminFastifyRequest, 'locations', 'delete');
         location = await mapLocationToRegiondo(locationId, { sourceLocationId, title });
       } else {
         if (!regiondoLocationId) throw new ValidationHttpError('Enter a Regiondo location ID.');
+        const validatedRegiondoLocation = await regiondoClient.validateLocation(
+          Number(regiondoLocationId),
+          regiondoLocationType
+        );
         location = await updateLocation(locationId, {
-          regiondoLocationId,
+          regiondoLocationId: `${validatedRegiondoLocation.id}`,
           ...(title ? { title } : {})
         });
       }
@@ -731,7 +766,8 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
         entityId: location.id,
         details: {
           sourceLocationId: sourceLocationId ?? null,
-          regiondoLocationId: location.regiondoLocationId
+          regiondoLocationId: location.regiondoLocationId,
+          regiondoLocationType: regiondoLocationType ?? null
         }
       });
       return { item: location };

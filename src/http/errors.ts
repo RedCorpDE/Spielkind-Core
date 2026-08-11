@@ -4,6 +4,7 @@ import {
   RegiondoApiError,
   RegiondoAuthError,
   RegiondoBookingUpdateUnsupportedError,
+  RegiondoLocationValidationError,
   RegiondoPurchaseRecoveryRequiredError,
   RegiondoRateLimitError,
   RegiondoTransientError
@@ -85,6 +86,9 @@ function getStatusCode(error: Error): number {
 
 function classifyError(error: Error, status: number): { code: string; severity: AdminErrorSeverity; source: string } {
   const message = error.message.toLowerCase();
+  if (error instanceof RegiondoLocationValidationError) {
+    return { code: 'REGIONDO_LOCATION_INVALID', severity: 'warning', source: 'regiondo' };
+  }
   if (error instanceof RegiondoBookingUpdateUnsupportedError) {
     return { code: 'REGIONDO_BOOKING_UPDATE_UNSUPPORTED', severity: 'warning', source: 'regiondo' };
   }
@@ -196,6 +200,15 @@ export function registerErrorHandler() {
         ok: false,
         code: 'REGIONDO_BOOKING_UPDATE_UNSUPPORTED',
         retryable: false,
+        error: error.message
+      });
+      return;
+    }
+
+    if (error instanceof RegiondoLocationValidationError) {
+      reply.status(400).send({
+        ok: false,
+        code: 'REGIONDO_LOCATION_INVALID',
         error: error.message
       });
       return;

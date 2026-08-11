@@ -67,24 +67,40 @@ describe('Regiondo location mapping', () => {
     expect(locations[0].providerDataStatus).toBe('none');
   });
 
-  it('only turns explicit catalog location IDs into Regiondo mapping candidates', async () => {
-    poolQuery.mockResolvedValue({
-      rowCount: 1,
-      rows: [{
-        addresses: ['Kleine Burg 15, Braunschweig, Deutschland'],
-        location_id: 'location-22',
-        location_title: 'VirtuaLounge',
-        location_names: ['VirtuaLounge']
-      }]
+  it('turns product city and region IDs into typed Regiondo mapping candidates', async () => {
+    poolQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('SELECT regiondo_raw')) {
+        return {
+          rowCount: 1,
+          rows: [{
+            regiondo_raw: {
+              city: 'Braunschweig',
+              city_id: '5467',
+              location_address: 'Kleine Burg 15, Braunschweig, Deutschland',
+              location_name: 'VirtuaLounge',
+              region_id: 40843
+            }
+          }]
+        };
+      }
+      return { rowCount: 0, rows: [] };
     });
 
-    await expect(listRegiondoLocationCandidates()).resolves.toEqual([{
-      addresses: ['Kleine Burg 15, Braunschweig, Deutschland'],
-      id: 'location-22',
-      locationNames: ['VirtuaLounge'],
-      title: 'VirtuaLounge'
-    }]);
-    expect(poolQuery.mock.calls[0][0]).toContain("regiondo_raw ->> 'location_id'");
-    expect(poolQuery.mock.calls[0][0]).not.toContain("regiondo_raw ->> 'city_id' AS");
+    await expect(listRegiondoLocationCandidates()).resolves.toEqual([
+      {
+        addresses: ['Kleine Burg 15, Braunschweig, Deutschland'],
+        id: '5467',
+        locationNames: ['VirtuaLounge'],
+        locationType: 'city',
+        title: 'Braunschweig'
+      },
+      {
+        addresses: ['Kleine Burg 15, Braunschweig, Deutschland'],
+        id: '40843',
+        locationNames: ['VirtuaLounge'],
+        locationType: 'region',
+        title: 'VirtuaLounge'
+      }
+    ]);
   });
 });
