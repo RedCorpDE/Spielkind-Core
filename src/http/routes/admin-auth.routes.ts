@@ -26,6 +26,7 @@ import {
   type AdminFastifyRequest
 } from '../admin.js';
 import { ValidationHttpError } from '../errors.js';
+import { recordAdminErrorEvent } from '../../errors/admin-error-events.repository.js';
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -34,6 +35,14 @@ const loginSchema = z.object({
 
 function buildSessionExpiry(): string {
   return new Date(Date.now() + appConfig.ADMIN_SESSION_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
+}
+
+async function recordAuthError(input: Parameters<typeof recordAdminErrorEvent>[0]): Promise<void> {
+  try {
+    await recordAdminErrorEvent(input);
+  } catch {
+    // Authentication behavior must not depend on error-event storage.
+  }
 }
 
 export async function registerAdminAuthRoutes(app: FastifyInstance): Promise<void> {
@@ -48,6 +57,12 @@ export async function registerAdminAuthRoutes(app: FastifyInstance): Promise<voi
     const blockedMessage = checkLoginAttemptLimit(loginAttemptKey);
 
     if (blockedMessage) {
+      await recordAuthError({
+        correlationId: request.id,
+        dedupeKey: `request:${request.id}`,
+        source: 'authentication', severity: 'warning', errorCode: 'AUTH_RATE_LIMITED',
+        actorType: 'anonymous', actorName: 'Anonymous', operation: 'POST /api/admin/auth/login', httpStatus: 429
+      });
       reply.code(429);
       return { ok: false, error: blockedMessage };
     }
@@ -63,6 +78,12 @@ export async function registerAdminAuthRoutes(app: FastifyInstance): Promise<voi
         requestId: metadata.requestId,
         ipAddress: metadata.ipAddress,
         userAgent: metadata.userAgent
+      });
+      await recordAuthError({
+        correlationId: request.id,
+        dedupeKey: `request:${request.id}`,
+        source: 'authentication', severity: 'warning', errorCode: 'AUTH_INVALID_CREDENTIALS',
+        actorType: 'anonymous', actorName: 'Anonymous', operation: 'POST /api/admin/auth/login', httpStatus: 401
       });
       reply.code(401);
       return { ok: false, error: 'Invalid email or password.' };
@@ -103,6 +124,12 @@ export async function registerAdminAuthRoutes(app: FastifyInstance): Promise<voi
   app.post('/api/admin/auth/refresh', async (request, reply) => {
     const refreshToken = getRefreshTokenFromRequest(request);
     if (!refreshToken) {
+      await recordAuthError({
+        correlationId: request.id,
+        dedupeKey: `request:${request.id}`,
+        source: 'authentication', severity: 'warning', errorCode: 'AUTH_SESSION_EXPIRED',
+        actorType: 'anonymous', actorName: 'Anonymous', operation: 'POST /api/admin/auth/refresh', httpStatus: 401
+      });
       reply.code(401);
       return { ok: false, error: 'Refresh token is missing.' };
     }
@@ -110,6 +137,12 @@ export async function registerAdminAuthRoutes(app: FastifyInstance): Promise<voi
     const auth = await findAuthenticatedAdminByRefreshToken(refreshToken);
     if (!auth || !auth.user.isActive || !auth.user.canAccessDashboard) {
       clearRefreshTokenCookie(reply);
+      await recordAuthError({
+        correlationId: request.id,
+        dedupeKey: `request:${request.id}`,
+        source: 'authentication', severity: 'warning', errorCode: 'AUTH_SESSION_EXPIRED',
+        actorType: 'anonymous', actorName: 'Anonymous', operation: 'POST /api/admin/auth/refresh', httpStatus: 401
+      });
       reply.code(401);
       return { ok: false, error: 'Refresh token is invalid.' };
     }

@@ -11,6 +11,7 @@ import { registerAdminRegiondoRoutes } from './http/routes/admin-regiondo.routes
 import { registerAdminReminderRoutes } from './http/routes/admin-reminders.routes.js';
 import { registerAdminResourceRoutes } from './http/routes/admin-resources.routes.js';
 import { registerAdminTaskBookingOptionRoutes } from './http/routes/admin-task-booking-options.routes.js';
+import { registerAdminErrorEventRoutes } from './http/routes/admin-error-events.routes.js';
 import { registerAdminDashboardRoutes } from './http/routes/admin-dashboard.routes.js';
 import { registerExternalTaskIntakeRoutes } from './http/routes/external-task-intake.routes.js';
 import { registerHealthRoutes } from './http/routes/health.routes.js';
@@ -19,6 +20,7 @@ import { registerRegiondoWebhookRoutes } from './http/routes/regiondo-webhook.ro
 
 export function createApp() {
   const app = Fastify({
+    requestIdHeader: 'x-request-id',
     logger: {
       level: appConfig.LOG_LEVEL,
       redact: {
@@ -72,6 +74,7 @@ export function createApp() {
   void registerAdminRegiondoRoutes(app);
   void registerAdminResourceRoutes(app);
   void registerAdminTaskBookingOptionRoutes(app);
+  void registerAdminErrorEventRoutes(app);
   void registerAdminDashboardRoutes(app);
 
   return app;

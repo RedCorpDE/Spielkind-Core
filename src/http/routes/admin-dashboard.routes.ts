@@ -4,7 +4,7 @@ import { hasRoutePermission } from '../../access-control/model.js';
 import { listRoleMatrix, replaceRolePermissions } from '../../access-control/repository.js';
 import { requireAdminAuth, type AdminFastifyRequest } from '../admin.js';
 import { requireAdminPermission, getAdminAccessContext } from '../access-control.js';
-import { HttpError, ValidationHttpError } from '../errors.js';
+import { ConflictHttpError, HttpError, ValidationHttpError } from '../errors.js';
 import { recordAdminWriteAudit } from '../admin-audit.js';
 import {
   createTask,
@@ -20,7 +20,13 @@ import {
   createTaskComment,
   listTaskComments
 } from '../../dashboard/repository/task-comments.js';
-import { createBookingFromTask, getBooking } from '../../dashboard/repository/bookings.js';
+import {
+  createBookingFromTask,
+  getBooking,
+  getTaskBookingContext,
+  syncLinkedTasksFromBooking,
+  updateBooking
+} from '../../dashboard/repository/bookings.js';
 import {
   createTaskColumn,
   deleteTaskColumn,
@@ -41,6 +47,7 @@ import { listUsers, updateUserRole } from '../../dashboard/repository/users.js';
 import { createRole, deleteRole, listRoles, updateRole } from '../../dashboard/repository/roles.js';
 import { listTaskBookingOptions } from '../../dashboard/repository/task-booking-options.js';
 import {
+  DashboardConflictError,
   DashboardNotFoundError,
   DashboardValidationError
 } from '../../dashboard/repository/core.js';
@@ -84,6 +91,75 @@ const updateTaskSchema = z.object({
   columnId: taskColumnIdSchema.nullable(),
   connectedBookingId: z.string().uuid().nullable().optional()
 });
+
+const linkedBookingSharedSchema = z
+  .object({
+    attendees: z.coerce.number().int().positive().optional(),
+    bookingDate: z.string().optional(),
+    bookingEndDate: z.string().optional(),
+    contact: z
+      .object({
+        email: z.string().trim().email().nullable().optional(),
+        firstName: z.string().trim().min(1).optional(),
+        lastName: z.string().trim().min(1).optional(),
+        phoneNumber: z.string().nullable().optional()
+      })
+      .optional(),
+    locationId: z.string().uuid().nullable().optional()
+  })
+  .refine((value) => Object.keys(value).length > 0, {
+    message: 'At least one shared booking field must be provided.'
+  });
+
+const updateTaskWithLinkedBookingsSchema = z.object({
+  task: updateTaskSchema,
+  sharedBooking: linkedBookingSharedSchema.optional(),
+  expectedLinkedContextVersion: z.string().optional()
+});
+
+function asRawRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function sharedTaskRawProjection(rawJson: DashboardTaskRawJson | undefined): Record<string, unknown> {
+  const raw = asRawRecord(rawJson);
+  const bookingData = asRawRecord(raw.booking_data ?? raw.bookingData);
+  const contactData = asRawRecord(bookingData.contact_data ?? bookingData.contactData);
+  return {
+    attendees: bookingData.attendees ?? null,
+    bookingEndDateTime: bookingData.booking_end_date_time ?? bookingData.bookingEndDateTime ?? null,
+    customerEmail: bookingData.email ?? null,
+    firstName: contactData.first_name ?? contactData.firstName ?? null,
+    lastName: contactData.last_name ?? contactData.lastName ?? null,
+    locationId: bookingData.location_id ?? bookingData.locationId ?? null,
+    phoneNumber: bookingData.phone_number ?? bookingData.phoneNumber ?? null
+  };
+}
+
+function dateTimeValuesDiffer(left: string | null, right: string | null): boolean {
+  if (left === right) {
+    return false;
+  }
+  if (!left || !right) {
+    return true;
+  }
+  const leftTime = Date.parse(left);
+  const rightTime = Date.parse(right);
+  return Number.isNaN(leftTime) || Number.isNaN(rightTime) || leftTime !== rightTime;
+}
+
+function taskPayloadChangesSharedFields(
+  current: Awaited<ReturnType<typeof getTask>>,
+  input: z.infer<typeof updateTaskSchema>
+): boolean {
+  return (
+    dateTimeValuesDiffer(current.eventDateTime, input.eventDateTime) ||
+    current.site.trim() !== input.site.trim() ||
+    (input.rawJson !== undefined &&
+      JSON.stringify(sharedTaskRawProjection(current.rawJson)) !==
+        JSON.stringify(sharedTaskRawProjection(input.rawJson as DashboardTaskRawJson)))
+  );
+}
 
 const createTaskCommentSchema = z.object({
   body: z.string().trim().min(1)
@@ -160,6 +236,9 @@ const replaceRolePermissionsSchema = z.object({
 });
 
 function sendError(error: unknown): never {
+  if (error instanceof DashboardConflictError) {
+    throw new ConflictHttpError(error.message);
+  }
   if (error instanceof DashboardNotFoundError) {
     throw new HttpError(404, error.message);
   }
@@ -830,6 +909,94 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
     }
   });
 
+  app.get('/api/admin/tasks/:taskId/booking-context', async (request) => {
+    await requireAdminPermission(request as AdminFastifyRequest, 'tasks', 'view');
+    await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'view');
+    const { taskId } = request.params as { taskId: string };
+
+    try {
+      return { item: await getTaskBookingContext(taskId) };
+    } catch (error) {
+      sendError(error);
+    }
+  });
+
+  app.patch('/api/admin/tasks/:taskId/with-linked-bookings', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'tasks', 'update');
+    const parsed = updateTaskWithLinkedBookingsSchema.safeParse(request.body);
+    if (!parsed.success) {
+      throw new ValidationHttpError('Invalid linked task update payload.');
+    }
+
+    const { taskId } = request.params as { taskId: string };
+    const actor = {
+      name: auth.user.displayName,
+      role: auth.user.role,
+      source: 'user' as const
+    };
+
+    try {
+      const currentTask = await getTask(taskId);
+      const changesSharedFields =
+        Boolean(currentTask.connectedBookingId) && taskPayloadChangesSharedFields(currentTask, parsed.data.task);
+      if (changesSharedFields && !parsed.data.sharedBooking) {
+        throw new DashboardValidationError(
+          'Linked booking fields must be changed through the sharedBooking patch.'
+        );
+      }
+
+      let bookingContext = null;
+      if (parsed.data.sharedBooking) {
+        await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'update');
+        bookingContext = await getTaskBookingContext(taskId);
+        await updateBooking(
+          bookingContext.primaryBookingId,
+          {
+            ...parsed.data.sharedBooking,
+            expectedLinkedContextVersion: parsed.data.expectedLinkedContextVersion
+          },
+          actor
+        );
+      }
+
+      let task = await updateTask(
+        taskId,
+        {
+          ...parsed.data.task,
+          rawJson: parsed.data.task.rawJson as DashboardTaskRawJson | undefined
+        },
+        actor
+      );
+
+      if (bookingContext && parsed.data.sharedBooking) {
+        await syncLinkedTasksFromBooking(bookingContext.primaryBookingId, parsed.data.sharedBooking, actor);
+        task = await getTask(taskId);
+      }
+
+      await recordAdminWriteAudit({
+        request,
+        auth,
+        action: 'admin.task.updated_with_linked_bookings',
+        entityType: 'task',
+        entityId: task.id,
+        details: {
+          changedSharedFields: parsed.data.sharedBooking ? Object.keys(parsed.data.sharedBooking) : [],
+          linkedBookingIds: bookingContext?.linkedBookings.map((booking) => booking.id) ?? [],
+          origin: 'task'
+        }
+      });
+
+      return {
+        item: task,
+        bookings: bookingContext
+          ? await Promise.all(bookingContext.linkedBookings.map((booking) => getBooking(booking.id)))
+          : []
+      };
+    } catch (error) {
+      sendError(error);
+    }
+  });
+
   app.patch('/api/admin/tasks/:taskId', async (request) => {
     const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'tasks', 'update');
     const parsed = updateTaskSchema.safeParse(request.body);
@@ -838,23 +1005,34 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
     }
 
     const { taskId } = request.params as { taskId: string };
-    const task = await updateTask(taskId, {
-      ...parsed.data,
-      rawJson: parsed.data.rawJson as DashboardTaskRawJson | undefined
-    }, {
-      name: auth.user.displayName,
-      role: auth.user.role,
-      source: 'user'
-    });
-    await recordAdminWriteAudit({
-      request,
-      auth,
-      action: 'admin.task.updated',
-      entityType: 'task',
-      entityId: task.id,
-      details: parsed.data
-    });
-    return { item: task };
+    try {
+      const currentTask = await getTask(taskId);
+      if (currentTask.connectedBookingId && taskPayloadChangesSharedFields(currentTask, parsed.data)) {
+        throw new DashboardValidationError(
+          'Linked booking fields must be changed through the linked booking update endpoint.'
+        );
+      }
+
+      const task = await updateTask(taskId, {
+        ...parsed.data,
+        rawJson: parsed.data.rawJson as DashboardTaskRawJson | undefined
+      }, {
+        name: auth.user.displayName,
+        role: auth.user.role,
+        source: 'user'
+      });
+      await recordAdminWriteAudit({
+        request,
+        auth,
+        action: 'admin.task.updated',
+        entityType: 'task',
+        entityId: task.id,
+        details: parsed.data
+      });
+      return { item: task };
+    } catch (error) {
+      sendError(error);
+    }
   });
 
   app.delete('/api/admin/tasks/:taskId', async (request) => {

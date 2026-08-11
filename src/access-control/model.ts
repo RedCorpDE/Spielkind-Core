@@ -19,6 +19,7 @@ export type PermissionResource =
   | 'customers'
   | 'client_groups'
   | 'resources'
+  | 'errors'
   | 'regiondo';
 
 export interface PermissionDefinition {
@@ -165,6 +166,12 @@ export const permissionDefinitions: PermissionDefinition[] = [
     label: 'Regiondo',
     description: 'Inspect Regiondo sync state and retry operational sync actions.',
     actions: ['view', 'manage']
+  },
+  {
+    resource: 'errors',
+    label: 'Error Log',
+    description: 'View dashboard and operational errors and their sanitized diagnostics.',
+    actions: ['view', 'manage']
   }
 ];
 
@@ -226,7 +233,8 @@ const defaultRoleGrants: Record<string, PermissionGrant[]> = {
     ...grant('customers', { view: 'all', update: 'all', export: 'all' }),
     ...grant('client_groups', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all' }),
     ...grant('resources', { view: 'all', manage: 'all' }),
-    ...grant('regiondo', { view: 'all', manage: 'all' })
+    ...grant('regiondo', { view: 'all', manage: 'all' }),
+    ...grant('errors', { view: 'all', manage: 'all' })
   ],
   program_manager: [
     ...grant('dashboard', { view: 'all' }),

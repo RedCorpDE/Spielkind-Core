@@ -2,6 +2,7 @@ import { logger } from '../config/logger.js';
 import { advisoryLockKey, withSessionAdvisoryLock } from '../db/locks.js';
 import { completeJobRun, createJobRun } from './job-run.repository.js';
 import type { JobResult, JobType } from './job-types.js';
+import { recordAdminErrorEvent } from '../errors/admin-error-events.repository.js';
 
 interface RunJobOptions {
   jobType: JobType;
@@ -36,6 +37,21 @@ export async function runJobWithLock(options: RunJobOptions): Promise<JobResult>
         recordsProcessed: 0,
         errorMessage: error instanceof Error ? error.message : String(error)
       });
+      try {
+        await recordAdminErrorEvent({
+          dedupeKey: `job:${jobRunId}`,
+          source: 'background_job',
+          severity: 'error',
+          errorCode: 'BACKGROUND_JOB_FAILED',
+          diagnosticSummary: error instanceof Error ? error.message : 'Background job failed.',
+          actorType: 'system',
+          actorName: 'System',
+          operation: options.jobType,
+          jobRunId
+        });
+      } catch {
+        // Preserve the job failure if error-event recording is unavailable.
+      }
       throw error;
     }
   });

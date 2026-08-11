@@ -117,6 +117,7 @@ export type Queryable = Pick<PoolClient, 'query'>;
 
 export class DashboardValidationError extends Error {}
 export class DashboardNotFoundError extends DashboardValidationError {}
+export class DashboardConflictError extends DashboardValidationError {}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

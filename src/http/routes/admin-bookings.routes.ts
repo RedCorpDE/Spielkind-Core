@@ -1,11 +1,11 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { getBooking, listBookings, updateBooking } from '../../dashboard/repository/bookings.js';
-import { DashboardNotFoundError, DashboardValidationError } from '../../dashboard/repository/core.js';
+import { getBooking, getLinkedBookingIds, listBookings, updateBooking } from '../../dashboard/repository/bookings.js';
+import { DashboardConflictError, DashboardNotFoundError, DashboardValidationError } from '../../dashboard/repository/core.js';
 import { recordAdminWriteAudit } from '../admin-audit.js';
 import { type AdminFastifyRequest } from '../admin.js';
 import { requireAdminPermission } from '../access-control.js';
-import { HttpError, ValidationHttpError } from '../errors.js';
+import { ConflictHttpError, HttpError, ValidationHttpError } from '../errors.js';
 import {
   cancelBookingInRegiondo,
   cancelBookingLocally
@@ -58,6 +58,7 @@ const updateBookingSchema = z
       })
       .optional(),
     expectedLastUpdated: z.string().optional(),
+    expectedLinkedContextVersion: z.string().optional(),
     locationId: z.string().uuid().nullable().optional(),
     opsNotes: z.string().optional(),
     opsStatus: bookingOpsStatusSchema.optional(),
@@ -78,18 +79,26 @@ const updateBookingSchema = z
       )
       .optional()
   })
-  .refine((value) => Object.keys(value).some((key) => key !== 'expectedLastUpdated'), {
+  .refine(
+    (value) => Object.keys(value).some((key) => !['expectedLastUpdated', 'expectedLinkedContextVersion'].includes(key)),
+    {
     message: 'At least one booking field must be provided.'
-  });
+    }
+  );
 
 function buildBookingUpdateAuditDetails(input: Record<string, unknown>): Record<string, unknown> {
   return {
     ...input,
-    changedFields: Object.keys(input).filter((key) => key !== 'expectedLastUpdated')
+    changedFields: Object.keys(input).filter(
+      (key) => !['expectedLastUpdated', 'expectedLinkedContextVersion'].includes(key)
+    )
   };
 }
 
 function sendError(error: unknown): never {
+  if (error instanceof DashboardConflictError) {
+    throw new ConflictHttpError(error.message);
+  }
   if (error instanceof DashboardNotFoundError) {
     throw new HttpError(404, error.message);
   }
@@ -128,14 +137,23 @@ export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<
     const { bookingId } = request.params as { bookingId: string };
 
     try {
-      const booking = await updateBooking(bookingId, parsed.data);
+      const affectedBookingIds = await getLinkedBookingIds(bookingId);
+      const booking = await updateBooking(bookingId, parsed.data, {
+        name: auth.user.displayName,
+        role: auth.user.role,
+        source: 'user'
+      });
       await recordAdminWriteAudit({
         request,
         auth,
         action: 'admin.booking.updated',
         entityType: 'booking',
         entityId: booking.id,
-        details: buildBookingUpdateAuditDetails(parsed.data as Record<string, unknown>)
+        details: {
+          ...buildBookingUpdateAuditDetails(parsed.data as Record<string, unknown>),
+          affectedBookingIds,
+          origin: 'booking'
+        }
       });
 
       return { ok: true, item: booking };
@@ -153,14 +171,23 @@ export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<
 
     const { bookingId } = request.params as { bookingId: string };
     try {
-      const booking = await updateBooking(bookingId, parsed.data);
+      const affectedBookingIds = await getLinkedBookingIds(bookingId);
+      const booking = await updateBooking(bookingId, parsed.data, {
+        name: auth.user.displayName,
+        role: auth.user.role,
+        source: 'user'
+      });
       await recordAdminWriteAudit({
         request,
         auth,
         action: 'admin.booking.updated',
         entityType: 'booking',
         entityId: booking.id,
-        details: buildBookingUpdateAuditDetails(parsed.data as Record<string, unknown>)
+        details: {
+          ...buildBookingUpdateAuditDetails(parsed.data as Record<string, unknown>),
+          affectedBookingIds,
+          origin: 'booking'
+        }
       });
 
       return { ok: true, item: booking };

@@ -1,4 +1,5 @@
 import { pool } from '../../db/pool.js';
+import { recordAdminErrorEvent } from '../../errors/admin-error-events.repository.js';
 import {
   buildReminderTemplateVariables,
   renderReminderTemplate
@@ -366,12 +367,24 @@ export async function markReminderDeliverySent(reminderDeliveryId: string, provi
 }
 
 export async function markReminderDeliveryFailed(reminderDeliveryId: string, errorMessage: string): Promise<void> {
-  await pool.query(
+  const result = await pool.query<{ booking_id: string }>(
     `UPDATE reminder_deliveries
      SET status = 'failed',
          last_error = $2,
          locked_at = null
-     WHERE reminder_delivery_id = $1`,
+     WHERE reminder_delivery_id = $1
+     RETURNING booking_id`,
     [reminderDeliveryId, errorMessage]
   );
+  try {
+    await recordAdminErrorEvent({
+      dedupeKey: `reminder:${reminderDeliveryId}:${Date.now()}`,
+      source: 'reminder', severity: 'error', errorCode: 'REMINDER_DELIVERY_FAILED',
+      diagnosticSummary: errorMessage, actorType: 'system', actorName: 'Reminder worker',
+      entityType: 'reminder_delivery', entityId: reminderDeliveryId,
+      reminderDeliveryId, bookingId: result.rows[0]?.booking_id
+    });
+  } catch {
+    // Reminder state remains authoritative when error-event storage is unavailable.
+  }
 }

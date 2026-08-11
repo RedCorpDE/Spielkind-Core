@@ -13,8 +13,10 @@ const protectedReadPaths = [
   '/api/admin/task-columns/00000000-0000-0000-0000-000000000001',
   '/api/admin/tasks',
   '/api/admin/tasks/00000000-0000-0000-0000-000000000001',
+  '/api/admin/tasks/00000000-0000-0000-0000-000000000001/booking-context',
   '/api/admin/tasks/00000000-0000-0000-0000-000000000001/comments',
   '/api/admin/bookings/00000000-0000-0000-0000-000000000001/tasks',
+  '/api/admin/error-events',
   '/api/admin/deleted-tasks'
 ] as const;
 
@@ -28,6 +30,19 @@ const protectedWritePaths = [
     method: 'POST',
     path: '/api/admin/tasks/00000000-0000-0000-0000-000000000001/comments',
     body: { body: 'Looks good.' }
+  },
+  {
+    method: 'PATCH',
+    path: '/api/admin/tasks/00000000-0000-0000-0000-000000000001/with-linked-bookings',
+    body: {
+      task: {
+        columnId: null,
+        description: '',
+        eventDateTime: null,
+        site: '',
+        title: 'Linked task'
+      }
+    }
   }
 ] as const;
 

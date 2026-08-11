@@ -262,7 +262,7 @@ describe('dashboard booking update location overrides', () => {
     expect(upsertNormalizedRegiondoBookingMock).not.toHaveBeenCalled();
   });
 
-  it('pushes supported Regiondo edits but keeps no location local', async () => {
+  it('includes the unchanged provider location with supported Regiondo edits', async () => {
     setupRepositoryQueries({
       currentRow: createCurrentBookingRow({
         source: 'regiondo',
@@ -270,6 +270,10 @@ describe('dashboard booking update location overrides', () => {
         regiondo_order_number: 'order-1'
       }),
       finalRow: createFinalBookingRow({
+        location_id: knownLocationId,
+        location_title: 'Berlin Mitte',
+        location_regiondo_location_id: 'regiondo-location-1',
+        location_override: null,
         source: 'regiondo',
         regiondo_booking_id: 'booking-key-1',
         regiondo_order_number: 'order-1'
@@ -286,22 +290,50 @@ describe('dashboard booking update location overrides', () => {
         firstName: 'Ada',
         lastName: 'Lovelace',
         phoneNumber: '+491234567'
-      },
-      locationId: null
+      }
     });
 
     expect(updateBookingMock).toHaveBeenCalledWith(
-      expect.not.objectContaining({
-        locationId: expect.anything()
-      })
+      expect.objectContaining({ bookingKey: 'booking-key-1', locationId: 'regiondo-location-1' })
     );
-    expect(updateBookingMock).toHaveBeenCalledWith(expect.objectContaining({ bookingKey: 'booking-key-1' }));
     expect(upsertNormalizedRegiondoBookingMock).toHaveBeenCalledTimes(1);
 
     const localLocationUpdates = clientQueryMock.mock.calls.filter(
       ([sql]: [string]) => sql.includes('UPDATE bookings') && sql.includes('SET location_id = $2')
     );
-    expect(localLocationUpdates.at(-1)?.[1]?.[1]).toBe(noLocationId);
+    expect(localLocationUpdates).toHaveLength(0);
+  });
+
+  it('allows local-only metadata saves without a provider location', async () => {
+    setupRepositoryQueries({
+      currentRow: createCurrentBookingRow({
+        location_id: noLocationId,
+        location_override: 'none',
+        source: 'regiondo',
+        regiondo_booking_id: 'booking-key-1',
+        regiondo_order_number: 'order-1'
+      })
+    });
+
+    await updateBooking(bookingId, { opsNotes: 'Call customer before arrival.' });
+
+    expect(updateBookingMock).not.toHaveBeenCalled();
+    expect(hydrateBookingOrderMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects provider-owned edits before the network call when no provider location exists', async () => {
+    setupRepositoryQueries({
+      currentRow: createCurrentBookingRow({
+        location_id: noLocationId,
+        location_override: 'none',
+        source: 'regiondo',
+        regiondo_booking_id: 'booking-key-1',
+        regiondo_order_number: 'order-1'
+      })
+    });
+
+    await expect(updateBooking(bookingId, { attendees: 3 })).rejects.toThrow(/Regiondo-mapped location/i);
+    expect(updateBookingMock).not.toHaveBeenCalled();
   });
 
   it('clears the local override when a Regiondo booking is moved back to a provider location', async () => {

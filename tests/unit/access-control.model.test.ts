@@ -78,6 +78,15 @@ describe('access control model', () => {
     expectFullTaskBookingOptionAccess(permissions);
   });
 
+  it('grants error log viewing and diagnostics to admins and operations leads', () => {
+    for (const role of ['admin', 'operations_lead'] as const) {
+      const permissions = getDefaultRolePermissions(role);
+      expect(permissions.find((permission) => permission.resource === 'errors' && permission.action === 'view')?.scope).toBe('all');
+      expect(permissions.find((permission) => permission.resource === 'errors' && permission.action === 'manage')?.scope).toBe('all');
+    }
+    expect(getDefaultRolePermissions('operations').find((permission) => permission.resource === 'errors' && permission.action === 'view')?.scope).toBe('none');
+  });
+
   it('fills unsupported permissions with none when normalizing a partial set', () => {
     const permissions = normalizePermissionSet([
       { resource: 'dashboard', action: 'view', scope: 'all' },

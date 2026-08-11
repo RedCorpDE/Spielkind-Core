@@ -321,6 +321,38 @@ export interface DashboardBookingDetail extends DashboardBooking {
   products: DashboardBookingProduct[];
   drawerData: DashboardBookingDrawerData;
   sync: DashboardBookingSyncInfo;
+  linkedContextVersion: string | null;
+}
+
+export interface DashboardLinkedBookingSharedFields {
+  attendees: number;
+  bookingDate: string;
+  bookingEndDate: string;
+  contact: {
+    email: string | null;
+    firstName: string;
+    lastName: string;
+    phoneNumber: string | null;
+  };
+  locationId: string | null;
+}
+
+export type UpdateDashboardLinkedBookingSharedInput = Partial<
+  Omit<DashboardLinkedBookingSharedFields, 'contact'>
+> & {
+  contact?: Partial<DashboardLinkedBookingSharedFields['contact']>;
+};
+
+export interface DashboardTaskBookingContext {
+  taskId: string;
+  primaryBookingId: string;
+  linkedContextVersion: string;
+  linkedBookings: Array<{
+    id: string;
+    lastUpdated: string;
+    updateCapabilities: DashboardBookingUpdateCapabilities;
+  }>;
+  shared: DashboardLinkedBookingSharedFields;
 }
 
 export interface DashboardBookingActivityEntry {
@@ -422,6 +454,7 @@ export interface UpdateDashboardBookingInput {
     phoneNumber?: string | null;
   };
   expectedLastUpdated?: string;
+  expectedLinkedContextVersion?: string;
   locationId?: string | null;
   opsStatus?: DashboardBookingOpsStatus;
   opsNotes?: string;
@@ -435,6 +468,12 @@ export interface UpdateDashboardBookingInput {
     quantity: number;
     unitPrice?: number | null;
   }>;
+}
+
+export interface UpdateDashboardTaskWithLinkedBookingsInput {
+  task: UpdateDashboardTaskInput;
+  sharedBooking?: UpdateDashboardLinkedBookingSharedInput;
+  expectedLinkedContextVersion?: string;
 }
 
 export interface ListDashboardTasksFilters {

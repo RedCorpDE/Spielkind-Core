@@ -6,6 +6,7 @@ import { runDispatchRemindersJob } from '../modules/reminders/dispatch-reminders
 import { runRegiondoCatalogSyncJob } from '../modules/regiondo/regiondo-catalog-sync.job.js';
 import { runProcessRegiondoWebhookInboxJob } from '../modules/regiondo/regiondo-webhook-inbox.job.js';
 import { JOB_TYPES, type JobResult, type JobType } from './job-types.js';
+import { runPruneAdminErrorEventsJob } from '../errors/prune-admin-error-events.job.js';
 
 export const INTERNAL_JOB_ROUTE_PREFIX = '/internal/jobs';
 
@@ -71,5 +72,13 @@ export const internalJobDefinitions = [
     embeddedCron: '15 */6 * * *',
     bodySchema: limitBodySchema,
     run: async (body) => runReconcileRegiondoBookingsJob({ limit: body.limit })
+  }),
+  defineInternalJob({
+    routePath: 'prune-admin-errors',
+    jobType: JOB_TYPES.PRUNE_ADMIN_ERRORS,
+    description: 'Deletes admin error events older than 90 days.',
+    embeddedCron: '30 3 * * *',
+    bodySchema: emptyBodySchema,
+    run: async () => runPruneAdminErrorEventsJob()
   })
 ] as const;

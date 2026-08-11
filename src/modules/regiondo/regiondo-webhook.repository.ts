@@ -1,4 +1,5 @@
 import { pool } from '../../db/pool.js';
+import { recordAdminErrorEvent } from '../../errors/admin-error-events.repository.js';
 
 export interface RegiondoWebhookEventRecord {
   event_id: string;
@@ -133,25 +134,49 @@ export async function markRegiondoWebhookEventProcessed(eventId: string): Promis
 }
 
 export async function markRegiondoWebhookEventRetry(eventId: string, errorMessage: string, nextAttemptAt: Date): Promise<void> {
-  await pool.query(
+  const result = await pool.query<{ booking_key: string }>(
     `UPDATE regiondo_webhook_events
      SET status = 'retrying',
          available_at = $2::timestamptz,
          locked_at = null,
          last_error = $3
-     WHERE event_id = $1`,
+     WHERE event_id = $1
+     RETURNING booking_key`,
     [eventId, nextAttemptAt.toISOString(), errorMessage]
   );
+  try {
+    await recordAdminErrorEvent({
+      dedupeKey: `regiondo-retry:${eventId}:${nextAttemptAt.toISOString()}`,
+      source: 'regiondo', severity: 'warning', errorCode: 'REGIONDO_WEBHOOK_RETRYING',
+      diagnosticSummary: errorMessage, actorType: 'provider', actorName: 'Regiondo',
+      entityType: 'regiondo_webhook_event', entityId: eventId,
+      regiondoBookingKey: result.rows[0]?.booking_key
+    });
+  } catch {
+    // Webhook retry behavior must not depend on error-event storage.
+  }
 }
 
 export async function markRegiondoWebhookEventDeadLetter(eventId: string, errorMessage: string): Promise<void> {
-  await pool.query(
+  const result = await pool.query<{ booking_key: string }>(
     `UPDATE regiondo_webhook_events
      SET status = 'dead_letter',
          processed_at = now(),
          locked_at = null,
          last_error = $2
-     WHERE event_id = $1`,
+     WHERE event_id = $1
+     RETURNING booking_key`,
     [eventId, errorMessage]
   );
+  try {
+    await recordAdminErrorEvent({
+      dedupeKey: `regiondo-dead-letter:${eventId}`,
+      source: 'regiondo', severity: 'critical', errorCode: 'REGIONDO_WEBHOOK_FAILED',
+      diagnosticSummary: errorMessage, actorType: 'provider', actorName: 'Regiondo',
+      entityType: 'regiondo_webhook_event', entityId: eventId,
+      regiondoBookingKey: result.rows[0]?.booking_key
+    });
+  } catch {
+    // Webhook state remains authoritative when error-event storage is unavailable.
+  }
 }

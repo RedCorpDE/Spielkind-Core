@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { pool } from '../../db/client.js';
 import { normalizeRegiondoBookingImport } from '../../modules/bookings/booking-normalizer.js';
@@ -27,16 +27,20 @@ import type {
   DashboardBookingRegiondoSelection,
   DashboardBookingSort,
   DashboardBookingSyncInfo,
+  DashboardLinkedBookingSharedFields,
+  DashboardTaskBookingContext,
   DashboardPaginatedBookingsResponse,
   DashboardRegiondoWebhookEventStatus,
   DashboardSortDirection,
   ListDashboardBookingsFilters,
-  UpdateDashboardBookingInput
+  UpdateDashboardBookingInput,
+  UpdateDashboardLinkedBookingSharedInput
 } from '../types.js';
 import {
   type BookingRow,
   type Queryable,
   type TaskRow,
+  DashboardConflictError,
   DashboardNotFoundError,
   DashboardValidationError,
   mapBookingRow,
@@ -88,9 +92,26 @@ interface BookingForUpdateRow {
 }
 
 interface BookingLocationUpdateRow {
-  location_id: string;
+  location_id: string | null;
   title: string;
   regiondo_location_id: string | null;
+}
+
+interface LinkedEntityVersionRow {
+  id: string;
+  updated_at: Date | string;
+}
+
+interface LinkedMembershipVersionRow {
+  booking_id: string;
+  source: 'junction' | 'primary';
+  task_id: string;
+}
+
+interface LinkedBookingGroup {
+  bookingIds: string[];
+  taskIds: string[];
+  version: string;
 }
 
 type BookingLocationOverride = 'none' | null;
@@ -122,7 +143,7 @@ interface ResolvedBookingUpdate {
   dtFrom: string;
   dtTo: string;
   guestCount: number;
-  locationId: string;
+  locationId: string | null;
   locationOverride: BookingLocationOverride;
   opsNotes: string;
   opsStatus: 'normal' | 'escalated';
@@ -1724,20 +1745,213 @@ export async function createBookingFromTask(
   }
 }
 
+async function resolveLinkedBookingGroup(
+  executor: Queryable,
+  input: { bookingId?: string; taskId?: string }
+): Promise<LinkedBookingGroup> {
+  const bookingIds = new Set<string>();
+  const taskIds = new Set<string>();
+
+  if (input.bookingId) {
+    bookingIds.add(input.bookingId);
+  }
+
+  if (input.taskId) {
+    taskIds.add(input.taskId);
+    const seed = await executor.query<{ booking_id: string }>(
+      `SELECT booking_id FROM task_bookings WHERE task_id = $1
+       UNION
+       SELECT connected_booking_key AS booking_id
+       FROM tasks
+       WHERE id = $1 AND connected_booking_key IS NOT NULL`,
+      [input.taskId]
+    );
+    seed.rows.forEach((row) => bookingIds.add(row.booking_id));
+  }
+
+  let changed = true;
+  let pass = 0;
+  while (changed && pass < 20) {
+    pass += 1;
+    changed = false;
+
+    if (bookingIds.size) {
+      const taskRows = await executor.query<{ task_id: string }>(
+        `SELECT tb.task_id
+         FROM task_bookings tb
+         INNER JOIN tasks t ON t.id = tb.task_id AND t.is_deleted = false
+         WHERE tb.booking_id = ANY($1::uuid[])
+         UNION
+         SELECT t.id AS task_id
+         FROM tasks t
+         WHERE t.connected_booking_key = ANY($1::uuid[])
+           AND t.is_deleted = false`,
+        [[...bookingIds]]
+      );
+      for (const row of taskRows.rows) {
+        if (!taskIds.has(row.task_id)) {
+          taskIds.add(row.task_id);
+          changed = true;
+        }
+      }
+    }
+
+    if (taskIds.size) {
+      const bookingRows = await executor.query<{ booking_id: string }>(
+        `SELECT booking_id
+         FROM task_bookings
+         WHERE task_id = ANY($1::uuid[])
+         UNION
+         SELECT connected_booking_key AS booking_id
+         FROM tasks
+         WHERE id = ANY($1::uuid[])
+           AND connected_booking_key IS NOT NULL`,
+        [[...taskIds]]
+      );
+      for (const row of bookingRows.rows) {
+        if (!bookingIds.has(row.booking_id)) {
+          bookingIds.add(row.booking_id);
+          changed = true;
+        }
+      }
+    }
+  }
+
+  if (bookingIds.size + taskIds.size > 200) {
+    throw new DashboardValidationError('Linked booking group is too large to update safely.');
+  }
+
+  const [bookingVersions, taskVersions, membershipVersions] = await Promise.all([
+    bookingIds.size
+      ? executor.query<LinkedEntityVersionRow>(
+          `SELECT booking_id AS id, updated_at FROM bookings WHERE booking_id = ANY($1::uuid[])`,
+          [[...bookingIds]]
+        )
+      : Promise.resolve({ rows: [] as LinkedEntityVersionRow[] }),
+    taskIds.size
+      ? executor.query<LinkedEntityVersionRow>(
+          `SELECT id, updated_at FROM tasks WHERE id = ANY($1::uuid[]) AND is_deleted = false`,
+          [[...taskIds]]
+        )
+      : Promise.resolve({ rows: [] as LinkedEntityVersionRow[] }),
+    taskIds.size && bookingIds.size
+      ? executor.query<LinkedMembershipVersionRow>(
+          `SELECT task_id, booking_id, 'junction'::text AS source
+           FROM task_bookings
+           WHERE task_id = ANY($1::uuid[])
+             AND booking_id = ANY($2::uuid[])
+           UNION ALL
+           SELECT id AS task_id, connected_booking_key AS booking_id, 'primary'::text AS source
+           FROM tasks
+           WHERE id = ANY($1::uuid[])
+             AND connected_booking_key = ANY($2::uuid[])
+             AND is_deleted = false`,
+          [[...taskIds], [...bookingIds]]
+        )
+      : Promise.resolve({ rows: [] as LinkedMembershipVersionRow[] })
+  ]);
+  const versionMaterial = [
+    ...bookingVersions.rows.map((row) => `booking:${row.id}:${requireIsoString(row.updated_at, 'bookings.updated_at')}`),
+    ...taskVersions.rows.map((row) => `task:${row.id}:${requireIsoString(row.updated_at, 'tasks.updated_at')}`),
+    ...membershipVersions.rows.map((row) => `link:${row.source}:${row.task_id}:${row.booking_id}`)
+  ]
+    .sort()
+    .join('|');
+
+  return {
+    bookingIds: [...bookingIds].sort(),
+    taskIds: [...taskIds].sort(),
+    version: createHash('sha256').update(versionMaterial).digest('base64url')
+  };
+}
+
+async function assertLinkedContextVersion(
+  executor: Queryable,
+  group: LinkedBookingGroup,
+  expectedVersion?: string
+): Promise<void> {
+  if (expectedVersion && expectedVersion !== group.version) {
+    throw new DashboardConflictError('Linked booking data changed. Reload before saving.');
+  }
+}
+
+function toLinkedSharedFields(booking: DashboardBookingDetail): DashboardLinkedBookingSharedFields {
+  return {
+    attendees: booking.attendees,
+    bookingDate: booking.bookingDate,
+    bookingEndDate: booking.bookingEndDate,
+    contact: {
+      email: booking.drawerData.contact.email,
+      firstName: booking.drawerData.contact.firstName ?? booking.childName,
+      lastName: booking.drawerData.contact.lastName ?? booking.familyName,
+      phoneNumber: booking.drawerData.contact.phoneNumber
+    },
+    locationId: booking.locationId
+  };
+}
+
 export async function getBooking(bookingId: string): Promise<DashboardBookingDetail> {
   const row = await queryBookingRow(pool, bookingId);
   if (!row) {
     throw new DashboardNotFoundError("Booking not found.");
   }
 
-  const [products, sync] = await Promise.all([queryBookingProducts(pool, bookingId), getBookingSync(bookingId)]);
+  const [products, sync, linkedGroup] = await Promise.all([
+    queryBookingProducts(pool, bookingId),
+    getBookingSync(bookingId),
+    resolveLinkedBookingGroup(pool, { bookingId })
+  ]);
 
   return {
     ...mapBookingRow(row),
     drawerData: buildBookingDrawerData(row, products),
+    linkedContextVersion: linkedGroup.taskIds.length ? linkedGroup.version : null,
     products,
     sync
   };
+}
+
+export async function getTaskBookingContext(taskId: string): Promise<DashboardTaskBookingContext> {
+  const taskResult = await pool.query<{ connected_booking_key: string | null }>(
+    `SELECT connected_booking_key FROM tasks WHERE id = $1 AND is_deleted = false LIMIT 1`,
+    [taskId]
+  );
+  if (!taskResult.rowCount) {
+    throw new DashboardNotFoundError('Task not found.');
+  }
+
+  const group = await resolveLinkedBookingGroup(pool, { taskId });
+  if (!group.bookingIds.length) {
+    throw new DashboardValidationError('Task is not linked to a booking.');
+  }
+
+  const primaryBookingId = taskResult.rows[0].connected_booking_key ?? group.bookingIds[0];
+  const bookings = await Promise.all(group.bookingIds.map((bookingId) => getBooking(bookingId)));
+  const primaryBooking = bookings.find((booking) => booking.id === primaryBookingId) ?? bookings[0];
+  const taskRow = await queryTaskForBookingCreation(pool, taskId);
+  if (!taskRow) {
+    throw new DashboardNotFoundError('Task not found.');
+  }
+  const task = mapTaskRow(taskRow);
+  const taskBookingData = readTaskBookingData(task);
+  const shared = toLinkedSharedFields(primaryBooking);
+  shared.contact.email = readRecordText(taskBookingData, 'email') ?? shared.contact.email;
+
+  return {
+    taskId,
+    primaryBookingId: primaryBooking.id,
+    linkedContextVersion: group.version,
+    linkedBookings: bookings.map((booking) => ({
+      id: booking.id,
+      lastUpdated: booking.lastUpdated,
+      updateCapabilities: booking.updateCapabilities
+    })),
+    shared
+  };
+}
+
+export async function getLinkedBookingIds(bookingId: string): Promise<string[]> {
+  return (await resolveLinkedBookingGroup(pool, { bookingId })).bookingIds;
 }
 
 export async function getBookingSync(bookingId: string): Promise<DashboardBookingSyncInfo> {
@@ -2000,7 +2214,11 @@ async function resolveBookingLocationUpdate(
 
   const locationId = input.locationId === undefined ? current.location_id : input.locationId;
   if (!locationId) {
-    throw new DashboardValidationError('locationId is required.');
+    return {
+      changed: false,
+      location: { location_id: null, regiondo_location_id: null, title: '' },
+      locationOverride: current.location_override === 'none' ? 'none' : null
+    };
   }
 
   const result = await executor.query<BookingLocationUpdateRow>(
@@ -2384,6 +2602,17 @@ async function buildResolvedBookingUpdate(
     products: products.changed,
     schedule: dateRange.changed
   });
+  if (resolved.providerInput && !resolved.providerInput.locationId) {
+    if (
+      !resolved.regiondoLocationId ||
+      SYSTEM_LOCATION_PROVIDER_IDS.has(resolved.regiondoLocationId)
+    ) {
+      throw new DashboardValidationError(
+        'Select a Regiondo-mapped location before updating this Regiondo booking.'
+      );
+    }
+    resolved.providerInput.locationId = resolved.regiondoLocationId;
+  }
   resolved.clearProviderEditError = resolved.clearProviderEditError || Boolean(resolved.providerInput);
 
   return resolved;
@@ -2510,7 +2739,11 @@ async function applyBookingLocationOverride(
   );
 }
 
-export async function updateBooking(bookingId: string, input: UpdateDashboardBookingInput): Promise<DashboardBookingDetail> {
+async function updateBookingRecord(
+  bookingId: string,
+  input: UpdateDashboardBookingInput,
+  providerEmailOverride?: string | null
+): Promise<DashboardBookingDetail> {
   const client = await pool.connect();
   let providerEditError: string | null = null;
   let rebuildConsumptions = false;
@@ -2524,6 +2757,9 @@ export async function updateBooking(bookingId: string, input: UpdateDashboardBoo
 
     const currentProducts = await queryBookingProducts(client, bookingId);
     const update = await buildResolvedBookingUpdate(client, current, currentProducts, input);
+    if (providerEmailOverride && update.providerInput?.contactData) {
+      update.providerInput.contactData.email = providerEmailOverride;
+    }
     const isRegiondoBooking = current.source === 'regiondo' || Boolean(current.regiondo_booking_id);
     const hasBookingMutation = update.changedFields.some((field) => !['opsNotes', 'opsStatus'].includes(field));
     const hasLocalNoLocationOverride = update.locationOverride === 'none' && update.changedFields.includes('location');
@@ -2551,6 +2787,24 @@ export async function updateBooking(bookingId: string, input: UpdateDashboardBoo
             webhookPayload: null
           });
           await upsertNormalizedRegiondoBooking(client, normalizedBooking);
+          if (providerEmailOverride && input.contact) {
+            await client.query(
+              `UPDATE clients
+               SET first_name = $2,
+                   last_name = $3,
+                   email = $4,
+                   phone_number = $5,
+                   updated_at = now()
+               WHERE client_id = $1`,
+              [
+                current.client_id,
+                update.contact.firstName,
+                update.contact.lastName,
+                update.contact.email,
+                update.contact.phoneNumber
+              ]
+            );
+          }
         } catch (error) {
           providerEditError = getProviderEditErrorMessage(error);
           throw error;
@@ -2600,4 +2854,235 @@ export async function updateBooking(bookingId: string, input: UpdateDashboardBoo
   }
 
   return await getBooking(bookingId);
+}
+
+function buildSharedBookingPatch(input: UpdateDashboardBookingInput): UpdateDashboardLinkedBookingSharedInput {
+  return {
+    ...(input.attendees !== undefined ? { attendees: input.attendees } : {}),
+    ...(input.bookingDate !== undefined ? { bookingDate: input.bookingDate } : {}),
+    ...(input.bookingEndDate !== undefined ? { bookingEndDate: input.bookingEndDate } : {}),
+    ...(input.contact !== undefined ? { contact: input.contact } : {}),
+    ...('locationId' in input ? { locationId: input.locationId } : {})
+  };
+}
+
+function hasSharedBookingPatch(input: UpdateDashboardLinkedBookingSharedInput): boolean {
+  return Object.keys(input).length > 0;
+}
+
+async function resolveAlternateRegiondoEmail(
+  group: LinkedBookingGroup,
+  bookingId: string,
+  patch: UpdateDashboardLinkedBookingSharedInput
+): Promise<string | null> {
+  if (patch.contact?.email === undefined || !group.taskIds.length) {
+    return null;
+  }
+
+  const result = await pool.query<{ raw_json: unknown }>(
+    `SELECT raw_json
+     FROM tasks
+     WHERE id = ANY($1::uuid[])
+       AND is_deleted = false
+     ORDER BY (connected_booking_key = $2::uuid) DESC, updated_at DESC`,
+    [group.taskIds, bookingId]
+  );
+
+  for (const row of result.rows) {
+    const rawJson = isRecord(row.raw_json) ? row.raw_json : null;
+    const bookingDataValue = rawJson?.booking_data ?? rawJson?.bookingData;
+    const bookingData = isRecord(bookingDataValue) ? bookingDataValue : null;
+    const usesAlternateEmail = readRecordBoolean(
+      bookingData,
+      'send_regiondo_bookings_to_alternate_email',
+      'sendRegiondoBookingsToAlternateEmail'
+    );
+    const alternateEmail = readRecordText(bookingData, 'regiondo_booking_email', 'regiondoBookingEmail');
+    if (usesAlternateEmail && alternateEmail) {
+      return alternateEmail;
+    }
+  }
+
+  return null;
+}
+
+function cloneRecord(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? structuredClone(value) : {};
+}
+
+function buildLinkedTaskProjection(
+  task: DashboardTask,
+  booking: DashboardBookingDetail,
+  patch: UpdateDashboardLinkedBookingSharedInput,
+  actor?: DashboardTaskMutationActor
+): {
+  eventDateTime: string | null;
+  rawJson: Record<string, unknown>;
+  site: string;
+  updateLog: DashboardTaskActivityEntry[];
+} {
+  const rawJson = cloneRecord(task.rawJson);
+  const bookingData = cloneRecord(rawJson.booking_data ?? rawJson.bookingData);
+  const contactData = cloneRecord(bookingData.contact_data ?? bookingData.contactData);
+  const changedFields: string[] = [];
+
+  if (patch.attendees !== undefined) {
+    bookingData.attendees = booking.attendees;
+    changedFields.push('attendees');
+  }
+
+  let eventDateTime = task.eventDateTime;
+  if (patch.bookingDate !== undefined) {
+    eventDateTime = booking.bookingDate;
+    changedFields.push('eventDateTime');
+  }
+
+  if (patch.bookingEndDate !== undefined) {
+    bookingData.booking_end_date_time = booking.bookingEndDate;
+    const formattedEnd = formatRegiondoDateTime(booking.bookingEndDate);
+    if (formattedEnd) {
+      bookingData.secondary_event_time = formattedEnd.slice(11, 16);
+    }
+    changedFields.push('bookingEndDate');
+  }
+
+  let site = task.site;
+  if ('locationId' in patch) {
+    site = booking.locationDataStatus === 'known' ? booking.locationTitle : '';
+    bookingData.location_id = booking.locationId;
+    bookingData.site = site;
+    rawJson.site = site;
+    changedFields.push('site');
+  }
+
+  if (patch.contact) {
+    const currentAlternateFlag =
+      bookingData.send_regiondo_bookings_to_alternate_email ?? bookingData.sendRegiondoBookingsToAlternateEmail;
+    const usesAlternateEmail = currentAlternateFlag === true || currentAlternateFlag === 'true' || currentAlternateFlag === 1;
+    const alternateEmail = normalizeText(
+      bookingData.regiondo_booking_email ?? bookingData.regiondoBookingEmail
+    );
+    const contact = booking.drawerData.contact;
+    const customerEmail =
+      patch.contact.email !== undefined ? patch.contact.email : normalizeText(bookingData.email) ?? contact.email;
+
+    bookingData.email = customerEmail ?? '';
+    bookingData.phone_number = contact.phoneNumber ?? '';
+    contactData.first_name = contact.firstName ?? '';
+    contactData.last_name = contact.lastName ?? '';
+    contactData.phone_number = contact.phoneNumber ?? '';
+    contactData.email = usesAlternateEmail && alternateEmail ? alternateEmail : customerEmail ?? '';
+    changedFields.push('contact');
+  }
+
+  bookingData.contact_data = contactData;
+  rawJson.booking_data = bookingData;
+  delete rawJson.bookingData;
+
+  const activityEntry: DashboardTaskActivityEntry = {
+    id: `task-activity-${randomUUID()}`,
+    actor: {
+      name: actor?.name ?? 'Core',
+      role: actor?.role ?? 'System',
+      source: actor?.source ?? 'system'
+    },
+    changes: changedFields.map((field) => ({ field })),
+    metadata: { bookingId: booking.id },
+    occurredAt: new Date().toISOString(),
+    type: 'synced'
+  };
+
+  return {
+    eventDateTime,
+    rawJson,
+    site,
+    updateLog: changedFields.length ? [activityEntry, ...task.activityLog] : task.activityLog
+  };
+}
+
+export async function syncLinkedTasksFromBooking(
+  bookingId: string,
+  patch: UpdateDashboardLinkedBookingSharedInput,
+  actor?: DashboardTaskMutationActor
+): Promise<void> {
+  if (!hasSharedBookingPatch(patch)) {
+    return;
+  }
+
+  const group = await resolveLinkedBookingGroup(pool, { bookingId });
+  if (!group.taskIds.length) {
+    return;
+  }
+
+  const booking = await getBooking(bookingId);
+  const taskRows = await pool.query<TaskRow>(
+    `${TASK_SELECT_QUERY}
+     WHERE t.id = ANY($1::uuid[])
+       AND t.is_deleted = false`,
+    [group.taskIds]
+  );
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const row of taskRows.rows) {
+      const task = mapTaskRow(row);
+      const projection = buildLinkedTaskProjection(task, booking, patch, actor);
+      await client.query(
+        `UPDATE tasks
+         SET event_date_time = $2::timestamptz,
+             raw_json = $3::jsonb,
+             update_log = $4::jsonb
+         WHERE id = $1
+           AND is_deleted = false`,
+        [task.id, projection.eventDateTime, JSON.stringify(projection.rawJson), JSON.stringify(projection.updateLog)]
+      );
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function updateBooking(
+  bookingId: string,
+  input: UpdateDashboardBookingInput,
+  actor?: DashboardTaskMutationActor
+): Promise<DashboardBookingDetail> {
+  const group = await resolveLinkedBookingGroup(pool, { bookingId });
+  await assertLinkedContextVersion(pool, group, input.expectedLinkedContextVersion);
+
+  const sharedPatch = buildSharedBookingPatch(input);
+  const alternateRegiondoEmail = await resolveAlternateRegiondoEmail(group, bookingId, sharedPatch);
+  const recordInput = { ...input };
+  delete recordInput.expectedLinkedContextVersion;
+  const updatedBookingIds: string[] = [];
+
+  try {
+    await updateBookingRecord(bookingId, recordInput, alternateRegiondoEmail);
+    updatedBookingIds.push(bookingId);
+
+    if (hasSharedBookingPatch(sharedPatch)) {
+      for (const linkedBookingId of group.bookingIds) {
+        if (linkedBookingId === bookingId) {
+          continue;
+        }
+        await updateBookingRecord(linkedBookingId, sharedPatch, alternateRegiondoEmail);
+        updatedBookingIds.push(linkedBookingId);
+      }
+      await syncLinkedTasksFromBooking(bookingId, sharedPatch, actor);
+    }
+  } catch (error) {
+    if (updatedBookingIds.length) {
+      throw new DashboardConflictError(
+        `Linked booking update was only partially applied to ${updatedBookingIds.join(', ')}. Reconcile the linked group before retrying.`
+      );
+    }
+    throw error;
+  }
+
+  return getBooking(bookingId);
 }
