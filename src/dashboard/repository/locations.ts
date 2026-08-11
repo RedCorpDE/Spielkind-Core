@@ -33,10 +33,98 @@ function mapLocationRow(row: LocationRow): DashboardLocation {
     imageUrl: row.image_url,
     regiondoLocationId: isSystemPlaceholder ? null : row.regiondo_location_id,
     isSystemPlaceholder,
-    providerDataStatus: isNoLocationPlaceholder ? 'none' : isUnknownRegiondoPlaceholder ? 'unknown' : 'known',
+    providerDataStatus: isUnknownRegiondoPlaceholder ? 'unknown' : row.regiondo_location_id && !isNoLocationPlaceholder ? 'known' : 'none',
     createdAt: requireIsoString(row.created_at, 'locations.created_at'),
     updatedAt: requireIsoString(row.updated_at, 'locations.updated_at')
   };
+}
+
+export async function mapLocationToRegiondo(
+  targetLocationId: string,
+  input: { sourceLocationId: string; title?: string }
+): Promise<DashboardLocation> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const targetResult = await client.query<LocationRow>(
+      `SELECT location_id, title, description, image_url, regiondo_location_id, created_at, updated_at
+       FROM locations WHERE location_id = $1 FOR UPDATE`,
+      [targetLocationId]
+    );
+    if (!targetResult.rowCount) throw new DashboardNotFoundError('Location not found.');
+    const target = targetResult.rows[0];
+    assertNotSystemProviderId(target.regiondo_location_id);
+
+    const sourceResult = await client.query<LocationRow & { regiondo_raw: unknown }>(
+      `SELECT location_id, title, description, image_url, regiondo_location_id, regiondo_raw, created_at, updated_at
+       FROM locations WHERE location_id = $1 FOR UPDATE`,
+      [input.sourceLocationId]
+    );
+    if (!sourceResult.rowCount) throw new DashboardNotFoundError('Regiondo location not found.');
+    const source = sourceResult.rows[0];
+    assertNotSystemProviderId(source.regiondo_location_id);
+    if (!source.regiondo_location_id) {
+      throw new DashboardValidationError('Select a location that is connected to Regiondo.');
+    }
+
+    if (target.location_id === source.location_id) {
+      await client.query('COMMIT');
+      return mapLocationRow(target);
+    }
+    if (target.regiondo_location_id) {
+      throw new DashboardValidationError('This location is already connected to Regiondo.');
+    }
+
+    const nextTitle = input.title?.trim() || target.title;
+    const affectedBookings = await client.query<{ booking_id: string }>(
+      `SELECT booking_id FROM bookings WHERE location_id = ANY($1::uuid[])`,
+      [[target.location_id, source.location_id]]
+    );
+    const bookingIds = affectedBookings.rows.map((row) => row.booking_id);
+
+    if (bookingIds.length) {
+      await client.query(
+        `UPDATE tasks
+         SET raw_json = jsonb_set(
+               jsonb_set(COALESCE(raw_json, '{}'::jsonb), '{site}', to_jsonb($2::text), true),
+               '{booking_data}',
+               COALESCE(raw_json -> 'booking_data', '{}'::jsonb) || jsonb_build_object('location_id', $1::text, 'site', $2::text),
+               true
+             ),
+             updated_at = now()
+         WHERE connected_booking_key = ANY($3::uuid[])
+            OR id IN (SELECT task_id FROM task_bookings WHERE booking_id = ANY($3::uuid[]))`,
+        [target.location_id, nextTitle, bookingIds]
+      );
+    }
+
+    await client.query(`UPDATE bookings SET location_id = $1, updated_at = now() WHERE location_id = $2`, [target.location_id, source.location_id]);
+    await client.query(`UPDATE resources SET location_id = $1, updated_at = now() WHERE location_id = $2`, [target.location_id, source.location_id]);
+    await client.query(
+      `INSERT INTO location_products (location_id, product_id)
+       SELECT $1, product_id FROM location_products WHERE location_id = $2
+       ON CONFLICT (location_id, product_id) DO NOTHING`,
+      [target.location_id, source.location_id]
+    );
+    await client.query(`DELETE FROM location_products WHERE location_id = $1`, [source.location_id]);
+    await client.query(`UPDATE reminder_rules SET location_id = $1, updated_at = now() WHERE location_id = $2`, [target.location_id, source.location_id]);
+    await client.query(`UPDATE locations SET regiondo_location_id = NULL, updated_at = now() WHERE location_id = $1`, [source.location_id]);
+    const mappedResult = await client.query<LocationRow>(
+      `UPDATE locations
+       SET title = $2, regiondo_location_id = $3, regiondo_raw = $4::jsonb, updated_at = now()
+       WHERE location_id = $1
+       RETURNING location_id, title, description, image_url, regiondo_location_id, created_at, updated_at`,
+      [target.location_id, nextTitle, source.regiondo_location_id, JSON.stringify(source.regiondo_raw ?? {})]
+    );
+    await client.query(`DELETE FROM locations WHERE location_id = $1`, [source.location_id]);
+    await client.query('COMMIT');
+    return mapLocationRow(mappedResult.rows[0]);
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throwLocationMutationError(error);
+  } finally {
+    client.release();
+  }
 }
 
 function normalizeOptionalText(value: string | null | undefined): string | null {

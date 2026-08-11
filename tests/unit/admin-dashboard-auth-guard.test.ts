@@ -28,6 +28,11 @@ const protectedWritePaths = [
   },
   {
     method: 'POST',
+    path: '/api/admin/locations/00000000-0000-0000-0000-000000000001/regiondo-mapping',
+    body: { sourceLocationId: '00000000-0000-0000-0000-000000000002' }
+  },
+  {
+    method: 'POST',
     path: '/api/admin/tasks/00000000-0000-0000-0000-000000000001/comments',
     body: { body: 'Looks good.' }
   },

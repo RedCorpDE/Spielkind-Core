@@ -40,6 +40,7 @@ import {
   deleteLocation,
   getLocation,
   listLocations,
+  mapLocationToRegiondo,
   updateLocation
 } from '../../dashboard/repository/locations.js';
 import { getDashboardSummary } from '../../dashboard/repository/summary.js';
@@ -197,6 +198,11 @@ const updateLocationSchema = z.object({
   regiondoLocationId: z.string().nullable().optional()
 }).refine((value) => Object.keys(value).length > 0, {
   message: 'At least one field must be provided.'
+});
+
+const mapLocationToRegiondoSchema = z.object({
+  sourceLocationId: z.string().uuid(),
+  title: z.string().trim().min(1).optional()
 });
 
 const listTasksQuerySchema = z.object({
@@ -680,6 +686,32 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
         entityType: 'location',
         entityId: location.id,
         details: parsed.data
+      });
+      return { item: location };
+    } catch (error) {
+      sendError(error);
+    }
+  });
+
+  app.post('/api/admin/locations/:locationId/regiondo-mapping', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'locations', 'update');
+    await requireAdminPermission(request as AdminFastifyRequest, 'locations', 'delete');
+    const parsed = mapLocationToRegiondoSchema.safeParse(request.body);
+    if (!parsed.success) throw new ValidationHttpError('Invalid Regiondo location mapping.');
+
+    try {
+      const { locationId } = request.params as { locationId: string };
+      const location = await mapLocationToRegiondo(locationId, parsed.data);
+      await recordAdminWriteAudit({
+        request,
+        auth,
+        action: 'admin.location.regiondo_mapping.created',
+        entityType: 'location',
+        entityId: location.id,
+        details: {
+          sourceLocationId: parsed.data.sourceLocationId,
+          regiondoLocationId: location.regiondoLocationId
+        }
       });
       return { item: location };
     } catch (error) {
