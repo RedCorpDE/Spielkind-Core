@@ -231,6 +231,16 @@ run:
 npm run job:sync-regiondo-bookings -- --full
 ```
 
+If Regiondo still does not create mapping candidates, inspect only the sanitized
+location-related fields stored from recent booking and catalog payloads:
+
+```bash
+npm run diagnose:regiondo-locations
+```
+
+The diagnostic excludes booking keys and customer/contact fields. Share its JSON
+output when a Regiondo response uses an undocumented location field.
+
 ## Verification
 
 Current verification commands:
