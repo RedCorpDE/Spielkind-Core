@@ -3,6 +3,43 @@ import { normalizeRegiondoBookingImport } from '../../src/modules/bookings/booki
 import { RegiondoPayloadError } from '../../src/modules/regiondo/regiondo.client.js';
 
 describe('normalizeRegiondoBookingImport', () => {
+  it('discovers a Regiondo location from modern supplier booking fields', () => {
+    const normalized = normalizeRegiondoBookingImport({
+      bookingKey: 'booking-key-location',
+      purchaseData: {
+        info_generated_at: '2026-05-12T10:00:00.000Z',
+        items: [
+          {
+            booking_key: 'booking-key-location',
+            product_id: '297021',
+            ticket_qty: 1
+          }
+        ],
+        order_number: 'R-LOCATION'
+      },
+      supplierBookings: [
+        {
+          booking_key: 'booking-key-location',
+          duration_type: 'minute',
+          duration_value: 60,
+          event_date_time: '2026-05-13 13:00:00',
+          location_id: 4711,
+          location_name: 'Berlin Mitte',
+          order_number: 'R-LOCATION',
+          product_id: '297021',
+          qty: 1,
+          status: 'confirmed'
+        }
+      ],
+      webhookPayload: null
+    });
+
+    expect(normalized.location).toMatchObject({
+      regiondoLocationId: '4711',
+      title: 'Berlin Mitte'
+    });
+  });
+
   it('interprets Regiondo supplier booking timestamps in Europe/Berlin', () => {
     const normalized = normalizeRegiondoBookingImport({
       bookingKey: 'booking-key-1',

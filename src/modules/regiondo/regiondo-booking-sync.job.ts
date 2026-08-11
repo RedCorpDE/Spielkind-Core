@@ -51,18 +51,18 @@ async function fetchSupplierBookingsForWindow(input: {
   };
 }
 
-export async function runSyncRegiondoBookingsJob(input: { limit?: number } = {}) {
+export async function runSyncRegiondoBookingsJob(input: { full?: boolean; limit?: number } = {}) {
   return runJobWithLock({
     jobType: JOB_TYPES.SYNC_REGIONDO_BOOKINGS,
-    metadata: { limit: input.limit ?? null },
+    metadata: { full: input.full ?? false, limit: input.limit ?? null },
     handler: async () => {
       const syncId = await startSync('regiondo_bookings');
 
       try {
         const previousCursorValue = await getRegiondoBookingSyncCursorValue();
         const window = buildRegiondoBookingSyncWindow({
-          initialLookbackDays: appConfig.REGIONDO_BOOKING_SYNC_INITIAL_LOOKBACK_DAYS,
-          lastSuccessAt: previousCursorValue,
+          initialLookbackDays: input.full ? 365 : appConfig.REGIONDO_BOOKING_SYNC_INITIAL_LOOKBACK_DAYS,
+          lastSuccessAt: input.full ? null : previousCursorValue,
           overlapDays: appConfig.REGIONDO_BOOKING_SYNC_OVERLAP_DAYS
         });
         const { bookingsCount, pageCount, supplierBookings } = await fetchSupplierBookingsForWindow(window);
@@ -118,6 +118,7 @@ export async function runSyncRegiondoBookingsJob(input: { limit?: number } = {})
           candidateCount: candidates.length,
           cursorAdvanced: !isTruncated,
           importedCount: processedCount,
+          fullRefresh: input.full ?? false,
           pageCount,
           skippedConsumptionRebuildCount,
           supplierBookingRowCount: bookingsCount,

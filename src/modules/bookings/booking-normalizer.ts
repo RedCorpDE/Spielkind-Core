@@ -74,6 +74,51 @@ function isLegacyPayload(payload: RegiondoWebhookPayload | null | undefined): pa
   return Boolean(payload && 'id' in payload && !('full_purchase_data' in payload));
 }
 
+type UnknownRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): UnknownRecord | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as UnknownRecord)
+    : null;
+}
+
+function readIdentifier(record: UnknownRecord | null, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = record?.[key];
+    if (typeof value === 'string' || typeof value === 'number') {
+      const identifier = stringifyRegiondoId(value);
+      if (identifier) return identifier;
+    }
+  }
+  return null;
+}
+
+function readText(record: UnknownRecord | null, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = record?.[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function extractLocationHint(value: unknown): { regiondoLocationId: string | null; title: string | null } | null {
+  const record = asRecord(value);
+  if (!record) return null;
+
+  const nested = asRecord(record.location) ?? asRecord(record.venue) ?? asRecord(record.meeting_point) ?? asRecord(record.meetingPoint);
+  const regiondoLocationId =
+    readIdentifier(nested, ['id', 'location_id', 'locationId']) ??
+    readIdentifier(record, ['location_id', 'locationId']);
+  if (!regiondoLocationId) return null;
+
+  return {
+    regiondoLocationId,
+    title:
+      readText(nested, ['title', 'name', 'label']) ??
+      readText(record, ['location_title', 'locationTitle', 'location_name', 'locationName'])
+  };
+}
+
 function normalizeNamePart(value: string | null | undefined, fallback: string): string {
   const trimmed = value?.trim();
   return trimmed && trimmed.length > 0 ? trimmed : fallback;
@@ -114,11 +159,27 @@ function deriveContactDetails(input: {
   };
 }
 
-function deriveLocationHint(webhookPayload?: RegiondoWebhookPayload | null) {
-  const legacyPayload = isLegacyPayload(webhookPayload) ? webhookPayload : null;
+function deriveLocationHint(input: {
+  matchingItems: RegiondoSoldItem[];
+  matchingSupplierBookings: RegiondoSupplierBooking[];
+  purchaseData: RegiondoPurchaseData;
+  webhookPayload?: RegiondoWebhookPayload | null;
+}) {
+  const candidates: unknown[] = [
+    input.webhookPayload,
+    ...input.matchingSupplierBookings,
+    ...input.matchingItems,
+    input.purchaseData
+  ];
+
+  for (const candidate of candidates) {
+    const hint = extractLocationHint(candidate);
+    if (hint) return hint;
+  }
+
   return {
-    regiondoLocationId: stringifyRegiondoId(legacyPayload?.location?.id),
-    title: legacyPayload?.location?.title?.trim() ?? legacyPayload?.location?.name?.trim() ?? null
+    regiondoLocationId: null,
+    title: null
   };
 }
 
@@ -217,7 +278,12 @@ export function normalizeRegiondoBookingImport(input: {
   });
 
   const contact = deriveContactDetails(input);
-  const location = deriveLocationHint(input.webhookPayload);
+  const location = deriveLocationHint({
+    matchingItems,
+    matchingSupplierBookings,
+    purchaseData: input.purchaseData,
+    webhookPayload: input.webhookPayload
+  });
   const status = aggregateRegiondoBookingStatus(matchingSupplierBookings);
 
   const totals = matchingItems.reduce(

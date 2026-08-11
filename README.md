@@ -212,6 +212,25 @@ Core is designed for:
 
 See `render.yaml`.
 
+### One-off Regiondo booking sync on Render
+
+Open the web service's **Shell** tab in Render and run:
+
+```bash
+npm run job:sync-regiondo-bookings
+```
+
+The command uses the JavaScript produced by Render's normal build and exits with a
+non-zero status if the sync fails. It uses the service's configured Regiondo and
+database environment variables.
+
+To reprocess up to one year of existing bookings after changing import mappings,
+run:
+
+```bash
+npm run job:sync-regiondo-bookings -- --full
+```
+
 ## Verification
 
 Current verification commands:

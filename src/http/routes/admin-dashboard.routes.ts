@@ -200,10 +200,15 @@ const updateLocationSchema = z.object({
   message: 'At least one field must be provided.'
 });
 
-const mapLocationToRegiondoSchema = z.object({
-  sourceLocationId: z.string().uuid(),
-  title: z.string().trim().min(1).optional()
-});
+const mapLocationToRegiondoSchema = z
+  .object({
+    sourceLocationId: z.string().uuid().optional(),
+    regiondoLocationId: z.string().trim().min(1).optional(),
+    title: z.string().trim().min(1).optional()
+  })
+  .refine((value) => Boolean(value.sourceLocationId) !== Boolean(value.regiondoLocationId), {
+    message: 'Provide either a discovered Regiondo location or a Regiondo location ID.'
+  });
 
 const listTasksQuerySchema = z.object({
   columnId: taskColumnIdSchema.optional(),
@@ -695,13 +700,23 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
 
   app.post('/api/admin/locations/:locationId/regiondo-mapping', async (request) => {
     const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'locations', 'update');
-    await requireAdminPermission(request as AdminFastifyRequest, 'locations', 'delete');
     const parsed = mapLocationToRegiondoSchema.safeParse(request.body);
     if (!parsed.success) throw new ValidationHttpError('Invalid Regiondo location mapping.');
 
     try {
       const { locationId } = request.params as { locationId: string };
-      const location = await mapLocationToRegiondo(locationId, parsed.data);
+      const { regiondoLocationId, sourceLocationId, title } = parsed.data;
+      let location;
+      if (sourceLocationId) {
+        await requireAdminPermission(request as AdminFastifyRequest, 'locations', 'delete');
+        location = await mapLocationToRegiondo(locationId, { sourceLocationId, title });
+      } else {
+        if (!regiondoLocationId) throw new ValidationHttpError('Enter a Regiondo location ID.');
+        location = await updateLocation(locationId, {
+          regiondoLocationId,
+          ...(title ? { title } : {})
+        });
+      }
       await recordAdminWriteAudit({
         request,
         auth,
@@ -709,7 +724,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
         entityType: 'location',
         entityId: location.id,
         details: {
-          sourceLocationId: parsed.data.sourceLocationId,
+          sourceLocationId: sourceLocationId ?? null,
           regiondoLocationId: location.regiondoLocationId
         }
       });
