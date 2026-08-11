@@ -176,6 +176,21 @@ export class RegiondoPayloadError extends RegiondoApiError {
   }
 }
 
+const REGIONDO_BOOKING_UPDATE_UNSUPPORTED_MESSAGE =
+  'Regiondo does not allow this booking to be edited through the supplier API. No changes were saved. Update the booking in Regiondo, then synchronize it here.';
+
+export class RegiondoBookingUpdateUnsupportedError extends RegiondoApiError {
+  readonly retryable = false;
+
+  constructor(cause?: unknown) {
+    super(REGIONDO_BOOKING_UPDATE_UNSUPPORTED_MESSAGE, 404);
+    this.name = 'RegiondoBookingUpdateUnsupportedError';
+    if (cause !== undefined) {
+      this.cause = cause;
+    }
+  }
+}
+
 export type RegiondoPurchaseRecoveryReason = 'post_outcome_unknown' | 'snapshot_unavailable';
 
 interface RegiondoPurchaseRecoveryRequiredErrorInput {
@@ -1024,14 +1039,25 @@ export class RegiondoClient {
         : {})
     };
 
-    return this.requestJson<unknown>(`/supplier/bookings/${encodeURIComponent(input.bookingKey)}`, {
-      body,
-      method: 'PUT',
-      params: {
-        ...(input.orderNumber ? { order_number: input.orderNumber } : {}),
-        store_locale: this.language
+    try {
+      return await this.requestJson<unknown>(`/supplier/bookings/${encodeURIComponent(input.bookingKey)}`, {
+        body,
+        method: 'PUT',
+        params: {
+          ...(input.orderNumber ? { order_number: input.orderNumber } : {}),
+          store_locale: this.language
+        }
+      });
+    } catch (error) {
+      // Regiondo documents supplier bookings as a read API. Some accounts have
+      // historically exposed a private update operation, while others answer
+      // with 404 for the operation itself. This is not a location-mapping error
+      // and retrying the same ambiguous write is unsafe.
+      if (error instanceof RegiondoApiError && error.status === 404) {
+        throw new RegiondoBookingUpdateUnsupportedError(error);
       }
-    });
+      throw error;
+    }
   }
 
   async cancelTickets(referenceIds: string[]): Promise<void> {

@@ -16,6 +16,13 @@ interface LocationRow {
   updated_at: Date | string;
 }
 
+export interface RegiondoLocationCandidate {
+  addresses: string[];
+  id: string;
+  locationNames: string[];
+  title: string;
+}
+
 const SYSTEM_LOCATION_PROVIDER_IDS = new Set([
   SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID,
   SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID
@@ -178,6 +185,41 @@ export async function listLocations(): Promise<DashboardLocation[]> {
   );
 
   return result.rows.map(mapLocationRow);
+}
+
+export async function listRegiondoLocationCandidates(): Promise<RegiondoLocationCandidate[]> {
+  const result = await pool.query<{
+    addresses: string[] | null;
+    location_id: string;
+    location_title: string | null;
+    location_names: string[] | null;
+  }>(
+    `SELECT
+       p.regiondo_raw ->> 'location_id' AS location_id,
+       MAX(COALESCE(
+         NULLIF(BTRIM(p.regiondo_raw ->> 'location_name'), ''),
+         NULLIF(BTRIM(p.regiondo_raw ->> 'city'), '')
+       )) AS location_title,
+       ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(p.regiondo_raw ->> 'location_name'), '')), NULL) AS location_names,
+       ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(p.regiondo_raw ->> 'location_address'), '')), NULL) AS addresses
+     FROM products p
+     WHERE p.regiondo_product_id IS NOT NULL
+       AND NULLIF(BTRIM(p.regiondo_raw ->> 'location_id'), '') IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM locations l
+         WHERE l.regiondo_location_id = p.regiondo_raw ->> 'location_id'
+       )
+     GROUP BY p.regiondo_raw ->> 'location_id'
+     ORDER BY MAX(NULLIF(BTRIM(p.regiondo_raw ->> 'location_name'), '')) ASC NULLS LAST,
+              p.regiondo_raw ->> 'location_id' ASC`
+  );
+
+  return result.rows.map((row) => ({
+    addresses: row.addresses ?? [],
+    id: row.location_id,
+    locationNames: row.location_names ?? [],
+    title: row.location_title ?? row.location_names?.[0] ?? `Regiondo location ${row.location_id}`
+  }));
 }
 
 export async function getLocation(locationId: string): Promise<DashboardLocation> {

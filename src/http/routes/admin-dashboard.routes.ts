@@ -40,6 +40,7 @@ import {
   deleteLocation,
   getLocation,
   listLocations,
+  listRegiondoLocationCandidates,
   mapLocationToRegiondo,
   updateLocation
 } from '../../dashboard/repository/locations.js';
@@ -696,6 +697,11 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
     } catch (error) {
       sendError(error);
     }
+  });
+
+  app.get('/api/admin/regiondo/location-candidates', async (request) => {
+    await requireAdminPermission(request as AdminFastifyRequest, 'locations', 'view');
+    return { items: await listRegiondoLocationCandidates() };
   });
 
   app.post('/api/admin/locations/:locationId/regiondo-mapping', async (request) => {

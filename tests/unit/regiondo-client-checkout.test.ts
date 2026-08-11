@@ -10,6 +10,7 @@ vi.mock('../../src/config/logger.js', () => ({
 
 import {
   RegiondoAuthError,
+  RegiondoBookingUpdateUnsupportedError,
   RegiondoClient,
   RegiondoPayloadError,
   RegiondoPurchaseRecoveryRequiredError
@@ -287,6 +288,26 @@ describe('RegiondoClient checkout actions', () => {
         payment_method: 'card'
       }
     });
+  });
+
+  it('classifies a supplier booking update 404 as an unsupported non-retryable operation', async () => {
+    const client = new RegiondoClient({
+      baseUrl: 'https://example.com/v1',
+      currency: 'EUR',
+      fetchImplementation: async () => new Response('Not Found', { status: 404 }),
+      language: 'de-DE',
+      maxRetries: 0,
+      publicKey: 'public-key',
+      requestThrottleMs: 0,
+      requestTimeoutMs: 1_000,
+      retryBaseDelayMs: 1,
+      secretKey: 'secret-key',
+      sleep: async () => undefined,
+      supplierId: '15241'
+    });
+
+    await expect(client.updateBooking({ bookingKey: 'booking-key-1', locationId: '5467' }))
+      .rejects.toBeInstanceOf(RegiondoBookingUpdateUnsupportedError);
   });
 
   it('unwraps wrapped checkout purchase payloads before validating them', async () => {

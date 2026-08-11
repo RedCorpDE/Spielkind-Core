@@ -8,7 +8,7 @@ vi.mock('../../src/db/client.js', () => ({
   pool: { connect, query: poolQuery }
 }));
 
-const { listLocations, mapLocationToRegiondo } = await import('../../src/dashboard/repository/locations.js');
+const { listLocations, listRegiondoLocationCandidates, mapLocationToRegiondo } = await import('../../src/dashboard/repository/locations.js');
 
 const targetId = '11111111-1111-1111-1111-111111111111';
 const sourceId = '22222222-2222-2222-2222-222222222222';
@@ -65,5 +65,26 @@ describe('Regiondo location mapping', () => {
     poolQuery.mockResolvedValue({ rowCount: 1, rows: [row({})] });
     const locations = await listLocations();
     expect(locations[0].providerDataStatus).toBe('none');
+  });
+
+  it('only turns explicit catalog location IDs into Regiondo mapping candidates', async () => {
+    poolQuery.mockResolvedValue({
+      rowCount: 1,
+      rows: [{
+        addresses: ['Kleine Burg 15, Braunschweig, Deutschland'],
+        location_id: 'location-22',
+        location_title: 'VirtuaLounge',
+        location_names: ['VirtuaLounge']
+      }]
+    });
+
+    await expect(listRegiondoLocationCandidates()).resolves.toEqual([{
+      addresses: ['Kleine Burg 15, Braunschweig, Deutschland'],
+      id: 'location-22',
+      locationNames: ['VirtuaLounge'],
+      title: 'VirtuaLounge'
+    }]);
+    expect(poolQuery.mock.calls[0][0]).toContain("regiondo_raw ->> 'location_id'");
+    expect(poolQuery.mock.calls[0][0]).not.toContain("regiondo_raw ->> 'city_id' AS");
   });
 });

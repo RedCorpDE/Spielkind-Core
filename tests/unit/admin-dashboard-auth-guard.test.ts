@@ -7,6 +7,7 @@ const { appConfig } = await import('../../src/config/env.js');
 const protectedReadPaths = [
   '/api/admin/users',
   '/api/admin/locations',
+  '/api/admin/regiondo/location-candidates',
   '/api/admin/locations/00000000-0000-0000-0000-000000000001',
   '/api/admin/task-booking-options',
   '/api/admin/task-columns',

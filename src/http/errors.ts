@@ -3,6 +3,7 @@ import { DashboardConflictError, DashboardNotFoundError, DashboardValidationErro
 import {
   RegiondoApiError,
   RegiondoAuthError,
+  RegiondoBookingUpdateUnsupportedError,
   RegiondoPurchaseRecoveryRequiredError,
   RegiondoRateLimitError,
   RegiondoTransientError
@@ -76,6 +77,7 @@ function getStatusCode(error: Error): number {
   if (error instanceof DashboardNotFoundError) return 404;
   if (error instanceof DashboardConflictError || error instanceof OverbookingError || error instanceof MissingProductResourceMappingError) return 409;
   if (error instanceof DashboardValidationError || error instanceof RegiondoSyncValidationError || error instanceof RegiondoWebhookValidationError) return 400;
+  if (error instanceof RegiondoBookingUpdateUnsupportedError) return 422;
   if (error instanceof RegiondoPurchaseRecoveryRequiredError) return 502;
   if (error instanceof RegiondoApiError) return getRegiondoStatusCode(error);
   return 500;
@@ -83,6 +85,9 @@ function getStatusCode(error: Error): number {
 
 function classifyError(error: Error, status: number): { code: string; severity: AdminErrorSeverity; source: string } {
   const message = error.message.toLowerCase();
+  if (error instanceof RegiondoBookingUpdateUnsupportedError) {
+    return { code: 'REGIONDO_BOOKING_UPDATE_UNSUPPORTED', severity: 'warning', source: 'regiondo' };
+  }
   if (message.includes('regiondo-mapped location') || message.includes('regiondo location id')) {
     return { code: 'REGIONDO_LOCATION_MAPPING_REQUIRED', severity: 'warning', source: 'regiondo' };
   }
@@ -182,6 +187,16 @@ export function registerErrorHandler() {
         ...(error.subId ? { subId: error.subId } : {}),
         ...(error.orderNumber ? { orderNumber: error.orderNumber } : {}),
         ...(error.orderId ? { orderId: error.orderId } : {})
+      });
+      return;
+    }
+
+    if (error instanceof RegiondoBookingUpdateUnsupportedError) {
+      reply.status(422).send({
+        ok: false,
+        code: 'REGIONDO_BOOKING_UPDATE_UNSUPPORTED',
+        retryable: false,
+        error: error.message
       });
       return;
     }
