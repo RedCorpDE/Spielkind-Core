@@ -231,6 +231,13 @@ run:
 npm run job:sync-regiondo-bookings -- --full
 ```
 
+To synchronize one known Regiondo booking without scanning the booking history or
+advancing the regular sync cursor, run:
+
+```bash
+npm run job:sync-regiondo-bookings -- --booking-key BOOKING_KEY
+```
+
 If Regiondo still does not create mapping candidates, inspect only the sanitized
 location-related fields stored from recent booking and catalog payloads:
 

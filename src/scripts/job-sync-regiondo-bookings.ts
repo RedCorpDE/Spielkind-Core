@@ -1,11 +1,22 @@
 import { logger } from '../config/logger.js';
 import { runSyncRegiondoBookingsJob } from '../modules/regiondo/regiondo-booking-sync.job.js';
+import { parseRegiondoBookingSyncCliArgs } from '../modules/regiondo/regiondo-booking-sync.service.js';
 
-const full = process.argv.slice(2).includes('--full');
+let options;
+try {
+  options = parseRegiondoBookingSyncCliArgs(process.argv.slice(2));
+} catch (error) {
+  logger.error({ err: error }, 'Invalid Regiondo booking sync command');
+  process.exitCode = 1;
+}
 
-runSyncRegiondoBookingsJob({ full })
+const run = options ? runSyncRegiondoBookingsJob(options) : Promise.resolve(null);
+
+run
   .then((result) => {
-    logger.info({ result }, 'Regiondo booking sync job completed');
+    if (result) {
+      logger.info({ result }, 'Regiondo booking sync job completed');
+    }
   })
   .catch((error) => {
     logger.error({ err: error }, 'Regiondo booking sync job failed');

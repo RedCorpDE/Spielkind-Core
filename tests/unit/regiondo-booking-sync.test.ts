@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildRegiondoBookingSyncWindow,
-  collectRegiondoBookingSyncCandidates
+  collectRegiondoBookingSyncCandidates,
+  parseRegiondoBookingSyncCliArgs
 } from '../../src/modules/regiondo/regiondo-booking-sync.service.js';
 
 describe('buildRegiondoBookingSyncWindow', () => {
@@ -65,5 +66,24 @@ describe('collectRegiondoBookingSyncCandidates', () => {
         orderNumber: 'R-10002'
       }
     ]);
+  });
+});
+
+describe('parseRegiondoBookingSyncCliArgs', () => {
+  it('accepts a single targeted booking key', () => {
+    expect(parseRegiondoBookingSyncCliArgs(['--booking-key', 'booking-key-1'])).toEqual({
+      bookingKey: 'booking-key-1',
+      full: false
+    });
+    expect(parseRegiondoBookingSyncCliArgs(['--booking-key=booking-key-2'])).toEqual({
+      bookingKey: 'booking-key-2',
+      full: false
+    });
+  });
+
+  it('rejects missing, conflicting, and unknown options', () => {
+    expect(() => parseRegiondoBookingSyncCliArgs(['--booking-key'])).toThrow(/non-empty Regiondo booking key/);
+    expect(() => parseRegiondoBookingSyncCliArgs(['--full', '--booking-key', 'booking-key-1'])).toThrow(/either --full or --booking-key/);
+    expect(() => parseRegiondoBookingSyncCliArgs(['--last', '5'])).toThrow(/Unknown Regiondo booking sync option/);
   });
 });

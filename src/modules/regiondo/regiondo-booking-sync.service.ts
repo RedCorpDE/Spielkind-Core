@@ -13,6 +13,43 @@ export interface RegiondoBookingSyncCandidate {
   orderNumber: string | null;
 }
 
+export interface RegiondoBookingSyncCliOptions {
+  bookingKey?: string;
+  full: boolean;
+}
+
+export function parseRegiondoBookingSyncCliArgs(args: string[]): RegiondoBookingSyncCliOptions {
+  let bookingKey: string | undefined;
+  let full = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '--full') {
+      full = true;
+      continue;
+    }
+
+    if (argument === '--booking-key') {
+      bookingKey = args[index + 1]?.trim();
+      index += 1;
+    } else if (argument.startsWith('--booking-key=')) {
+      bookingKey = argument.slice('--booking-key='.length).trim();
+    } else {
+      throw new Error(`Unknown Regiondo booking sync option: ${argument}`);
+    }
+
+    if (!bookingKey) {
+      throw new Error('--booking-key requires a non-empty Regiondo booking key.');
+    }
+  }
+
+  if (full && bookingKey) {
+    throw new Error('Use either --full or --booking-key, not both.');
+  }
+
+  return { ...(bookingKey ? { bookingKey } : {}), full };
+}
+
 function toDateOnly(value: Date): string {
   return value.toISOString().slice(0, 10);
 }

@@ -51,28 +51,39 @@ async function fetchSupplierBookingsForWindow(input: {
   };
 }
 
-export async function runSyncRegiondoBookingsJob(input: { full?: boolean; limit?: number } = {}) {
+export async function runSyncRegiondoBookingsJob(input: { bookingKey?: string; full?: boolean; limit?: number } = {}) {
+  const targetedBookingKey = input.bookingKey?.trim() || null;
   return runJobWithLock({
     jobType: JOB_TYPES.SYNC_REGIONDO_BOOKINGS,
-    metadata: { full: input.full ?? false, limit: input.limit ?? null },
+    metadata: {
+      bookingKey: targetedBookingKey,
+      full: input.full ?? false,
+      limit: input.limit ?? null,
+      targeted: Boolean(targetedBookingKey)
+    },
     handler: async () => {
       const syncId = await startSync('regiondo_bookings');
 
       try {
-        const previousCursorValue = await getRegiondoBookingSyncCursorValue();
+        const previousCursorValue = targetedBookingKey ? null : await getRegiondoBookingSyncCursorValue();
         const window = buildRegiondoBookingSyncWindow({
           initialLookbackDays: input.full ? 365 : appConfig.REGIONDO_BOOKING_SYNC_INITIAL_LOOKBACK_DAYS,
           lastSuccessAt: input.full ? null : previousCursorValue,
           overlapDays: appConfig.REGIONDO_BOOKING_SYNC_OVERLAP_DAYS
         });
-        const { bookingsCount, pageCount, supplierBookings } = await fetchSupplierBookingsForWindow(window);
-        const allCandidates = collectRegiondoBookingSyncCandidates(supplierBookings);
+        const supplierResult = targetedBookingKey
+          ? { bookingsCount: 0, pageCount: 0, supplierBookings: [] }
+          : await fetchSupplierBookingsForWindow(window);
+        const allCandidates = targetedBookingKey
+          ? [{ bookingKey: targetedBookingKey, orderNumber: null }]
+          : collectRegiondoBookingSyncCandidates(supplierResult.supplierBookings);
         const candidates =
           typeof input.limit === 'number' && input.limit > 0
             ? allCandidates.slice(0, input.limit)
             : allCandidates;
         const isTruncated =
           typeof input.limit === 'number' && input.limit > 0 && allCandidates.length > input.limit;
+        const shouldAdvanceCursor = !targetedBookingKey && !isTruncated;
         const failures: string[] = [];
         let processedCount = 0;
         let skippedConsumptionRebuildCount = 0;
@@ -116,17 +127,18 @@ export async function runSyncRegiondoBookingsJob(input: { full?: boolean; limit?
 
         const metadata = {
           candidateCount: candidates.length,
-          cursorAdvanced: !isTruncated,
+          cursorAdvanced: shouldAdvanceCursor,
           importedCount: processedCount,
           fullRefresh: input.full ?? false,
-          pageCount,
+          pageCount: supplierResult.pageCount,
           skippedConsumptionRebuildCount,
-          supplierBookingRowCount: bookingsCount,
+          supplierBookingRowCount: supplierResult.bookingsCount,
+          targetedBookingKey,
           windowEndDate: window.endDate,
           windowStartDate: window.startDate
         };
 
-        if (!isTruncated) {
+        if (shouldAdvanceCursor) {
           await storeRegiondoBookingSyncState({
             cursorValue: window.cursorValue,
             metadata
