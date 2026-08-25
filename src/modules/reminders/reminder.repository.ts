@@ -4,6 +4,7 @@ import {
   buildReminderTemplateVariables,
   renderReminderTemplate
 } from './reminder-template.js';
+import { MessengerClient, type MessengerStatus } from '../messenger/messenger.client.js';
 
 type ReminderChannel = 'email' | 'telegram' | 'sms' | 'whatsapp';
 
@@ -18,6 +19,9 @@ interface ReminderCandidateRow {
   phone_number: string | null;
   preferred_contact_type: string | null;
   scheduled_for: string;
+  whatsapp_template_name: string | null;
+  whatsapp_template_language: string | null;
+  whatsapp_parameter_mapping: Record<string, string>;
 }
 
 interface ContactMethodRow {
@@ -31,6 +35,7 @@ interface ContactMethodRow {
 interface ReminderDeliveryRow {
   reminder_delivery_id: string;
   channel: ReminderChannel;
+  messenger_message_id: string | null;
 }
 
 export function buildReminderDeliveryDedupeKey(
@@ -47,6 +52,9 @@ export async function createDueReminderDeliveries(limit = 250): Promise<number> 
        rr.reminder_rule_id,
        rr.additional_channels,
        rr.reminder_type,
+       rr.whatsapp_template_name,
+       rr.whatsapp_template_language,
+       rr.whatsapp_parameter_mapping,
        b.booking_id,
        b.client_id,
        b.dt_from,
@@ -118,7 +126,7 @@ export async function createDueReminderDeliveries(limit = 250): Promise<number> 
       if (
         candidate.preferred_contact_type === extraChannel &&
         ((extraChannel === 'email' && candidate.email) ||
-          ((extraChannel === 'sms' || extraChannel === 'whatsapp' || extraChannel === 'telegram') && candidate.phone_number))
+          ((extraChannel === 'sms' || extraChannel === 'telegram') && candidate.phone_number))
       ) {
         channels.add(extraChannel);
       }
@@ -173,7 +181,7 @@ export async function claimReminderDeliveries(limit: number): Promise<ReminderDe
          attempt_count = deliveries.attempt_count + 1
      FROM next_deliveries
      WHERE deliveries.reminder_delivery_id = next_deliveries.reminder_delivery_id
-     RETURNING deliveries.reminder_delivery_id, deliveries.channel`,
+     RETURNING deliveries.reminder_delivery_id, deliveries.channel, deliveries.messenger_message_id`,
     [limit]
   );
 
@@ -187,6 +195,10 @@ export async function getReminderDeliveryPayload(reminderDeliveryId: string): Pr
     reminder_type: string;
     channel: ReminderChannel;
     dedupe_key: string;
+    messenger_message_id: string | null;
+    whatsapp_template_name: string | null;
+    whatsapp_template_language: string | null;
+    whatsapp_parameter_mapping: Record<string, string>;
     booking_id: string;
     regiondo_booking_id: string | null;
     regiondo_order_number: string | null;
@@ -213,6 +225,10 @@ export async function getReminderDeliveryPayload(reminderDeliveryId: string): Pr
        rd.reminder_type,
        rd.channel,
        rd.dedupe_key,
+       rd.messenger_message_id,
+       rr.whatsapp_template_name,
+       rr.whatsapp_template_language,
+       rr.whatsapp_parameter_mapping,
        b.booking_id,
        b.regiondo_booking_id,
        b.regiondo_order_number,
@@ -268,6 +284,10 @@ export async function getReminderDeliveryPayload(reminderDeliveryId: string): Pr
        rd.reminder_type,
        rd.channel,
        rd.dedupe_key,
+       rd.messenger_message_id,
+       rr.whatsapp_template_name,
+       rr.whatsapp_template_language,
+       rr.whatsapp_parameter_mapping,
        b.booking_id,
        b.regiondo_booking_id,
        b.regiondo_order_number,
@@ -349,8 +369,54 @@ export async function getReminderDeliveryPayload(reminderDeliveryId: string): Pr
     metadata: {
       source: 'core',
       scheduled_for: row.scheduled_for
-    }
+    },
+    whatsapp: row.channel === 'whatsapp' && row.whatsapp_template_name && row.whatsapp_template_language
+      ? {
+          template: row.whatsapp_template_name,
+          language: row.whatsapp_template_language,
+          parameterMapping: row.whatsapp_parameter_mapping ?? {},
+          messengerMessageId: row.messenger_message_id,
+          recipient: row.phone_number,
+          parameters: buildWhatsAppParameters(row.whatsapp_parameter_mapping ?? {}, templateVariables)
+        }
+      : null
   };
+}
+
+function buildWhatsAppParameters(mapping: Record<string, string>, variables: Record<string, string>): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [position, token] of Object.entries(mapping)) {
+    if (!/^\d+$/.test(position) || variables[token] === undefined) continue;
+    result[position] = variables[token];
+  }
+  return result;
+}
+
+export async function dispatchWhatsAppReminder(payload: Awaited<ReturnType<typeof getReminderDeliveryPayload>>) {
+  if (!payload) throw new Error('WhatsApp delivery context was not found.');
+  const whatsapp = payload?.whatsapp as null | { template: string; language: string; parameters: Record<string, string>; messengerMessageId: string | null; recipient: string | null };
+  if (!whatsapp?.recipient) throw new Error('WhatsApp delivery lacks a verified recipient or approved template.');
+  const client = new MessengerClient();
+  if (whatsapp.messengerMessageId) return client.retryMessage(whatsapp.messengerMessageId);
+  return client.sendWhatsApp({ recipient: whatsapp.recipient, template: whatsapp.template, language: whatsapp.language, parameters: whatsapp.parameters, idempotencyKey: payload.dedupe_key as string });
+}
+
+export async function markReminderDeliveryQueued(reminderDeliveryId: string, message: { id: string; status: MessengerStatus }): Promise<void> {
+  await pool.query(`UPDATE reminder_deliveries SET status = $2, messenger_message_id = $3, locked_at = NULL, last_error = NULL, provider_response = jsonb_build_object('messengerMessageId', $3, 'status', $2) WHERE reminder_delivery_id = $1`, [reminderDeliveryId, message.status === 'pending' ? 'queued' : message.status, message.id]);
+}
+
+export async function reconcileWhatsAppReminderStatuses(limit = 100): Promise<number> {
+  const due = await pool.query<{ reminder_delivery_id: string; messenger_message_id: string }>(`SELECT reminder_delivery_id, messenger_message_id FROM reminder_deliveries WHERE channel = 'whatsapp' AND messenger_message_id IS NOT NULL AND status IN ('queued', 'sending', 'sent') ORDER BY updated_at ASC LIMIT $1`, [limit]);
+  const client = new MessengerClient();
+  for (const delivery of due.rows) {
+    try {
+      const message = await client.getMessage(delivery.messenger_message_id);
+      await pool.query(`UPDATE reminder_deliveries SET status = $2, last_error = $3, last_status_sync_at = now(), sent_at = CASE WHEN $2 = 'sent' THEN COALESCE(sent_at, now()) ELSE sent_at END WHERE reminder_delivery_id = $1`, [delivery.reminder_delivery_id, message.status === 'pending' ? 'queued' : message.status, message.lastError]);
+    } catch {
+      await pool.query('UPDATE reminder_deliveries SET last_status_sync_at = now() WHERE reminder_delivery_id = $1', [delivery.reminder_delivery_id]);
+    }
+  }
+  return due.rowCount ?? 0;
 }
 
 export async function markReminderDeliverySent(reminderDeliveryId: string, providerResponse: unknown): Promise<void> {

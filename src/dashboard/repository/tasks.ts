@@ -1,4 +1,5 @@
 import { pool } from '../../db/client.js';
+import type { PoolClient } from 'pg';
 import type {
   CreateDashboardTaskInput,
   DashboardTask,
@@ -355,26 +356,23 @@ export async function createTask(input: CreateDashboardTaskInput, actor?: Dashbo
   }
 }
 
-export async function updateTask(
+export async function updateTaskRecord(
+  client: PoolClient,
   taskId: string,
   input: UpdateDashboardTaskInput,
   actor?: DashboardTaskMutationActor
-): Promise<DashboardTask> {
-  const client = await pool.connect();
+): Promise<void> {
+  const existingRow = await queryTaskRow(client, taskId, true);
+  if (!existingRow) {
+    throw new DashboardNotFoundError('Task not found.');
+  }
 
-  try {
-    await client.query('BEGIN');
-    const existingRow = await queryTaskRow(client, taskId, true);
-    if (!existingRow) {
-      throw new DashboardNotFoundError('Task not found.');
-    }
+  const existingTask = mapTaskRow(existingRow);
+  const column = await resolveTaskColumnForUpdate(client, input.columnId);
+  const owner = await ensureOwner(client, input.ownerId);
+  const rawJson = buildTaskRawJson(input.site, input.rawJson, existingRow.raw_json);
 
-    const existingTask = mapTaskRow(existingRow);
-    const column = await resolveTaskColumnForUpdate(client, input.columnId);
-    const owner = await ensureOwner(client, input.ownerId);
-    const rawJson = buildTaskRawJson(input.site, input.rawJson, existingRow.raw_json);
-
-    await client.query(
+  await client.query(
       `UPDATE tasks
        SET
          column_key = $1,
@@ -403,16 +401,27 @@ export async function updateTask(
         input.reservedCapacityDate ?? null,
         taskId
       ]
-    );
+  );
 
-    if (input.connectedBookingId !== undefined && input.connectedBookingId !== existingTask.connectedBookingId) {
-      await replaceTaskBookingLinks(client, {
-        taskId,
-        bookingIds: input.connectedBookingId ? [input.connectedBookingId] : [],
-        primaryBookingId: input.connectedBookingId ?? null
-      });
-    }
+  if (input.connectedBookingId !== undefined && input.connectedBookingId !== existingTask.connectedBookingId) {
+    await replaceTaskBookingLinks(client, {
+      taskId,
+      bookingIds: input.connectedBookingId ? [input.connectedBookingId] : [],
+      primaryBookingId: input.connectedBookingId ?? null
+    });
+  }
+}
 
+export async function updateTask(
+  taskId: string,
+  input: UpdateDashboardTaskInput,
+  actor?: DashboardTaskMutationActor
+): Promise<DashboardTask> {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+    await updateTaskRecord(client, taskId, input, actor);
     await client.query('COMMIT');
     return await getTask(taskId);
   } catch (error) {

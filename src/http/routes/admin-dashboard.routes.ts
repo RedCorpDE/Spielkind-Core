@@ -24,8 +24,8 @@ import {
   createBookingFromTask,
   getBooking,
   getTaskBookingContext,
-  syncLinkedTasksFromBooking,
-  updateBooking
+  previewTaskBooking,
+  updateTaskWithLinkedBookingsAtomically
 } from '../../dashboard/repository/bookings.js';
 import {
   createTaskColumn,
@@ -53,7 +53,7 @@ import {
   DashboardNotFoundError,
   DashboardValidationError
 } from '../../dashboard/repository/core.js';
-import type { DashboardTaskRawJson } from '../../dashboard/types.js';
+import type { DashboardTaskRawJson, UpdateDashboardTaskInput } from '../../dashboard/types.js';
 import { regiondoClient } from '../../modules/regiondo/regiondo.client.js';
 import { regiondoLocationTypeSchema } from '../../modules/regiondo/regiondo.types.js';
 
@@ -109,7 +109,12 @@ const linkedBookingSharedSchema = z
         phoneNumber: z.string().nullable().optional()
       })
       .optional(),
-    locationId: z.string().uuid().nullable().optional()
+    locationId: z.string().uuid().nullable().optional(),
+    products: z.array(z.object({
+      productId: z.string().uuid(),
+      quantity: z.coerce.number().int().positive(),
+      unitPrice: z.coerce.number().nonnegative().nullable().optional()
+    })).min(1).optional()
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: 'At least one shared booking field must be provided.'
@@ -974,13 +979,15 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   app.post('/api/admin/tasks/:taskId/booking', async (request, reply) => {
     const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'create');
     const { taskId } = request.params as { taskId: string };
+    const body = z.object({ expectedFingerprint: z.string().length(64).optional() }).safeParse(request.body ?? {});
+    if (!body.success) throw new ValidationHttpError('Invalid task booking payload.');
 
     try {
       const result = await createBookingFromTask(taskId, {
         name: auth.user.displayName,
         role: auth.user.role,
         source: 'user'
-      });
+      }, body.data.expectedFingerprint);
       if (result.status === 'pending') {
         await recordAdminWriteAudit({
           request,
@@ -1005,6 +1012,23 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
       });
 
       return { item: booking };
+    } catch (error) {
+      sendError(error);
+    }
+  });
+
+  app.post('/api/admin/tasks/:taskId/booking-preview', async (request) => {
+    await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'create');
+    const { taskId } = request.params as { taskId: string };
+    const parsed = z.object({ task: updateTaskSchema.optional() }).safeParse(request.body ?? {});
+    if (!parsed.success) throw new ValidationHttpError('Invalid task booking preview payload.');
+    try {
+      return {
+        item: await previewTaskBooking(
+          taskId,
+          parsed.data.task as UpdateDashboardTaskInput | undefined
+        )
+      };
     } catch (error) {
       sendError(error);
     }
@@ -1050,29 +1074,20 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
       if (parsed.data.sharedBooking) {
         await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'update');
         bookingContext = await getTaskBookingContext(taskId);
-        await updateBooking(
-          bookingContext.primaryBookingId,
-          {
-            ...parsed.data.sharedBooking,
-            expectedLinkedContextVersion: parsed.data.expectedLinkedContextVersion
-          },
-          actor
-        );
       }
 
-      let task = await updateTask(
+      const normalizedTask = {
+        ...parsed.data.task,
+        rawJson: parsed.data.task.rawJson as DashboardTaskRawJson | undefined
+      };
+      await updateTaskWithLinkedBookingsAtomically({
         taskId,
-        {
-          ...parsed.data.task,
-          rawJson: parsed.data.task.rawJson as DashboardTaskRawJson | undefined
-        },
+        task: normalizedTask,
+        sharedBooking: parsed.data.sharedBooking,
+        expectedLinkedContextVersion: parsed.data.expectedLinkedContextVersion,
         actor
-      );
-
-      if (bookingContext && parsed.data.sharedBooking) {
-        await syncLinkedTasksFromBooking(bookingContext.primaryBookingId, parsed.data.sharedBooking, actor);
-        task = await getTask(taskId);
-      }
+      });
+      const task = await getTask(taskId);
 
       await recordAdminWriteAudit({
         request,

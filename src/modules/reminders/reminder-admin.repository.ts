@@ -1,7 +1,7 @@
 import { pool } from '../../db/pool.js';
 
 type ReminderChannel = 'email' | 'telegram' | 'sms' | 'whatsapp';
-type ReminderDeliveryStatus = 'pending' | 'processing' | 'sent' | 'failed' | 'skipped';
+type ReminderDeliveryStatus = 'pending' | 'processing' | 'queued' | 'sending' | 'sent' | 'delivered' | 'read' | 'failed' | 'skipped';
 
 export interface AdminReminderRule {
   reminderRuleId: string;
@@ -12,6 +12,9 @@ export interface AdminReminderRule {
   additionalChannels: ReminderChannel[];
   reminderType: string;
   messageTemplate: string;
+  whatsappTemplateName: string | null;
+  whatsappTemplateLanguage: string | null;
+  whatsappParameterMapping: Record<string, string>;
   locationId: string | null;
   productId: string | null;
   bookingStatuses: string[];
@@ -47,6 +50,9 @@ interface ReminderRuleRow {
   additional_channels: ReminderChannel[];
   reminder_type: string;
   message_template: string;
+  whatsapp_template_name: string | null;
+  whatsapp_template_language: string | null;
+  whatsapp_parameter_mapping: Record<string, string>;
   location_id: string | null;
   product_id: string | null;
   booking_statuses: string[];
@@ -83,6 +89,9 @@ function mapReminderRuleRow(row: ReminderRuleRow): AdminReminderRule {
     additionalChannels: row.additional_channels ?? [],
     reminderType: row.reminder_type,
     messageTemplate: row.message_template,
+    whatsappTemplateName: row.whatsapp_template_name,
+    whatsappTemplateLanguage: row.whatsapp_template_language,
+    whatsappParameterMapping: row.whatsapp_parameter_mapping ?? {},
     locationId: row.location_id,
     productId: row.product_id,
     bookingStatuses: row.booking_statuses ?? [],
@@ -123,6 +132,9 @@ export async function listReminderRules(): Promise<AdminReminderRule[]> {
        additional_channels,
        reminder_type,
        message_template,
+       whatsapp_template_name,
+       whatsapp_template_language,
+       whatsapp_parameter_mapping,
        location_id,
        product_id,
        booking_statuses,
@@ -145,6 +157,9 @@ export async function getReminderRule(reminderRuleId: string): Promise<AdminRemi
        additional_channels,
        reminder_type,
        message_template,
+       whatsapp_template_name,
+       whatsapp_template_language,
+       whatsapp_parameter_mapping,
        location_id,
        product_id,
        booking_statuses,
@@ -166,6 +181,9 @@ export async function createReminderRule(input: {
   additionalChannels: ReminderChannel[];
   reminderType: string;
   messageTemplate: string;
+  whatsappTemplateName?: string | null;
+  whatsappTemplateLanguage?: string | null;
+  whatsappParameterMapping?: Record<string, string>;
   locationId?: string | null;
   productId?: string | null;
   bookingStatuses: string[];
@@ -180,12 +198,15 @@ export async function createReminderRule(input: {
        additional_channels,
        reminder_type,
        message_template,
+       whatsapp_template_name,
+       whatsapp_template_language,
+       whatsapp_parameter_mapping,
        location_id,
        product_id,
        booking_statuses,
        created_by_user_id
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
      RETURNING reminder_rule_id`,
     [
       input.title.trim(),
@@ -195,6 +216,9 @@ export async function createReminderRule(input: {
       input.additionalChannels,
       input.reminderType,
       input.messageTemplate,
+      input.whatsappTemplateName ?? null,
+      input.whatsappTemplateLanguage ?? null,
+      JSON.stringify(input.whatsappParameterMapping ?? {}),
       input.locationId ?? null,
       input.productId ?? null,
       input.bookingStatuses,
@@ -220,6 +244,9 @@ export async function updateReminderRule(
     additionalChannels: ReminderChannel[];
     reminderType: string;
     messageTemplate: string;
+    whatsappTemplateName: string | null;
+    whatsappTemplateLanguage: string | null;
+    whatsappParameterMapping: Record<string, string>;
     locationId: string | null;
     productId: string | null;
     bookingStatuses: string[];
@@ -240,10 +267,13 @@ export async function updateReminderRule(
        additional_channels = $5,
        reminder_type = $6,
        message_template = $7,
-       location_id = $8,
-       product_id = $9,
-       booking_statuses = $10
-     WHERE reminder_rule_id = $11`,
+       whatsapp_template_name = $8,
+       whatsapp_template_language = $9,
+       whatsapp_parameter_mapping = $10::jsonb,
+       location_id = $11,
+       product_id = $12,
+       booking_statuses = $13
+     WHERE reminder_rule_id = $14`,
     [
       input.title?.trim() || existing.title,
       input.isEnabled ?? existing.isEnabled,
@@ -252,6 +282,9 @@ export async function updateReminderRule(
       input.additionalChannels ?? existing.additionalChannels,
       input.reminderType ?? existing.reminderType,
       input.messageTemplate ?? existing.messageTemplate,
+      input.whatsappTemplateName === undefined ? existing.whatsappTemplateName : input.whatsappTemplateName,
+      input.whatsappTemplateLanguage === undefined ? existing.whatsappTemplateLanguage : input.whatsappTemplateLanguage,
+      JSON.stringify(input.whatsappParameterMapping ?? existing.whatsappParameterMapping),
       input.locationId === undefined ? existing.locationId : input.locationId,
       input.productId === undefined ? existing.productId : input.productId,
       input.bookingStatuses ?? existing.bookingStatuses,

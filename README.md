@@ -6,6 +6,7 @@ Core is a TypeScript Node.js backend for:
 - Regiondo catalog sync
 - internal resource occupancy via `consumptions`
 - reminder delivery dispatch through an external provider webhook
+- WhatsApp reminder dispatch through Spielkind Messenger with delivery-state reconciliation
 - admin APIs for products, bookings, resources, clients, groups, and reminders
 
 The runtime is built around:
@@ -73,6 +74,9 @@ Important variables:
 - `REGIONDO_PRODUCT_SUPPLIER_ID`
 - `REMINDER_PROVIDER_WEBHOOK_URL`
 - `REMINDER_PROVIDER_SECRET`
+- `MESSENGER_BASE_URL`
+- `MESSENGER_API_KEY`
+- `MESSENGER_REQUEST_TIMEOUT_MS`
 - `CRON_SECRET`
 - `ENABLE_EMBEDDED_SCHEDULER`
 

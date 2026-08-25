@@ -144,17 +144,42 @@ async function ensureProductStub(
   return result.rows[0].product_id;
 }
 
+interface ExistingBookingOverrides {
+  local_override_fields: string[] | null;
+  location_override: string | null;
+}
+
+async function getExistingBookingOverrides(
+  client: PoolClient,
+  bookingKey: string
+): Promise<ExistingBookingOverrides | null> {
+  const result = await client.query<ExistingBookingOverrides>(
+    `SELECT admin.local_override_fields, admin.location_override
+     FROM bookings b
+     LEFT JOIN booking_admin_metadata admin ON admin.booking_id = b.booking_id
+     WHERE b.regiondo_booking_id = $1
+     LIMIT 1
+     FOR UPDATE OF b`,
+    [bookingKey]
+  );
+  return result.rowCount ? result.rows[0] : null;
+}
+
 export async function upsertNormalizedRegiondoBooking(
   client: PoolClient,
-  input: NormalizedRegiondoBookingImport
+  input: NormalizedRegiondoBookingImport,
+  options: { ignoreLocalOverrides?: boolean } = {}
 ): Promise<{ bookingId: string }> {
-  const localOverrideFields = new Set<string>();
+  const existing = options.ignoreLocalOverrides ? null : await getExistingBookingOverrides(client, input.bookingKey);
+  const localOverrideFields = new Set(existing?.local_override_fields ?? []);
   const clientId = await upsertClient(client, input.client);
   const providerLocationId = await resolveLocation(client, {
     location: input.location,
     regiondoProductIds: input.items.map((item) => item.regiondoProductId)
   });
-  const locationId = providerLocationId;
+  const locationId = existing?.location_override === 'none'
+    ? await resolveNoLocationPlaceholder(client)
+    : providerLocationId;
 
   const bookingResult = await client.query<{ booking_id: string }>(
     `INSERT INTO bookings (

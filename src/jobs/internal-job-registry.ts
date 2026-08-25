@@ -4,6 +4,7 @@ import { runReconcileRegiondoBookingsJob } from '../modules/bookings/reconcile-r
 import { runRecoverTaskBookingAttemptsJob } from '../modules/bookings/task-booking-recovery.job.js';
 import { runSyncRegiondoBookingsJob } from '../modules/regiondo/regiondo-booking-sync.job.js';
 import { runDispatchRemindersJob } from '../modules/reminders/dispatch-reminders.job.js';
+import { runReconcileMessengerStatusesJob } from '../modules/reminders/reconcile-messenger-statuses.job.js';
 import { runRegiondoCatalogSyncJob } from '../modules/regiondo/regiondo-catalog-sync.job.js';
 import { runProcessRegiondoWebhookInboxJob } from '../modules/regiondo/regiondo-webhook-inbox.job.js';
 import { JOB_TYPES, type JobResult, type JobType } from './job-types.js';
@@ -65,6 +66,14 @@ export const internalJobDefinitions = [
     embeddedCron: appConfig.REMINDER_DISPATCH_CRON,
     bodySchema: limitBodySchema,
     run: async (body) => runDispatchRemindersJob({ limit: body.limit })
+  }),
+  defineInternalJob({
+    routePath: 'reconcile-messenger-statuses',
+    jobType: JOB_TYPES.RECONCILE_MESSENGER_STATUSES,
+    description: 'Synchronizes WhatsApp delivery states from Messenger.',
+    embeddedCron: '*/1 * * * *',
+    bodySchema: limitBodySchema,
+    run: async (body) => runReconcileMessengerStatusesJob({ limit: body.limit })
   }),
   defineInternalJob({
     routePath: 'reconcile-regiondo-bookings',

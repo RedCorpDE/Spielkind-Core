@@ -61,6 +61,8 @@ function applyTestDefaults(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   normalized.REGIONDO_CURRENCY ??= 'EUR';
   normalized.REMINDER_PROVIDER_WEBHOOK_URL ??= 'https://provider.example/webhook';
   normalized.REMINDER_PROVIDER_SECRET ??= 'test-reminder-secret';
+  normalized.MESSENGER_BASE_URL ??= 'https://messenger.example';
+  normalized.MESSENGER_API_KEY ??= 'test-messenger-key';
   normalized.CRON_SECRET ??= 'test-cron-secret';
   normalized.ENABLE_EMBEDDED_SCHEDULER ??= 'false';
   normalized.SCHEDULER_TIMEZONE ??= 'Europe/Berlin';
@@ -90,6 +92,8 @@ const schema = z
     REGIONDO_PUBLIC_KEY: z.string().min(1),
     REGIONDO_SECRET_KEY: z.string().min(1),
     REGIONDO_PRODUCT_SUPPLIER_ID: z.string().min(1),
+    REGIONDO_DASHBOARD_BOOKING_URL_TEMPLATE: z.string().url().optional(),
+    REGIONDO_DASHBOARD_BOOKINGS_URL: z.string().url().default('https://login.regiondo.com'),
     REGIONDO_LANGUAGE: z.string().default('de-DE'),
     REGIONDO_CURRENCY: z.string().default('EUR'),
     REGIONDO_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(10_000),
@@ -125,6 +129,9 @@ const schema = z
 
     REMINDER_PROVIDER_WEBHOOK_URL: z.string().url(),
     REMINDER_PROVIDER_SECRET: z.string().min(1),
+    MESSENGER_BASE_URL: z.string().url().optional(),
+    MESSENGER_API_KEY: z.string().min(1).optional(),
+    MESSENGER_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(10_000),
 
     DASHBOARD_ALLOWED_ORIGIN: commaSeparatedOrigins,
     ADMIN_ACCESS_TOKEN_SECRET: z.string().min(32),

@@ -1,6 +1,14 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { getBooking, getLinkedBookingIds, listBookings, syncLinkedTasksFromBooking, updateBooking } from '../../dashboard/repository/bookings.js';
+import {
+  applyRegiondoBookingSync,
+  getBooking,
+  getLinkedBookingIds,
+  listBookings,
+  previewRegiondoBookingSync,
+  syncLinkedTasksFromBooking,
+  updateBooking
+} from '../../dashboard/repository/bookings.js';
 import { DashboardConflictError, DashboardNotFoundError, DashboardValidationError } from '../../dashboard/repository/core.js';
 import { recordAdminWriteAudit } from '../admin-audit.js';
 import { type AdminFastifyRequest } from '../admin.js';
@@ -20,6 +28,10 @@ const bookingStatusSchema = z.union([bookingExternalStatusSchema, z.literal('Esc
 const bookingExternalSyncStatusSchema = z.enum(['synced', 'pending_update', 'syncing', 'conflict', 'error']);
 const bookingSortSchema = z.enum(['bookingDate', 'lastUpdated']);
 const sortDirectionSchema = z.enum(['asc', 'desc']);
+const applyRegiondoSyncSchema = z.object({
+  expectedLinkedContextVersion: z.string().min(1),
+  expectedProviderFingerprints: z.record(z.string().uuid(), z.string().length(64))
+});
 
 const listBookingsQuerySchema = z.object({
   status: bookingStatusSchema.optional(),
@@ -129,6 +141,41 @@ export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<
     await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'view');
     const { bookingId } = request.params as { bookingId: string };
     return { ok: true, item: await getBooking(bookingId) };
+  });
+
+  app.post('/api/admin/bookings/:bookingId/regiondo-sync/preview', async (request) => {
+    await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'view');
+    const { bookingId } = request.params as { bookingId: string };
+    try {
+      return { ok: true, item: await previewRegiondoBookingSync(bookingId) };
+    } catch (error) {
+      sendError(error);
+    }
+  });
+
+  app.post('/api/admin/bookings/:bookingId/regiondo-sync/apply', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'update');
+    const parsed = applyRegiondoSyncSchema.safeParse(request.body);
+    if (!parsed.success) throw new ValidationHttpError('Invalid Regiondo sync payload.');
+    const { bookingId } = request.params as { bookingId: string };
+    try {
+      const syncResult = await applyRegiondoBookingSync({
+        bookingId,
+        ...parsed.data,
+        actor: { name: auth.user.displayName, role: auth.user.role, source: 'user' }
+      });
+      await recordAdminWriteAudit({
+        request,
+        auth,
+        action: 'admin.booking.regiondo_sync_applied',
+        entityType: 'booking',
+        entityId: bookingId,
+        details: syncResult
+      });
+      return { ok: true, ...syncResult, item: await getBooking(bookingId) };
+    } catch (error) {
+      sendError(error);
+    }
   });
 
   app.patch('/api/admin/bookings/:bookingId', async (request) => {

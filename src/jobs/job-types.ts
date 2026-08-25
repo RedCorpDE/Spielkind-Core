@@ -3,6 +3,7 @@ export const JOB_TYPES = {
   SYNC_REGIONDO_BOOKINGS: 'sync_regiondo_bookings',
   SYNC_REGIONDO_CATALOG: 'sync_regiondo_catalog',
   DISPATCH_REMINDERS: 'dispatch_reminders',
+  RECONCILE_MESSENGER_STATUSES: 'reconcile_messenger_statuses',
   RECONCILE_REGIONDO_BOOKINGS: 'reconcile_regiondo_bookings',
   RECOVER_TASK_BOOKING_ATTEMPTS: 'recover_task_booking_attempts',
   PRUNE_ADMIN_ERRORS: 'prune_admin_errors'

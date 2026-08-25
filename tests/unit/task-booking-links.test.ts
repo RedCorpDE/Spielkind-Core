@@ -528,6 +528,21 @@ describe('task booking links', () => {
     expect(purchaseOrderMock).not.toHaveBeenCalled();
   });
 
+  it('rejects a stale booking preview fingerprint before calling Regiondo', async () => {
+    mockTaskForBookingCreation(createTaskBookingData());
+
+    await expect(
+      createBookingFromTask(
+        '11111111-1111-1111-1111-111111111111',
+        undefined,
+        '0'.repeat(64)
+      )
+    ).rejects.toThrow('Task booking data changed after preview');
+
+    expect(purchaseOrderMock).not.toHaveBeenCalled();
+    expect(queryMock.mock.calls.some(([sql]: [string]) => sql.includes('INSERT INTO task_booking_attempts'))).toBe(false);
+  });
+
   it('uses the alternate Regiondo booking email when the task flag is enabled', async () => {
     const bookingData = createTaskBookingData({
       regiondo_booking_email: 'tickets@example.com',

@@ -1,3 +1,5 @@
+import { appConfig } from '../../config/env.js';
+
 export type ProviderManagedBookingField = 'contact' | 'schedule' | 'attendees' | 'location' | 'products' | 'payment';
 
 export interface BookingProvider {
@@ -18,7 +20,13 @@ const regiondoProvider: BookingProvider = {
   displayName: 'Regiondo',
   supportsBookingUpdates: () => false,
   isProviderManagedField: (field): field is ProviderManagedBookingField => providerManagedFields.has(field as ProviderManagedBookingField),
-  getExternalBookingUrl: () => null
+  getExternalBookingUrl: ({ externalBookingId, orderNumber }) => {
+    const template = appConfig.REGIONDO_DASHBOARD_BOOKING_URL_TEMPLATE;
+    if (!template || (!externalBookingId && !orderNumber)) return null;
+    return template
+      .replaceAll('{bookingId}', encodeURIComponent(externalBookingId ?? ''))
+      .replaceAll('{orderNumber}', encodeURIComponent(orderNumber ?? ''));
+  }
 };
 
 const localProvider: BookingProvider = {

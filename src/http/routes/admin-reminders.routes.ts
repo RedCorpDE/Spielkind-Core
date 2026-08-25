@@ -14,8 +14,9 @@ import {
   updateReminderRule
 } from '../../modules/reminders/reminder-admin.repository.js';
 import { runDispatchRemindersJob } from '../../modules/reminders/dispatch-reminders.job.js';
+import { MessengerClient } from '../../modules/messenger/messenger.client.js';
 
-const reminderRuleSchema = z.object({
+const reminderRuleBaseSchema = z.object({
   title: z.string().min(1),
   isEnabled: z.boolean().default(true),
   triggerType: z.literal('before_booking_start').default('before_booking_start'),
@@ -23,12 +24,20 @@ const reminderRuleSchema = z.object({
   additionalChannels: z.array(z.enum(['email', 'telegram', 'sms', 'whatsapp'])).default([]),
   reminderType: z.string().min(1),
   messageTemplate: z.string().min(1).refine((value) => value.trim().length > 0),
+  whatsappTemplateName: z.string().min(1).nullable().optional(),
+  whatsappTemplateLanguage: z.string().min(2).nullable().optional(),
+  whatsappParameterMapping: z.record(z.string().min(1)).default({}),
   locationId: z.string().uuid().nullable().optional(),
   productId: z.string().uuid().nullable().optional(),
   bookingStatuses: z.array(z.string().min(1)).default(['confirmed'])
 });
+const reminderRuleSchema = reminderRuleBaseSchema.superRefine((value, ctx) => {
+  if (value.additionalChannels.includes('whatsapp') && (!value.whatsappTemplateName || !value.whatsappTemplateLanguage)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['whatsappTemplateName'], message: 'WhatsApp reminders require an approved template and language.' });
+  }
+});
 
-const reminderRulePatchSchema = reminderRuleSchema.partial().refine((value) => Object.keys(value).length > 0, {
+const reminderRulePatchSchema = reminderRuleBaseSchema.partial().refine((value) => Object.keys(value).length > 0, {
   message: 'At least one reminder rule field must be provided.'
 });
 
@@ -36,6 +45,11 @@ export async function registerAdminReminderRoutes(app: FastifyInstance): Promise
   app.get('/api/admin/reminder-rules', async (request) => {
     await requireAdminPermission(request as AdminFastifyRequest, 'messages', 'view');
     return { ok: true, items: await listReminderRules() };
+  });
+
+  app.get('/api/admin/messaging/whatsapp/templates', async (request) => {
+    await requireAdminPermission(request as AdminFastifyRequest, 'messages', 'view');
+    return { ok: true, items: await new MessengerClient().listWhatsAppTemplates() };
   });
 
   app.post('/api/admin/reminder-rules', async (request) => {

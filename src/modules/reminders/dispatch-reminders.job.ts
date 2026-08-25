@@ -3,8 +3,10 @@ import { runJobWithLock } from '../../jobs/run-job.js';
 import {
   claimReminderDeliveries,
   createDueReminderDeliveries,
+  dispatchWhatsAppReminder,
   getReminderDeliveryPayload,
   markReminderDeliveryFailed,
+  markReminderDeliveryQueued,
   markReminderDeliverySent
 } from './reminder.repository.js';
 import { sendReminderProviderEvent } from './reminder-provider.client.js';
@@ -28,8 +30,13 @@ export async function runDispatchRemindersJob(input: { limit?: number } = {}) {
             continue;
           }
 
-          const providerResponse = await sendReminderProviderEvent(payload);
-          await markReminderDeliverySent(delivery.reminder_delivery_id, providerResponse);
+          if (delivery.channel === 'whatsapp') {
+            const messengerMessage = await dispatchWhatsAppReminder(payload);
+            await markReminderDeliveryQueued(delivery.reminder_delivery_id, messengerMessage);
+          } else {
+            const providerResponse = await sendReminderProviderEvent(payload);
+            await markReminderDeliverySent(delivery.reminder_delivery_id, providerResponse);
+          }
           sentCount += 1;
         } catch (error) {
           await markReminderDeliveryFailed(

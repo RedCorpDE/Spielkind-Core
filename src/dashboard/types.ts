@@ -176,6 +176,7 @@ export interface DashboardTask {
   columnTitle: string;
   columnPosition: number;
   bookingRelated: boolean;
+  bookingCreationEligible: boolean;
   connectedBookingId: string | null;
 }
 
@@ -322,6 +323,59 @@ export interface DashboardBookingSyncInfo {
   lastSyncError: string | null;
   isQueued: boolean;
   isStale: boolean;
+  hasLocalChanges: boolean;
+  localChangedFields: string[];
+}
+
+export type DashboardRegiondoSyncField =
+  | 'status'
+  | 'schedule'
+  | 'attendees'
+  | 'contact'
+  | 'location'
+  | 'products'
+  | 'payment';
+
+export interface DashboardRegiondoSyncDifference {
+  field: DashboardRegiondoSyncField;
+  dashboardValue: unknown;
+  regiondoValue: unknown;
+  localOverride: boolean;
+}
+
+export interface DashboardRegiondoSyncPreviewBooking {
+  bookingId: string;
+  regiondoBookingId: string;
+  regiondoOrderNumber: string | null;
+  externalUrl: string | null;
+  externalUrlIsFallback: boolean;
+  providerFingerprint: string;
+  differences: DashboardRegiondoSyncDifference[];
+}
+
+export interface DashboardRegiondoSyncPreview {
+  linkedContextVersion: string;
+  hasDifferences: boolean;
+  bookings: DashboardRegiondoSyncPreviewBooking[];
+}
+
+export interface DashboardTaskBookingPreview {
+  eligible: boolean;
+  fingerprint: string;
+  warnings: string[];
+  regiondo: {
+    contact: { firstName: string; lastName: string; email: string; phoneNumber: string | null };
+    items: Array<{ productId: string | number; quantity: number; dateTime: string | null; optionId: string | number | null; value: string | number | null }>;
+    comment: string | null;
+    sendTicketsToCustomer: boolean;
+  };
+  dashboardOnly: {
+    site: string;
+    paymentPreference: string | null;
+    price: string | null;
+    reminderDate: string | null;
+    reservedCapacityDate: string | null;
+  };
 }
 
 export interface DashboardBookingDetail extends DashboardBooking {
@@ -342,21 +396,27 @@ export interface DashboardLinkedBookingSharedFields {
     phoneNumber: string | null;
   };
   locationId: string | null;
+  products: DashboardBookingProduct[];
 }
 
 export type UpdateDashboardLinkedBookingSharedInput = Partial<
-  Omit<DashboardLinkedBookingSharedFields, 'contact'>
+  Omit<DashboardLinkedBookingSharedFields, 'contact' | 'products'>
 > & {
   contact?: Partial<DashboardLinkedBookingSharedFields['contact']>;
+  products?: Array<{ productId: string; quantity: number; unitPrice?: number | null }>;
 };
 
 export interface DashboardTaskBookingContext {
   taskId: string;
   primaryBookingId: string;
   linkedContextVersion: string;
+  hasLocalChanges: boolean;
+  localChangedFields: string[];
+  groupSyncStatus: 'synced' | 'pending_update' | 'conflict';
   linkedBookings: Array<{
     id: string;
     lastUpdated: string;
+    regiondoBookingId: string | null;
     updateCapabilities: DashboardBookingUpdateCapabilities;
   }>;
   shared: DashboardLinkedBookingSharedFields;

@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
+import { appConfig } from '../../config/env.js';
 import { pool } from '../../db/client.js';
-import { normalizeRegiondoBookingImport } from '../../modules/bookings/booking-normalizer.js';
+import { normalizeRegiondoBookingImport, type NormalizedRegiondoBookingImport } from '../../modules/bookings/booking-normalizer.js';
 import { upsertNormalizedRegiondoBooking } from '../../modules/bookings/booking.repository.js';
 import { createOrMergeBookingChangeRequest } from '../../modules/bookings/booking-change-request.repository.js';
 import { getBookingProvider } from '../../modules/bookings/booking-provider.js';
@@ -28,6 +29,8 @@ import type {
   DashboardBookingRegiondoSelection,
   DashboardBookingSort,
   DashboardBookingSyncInfo,
+  DashboardRegiondoSyncPreview,
+  DashboardTaskBookingPreview,
   DashboardLinkedBookingSharedFields,
   DashboardTaskBookingContext,
   DashboardPaginatedBookingsResponse,
@@ -35,7 +38,8 @@ import type {
   DashboardSortDirection,
   ListDashboardBookingsFilters,
   UpdateDashboardBookingInput,
-  UpdateDashboardLinkedBookingSharedInput
+  UpdateDashboardLinkedBookingSharedInput,
+  UpdateDashboardTaskInput
 } from '../types.js';
 import {
   type BookingRow,
@@ -44,14 +48,16 @@ import {
   DashboardConflictError,
   DashboardNotFoundError,
   DashboardValidationError,
+  UNASSIGNED_TASK_COLUMN,
   mapBookingRow,
   mapTaskRow,
+  isTaskBookingCreationEligibleColumnPosition,
   mapDashboardExternalStatusToDb,
   requireIsoString,
   toIsoString,
   toIsoStringOrThrow
 } from './core.js';
-import { appendTaskBookingLinks } from './tasks.js';
+import { appendTaskBookingLinks, updateTaskRecord } from './tasks.js';
 
 const DEFAULT_BOOKINGS_PAGE_SIZE = 50;
 const SYSTEM_LOCATION_PROVIDER_IDS = new Set([
@@ -283,7 +289,6 @@ const TASK_SELECT_QUERY = `SELECT
   LEFT JOIN task_kanban_columns c ON c.id = t.column_key
   LEFT JOIN users u ON u.id = t.assignee_user_id`;
 
-const TASK_BOOKING_ALLOWED_COLUMN_POSITIONS = new Set([0, 1, 2, 3, 4, 5, 6, 7]);
 
 interface BookingListCursor {
   sort: DashboardBookingSort;
@@ -346,7 +351,7 @@ function getManualRecord(rawValue: unknown): Record<string, unknown> | null {
 }
 
 function canCreateBookingFromTaskColumnPosition(value: number): boolean {
-  return TASK_BOOKING_ALLOWED_COLUMN_POSITIONS.has(value);
+  return isTaskBookingCreationEligibleColumnPosition(value);
 }
 
 function readTaskRawText(task: DashboardTask, key: string): string | null {
@@ -733,6 +738,84 @@ function buildTaskRegiondoBookingPayload(task: DashboardTask): TaskRegiondoBooki
     subId: readRecordText(bookingData, 'sub_id', 'subId') ?? task.id,
     syncTicketsProcessing:
       readRecordBoolean(bookingData, 'sync_tickets_processing', 'syncTicketsProcessing') ?? true
+  };
+}
+
+function createTaskBookingPayloadFingerprint(payload: TaskRegiondoBookingPayload): string {
+  return createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+}
+
+export async function previewTaskBooking(
+  taskId: string,
+  candidateInput?: UpdateDashboardTaskInput
+): Promise<DashboardTaskBookingPreview> {
+  const taskRow = await queryTaskForBookingCreation(pool, taskId);
+  if (!taskRow) throw new DashboardNotFoundError('Task not found.');
+  const persistedTask = mapTaskRow(taskRow);
+  let columnPosition = persistedTask.columnPosition;
+  if (candidateInput && candidateInput.columnId === null) {
+    columnPosition = -1;
+  } else if (candidateInput?.columnId && candidateInput.columnId !== persistedTask.columnId) {
+    const column = await pool.query<{ position: number }>(
+      `SELECT position FROM task_kanban_columns WHERE id = $1 LIMIT 1`,
+      [candidateInput.columnId]
+    );
+    if (!column.rowCount) throw new DashboardValidationError('Selected task column does not exist.');
+    columnPosition = column.rows[0].position;
+  }
+  const task: DashboardTask = candidateInput
+    ? {
+        ...persistedTask,
+        title: candidateInput.title,
+        description: candidateInput.description,
+        eventDateTime: candidateInput.eventDateTime,
+        reminderDate: candidateInput.reminderDate ?? null,
+        reservedCapacityDate: candidateInput.reservedCapacityDate ?? null,
+        rawJson: candidateInput.rawJson ?? persistedTask.rawJson,
+        site: candidateInput.site,
+        columnId: candidateInput.columnId ?? UNASSIGNED_TASK_COLUMN.id,
+        columnPosition
+      }
+    : persistedTask;
+  const payload = buildTaskRegiondoBookingPayload(task);
+  const bookingData = readTaskBookingData(task);
+  const paymentPreference = readRecordText(bookingData, 'payment_method', 'paymentMethod');
+  const price = readRecordText(bookingData, 'price');
+  const eligible = canCreateBookingFromTaskColumnPosition(columnPosition) && !task.connectedBookingId;
+  const warnings = [
+    ...(!eligible ? ['This task is not currently eligible for Regiondo booking creation.'] : []),
+    ...(paymentPreference || price
+      ? ['Payment preference and dashboard price metadata are not sent to Regiondo by the checkout API.']
+      : [])
+  ];
+  return {
+    eligible,
+    fingerprint: createTaskBookingPayloadFingerprint(payload),
+    warnings,
+    regiondo: {
+      contact: {
+        firstName: payload.contactData.firstname,
+        lastName: payload.contactData.lastname,
+        email: payload.contactData.email,
+        phoneNumber: payload.contactData.telephone ?? null
+      },
+      items: payload.items.map((item) => ({
+        productId: item.product_id,
+        quantity: item.qty,
+        dateTime: item.date_time ?? null,
+        optionId: item.option_id ?? null,
+        value: item.value ?? null
+      })),
+      comment: payload.comment,
+      sendTicketsToCustomer: payload.sendTicketsToCustomer
+    },
+    dashboardOnly: {
+      site: task.site,
+      paymentPreference,
+      price,
+      reminderDate: task.reminderDate,
+      reservedCapacityDate: task.reservedCapacityDate
+    }
   };
 }
 
@@ -1277,13 +1360,16 @@ function extractRegiondoSelections(
 function buildBookingDrawerData(row: BookingRow, products: DashboardBookingProduct[]): DashboardBookingDrawerData {
   const amountToPay = Number(row.total_amount);
   const amountPaid = Number(row.paid_amount);
+  const activeChanges = isRecord(row.active_change_request_changes) ? row.active_change_request_changes : {};
+  const contactChange = isRecord(activeChanges.contact) ? activeChanges.contact : null;
+  const localContact = contactChange && isRecord(contactChange.to) ? contactChange.to : null;
 
   return {
     contact: {
-      email: row.email,
-      firstName: row.first_name,
-      lastName: row.last_name,
-      phoneNumber: extractPhoneNumber(row.booking_raw, row.phone_number)
+      email: normalizeText(localContact?.email) ?? row.email,
+      firstName: normalizeText(localContact?.firstName) ?? row.first_name,
+      lastName: normalizeText(localContact?.lastName) ?? row.last_name,
+      phoneNumber: normalizeText(localContact?.phoneNumber) ?? extractPhoneNumber(row.booking_raw, row.phone_number)
     },
     payment: {
       amountOutstanding: Math.max(0, amountToPay - amountPaid),
@@ -1342,13 +1428,18 @@ function buildBookingBaseQuery() {
        admin.last_provider_edit_error,
        admin.ops_status,
        admin.ops_notes,
-       COALESCE(request.status::text, 'synced') AS external_sync_status
+       CASE
+         WHEN request.status = 'pending' THEN 'pending_update'
+         WHEN request.status = 'conflict' THEN 'conflict'
+         ELSE 'synced'
+       END AS external_sync_status,
+       request.changes AS active_change_request_changes
      FROM bookings b
      INNER JOIN clients c ON c.client_id = b.client_id
      LEFT JOIN locations location ON location.location_id = b.location_id
      LEFT JOIN booking_admin_metadata admin ON admin.booking_id = b.booking_id
      LEFT JOIN LATERAL (
-       SELECT status
+        SELECT status, changes
        FROM booking_change_requests
        WHERE booking_id = b.booking_id AND status IN ('pending', 'conflict')
        ORDER BY requested_at DESC
@@ -1646,6 +1737,11 @@ function mapBookingSyncRow(row: BookingSyncRow): DashboardBookingSyncInfo {
     (latestSignalAt !== null &&
       (lastCanonicalSnapshotAt === null || (toTimestamp(latestSignalAt) ?? 0) > (toTimestamp(lastCanonicalSnapshotAt) ?? 0)));
 
+  const activeChanges = row.active_change_request_id && isRecord(row.active_change_request_changes)
+    ? row.active_change_request_changes
+    : {};
+  const localChangedFields = Object.keys(activeChanges);
+
   return {
     lastCanonicalSnapshotAt,
     latestEventId: row.latest_event_id,
@@ -1675,7 +1771,9 @@ function mapBookingSyncRow(row: BookingSyncRow): DashboardBookingSyncInfo {
       : null,
     lastSyncError: row.latest_event_last_error,
     isQueued,
-    isStale
+    isStale,
+    hasLocalChanges: localChangedFields.length > 0,
+    localChangedFields
   };
 }
 
@@ -1939,7 +2037,8 @@ export async function recoverTaskBookingAttempt(
 
 export async function createBookingFromTask(
   taskId: string,
-  actor?: DashboardTaskMutationActor
+  actor?: DashboardTaskMutationActor,
+  expectedFingerprint?: string
 ): Promise<CreateBookingFromTaskResult> {
   const client = await pool.connect();
   let attemptId: string;
@@ -1967,8 +2066,11 @@ export async function createBookingFromTask(
       throw new DashboardValidationError('Bookings can only be created from the configured confirmation columns.');
     }
     purchasePayload = buildTaskRegiondoBookingPayload(task);
+    const fingerprint = createTaskBookingPayloadFingerprint(purchasePayload);
+    if (expectedFingerprint && expectedFingerprint !== fingerprint) {
+      throw new DashboardConflictError('Task booking data changed after preview. Review the booking summary again.');
+    }
     attemptId = randomUUID();
-    const fingerprint = createHash('sha256').update(JSON.stringify(purchasePayload)).digest('hex');
     await client.query(
       `INSERT INTO task_booking_attempts (attempt_id, task_id, sub_id, request_fingerprint, status, attempt_count, last_attempted_at)
        VALUES ($1, $2, $3, $4, 'submitting', 1, now())`,
@@ -2176,29 +2278,33 @@ function toLinkedSharedFields(booking: DashboardBookingDetail): DashboardLinkedB
       lastName: booking.drawerData.contact.lastName ?? booking.familyName,
       phoneNumber: booking.drawerData.contact.phoneNumber
     },
-    locationId: booking.locationId
+    locationId: booking.locationId,
+    products: booking.products
   };
 }
 
-export async function getBooking(bookingId: string): Promise<DashboardBookingDetail> {
-  const row = await queryBookingRow(pool, bookingId);
+async function getBookingWithExecutor(executor: Queryable, bookingId: string): Promise<DashboardBookingDetail> {
+  const row = await queryBookingRow(executor, bookingId);
   if (!row) {
     throw new DashboardNotFoundError("Booking not found.");
   }
 
-  const [products, sync, linkedGroup] = await Promise.all([
-    queryBookingProducts(pool, bookingId),
-    getBookingSync(bookingId),
-    resolveLinkedBookingGroup(pool, { bookingId })
-  ]);
+  const products = await queryBookingProducts(executor, bookingId);
+  const syncRow = await queryBookingSyncRow(executor, bookingId);
+  if (!syncRow) throw new DashboardNotFoundError("Booking not found.");
+  const linkedGroup = await resolveLinkedBookingGroup(executor, { bookingId });
 
   return {
     ...mapBookingRow(row),
     drawerData: buildBookingDrawerData(row, products),
     linkedContextVersion: linkedGroup.taskIds.length ? linkedGroup.version : null,
     products,
-    sync
+    sync: mapBookingSyncRow(syncRow)
   };
+}
+
+export async function getBooking(bookingId: string): Promise<DashboardBookingDetail> {
+  return getBookingWithExecutor(pool, bookingId);
 }
 
 export async function getTaskBookingContext(taskId: string): Promise<DashboardTaskBookingContext> {
@@ -2231,9 +2337,17 @@ export async function getTaskBookingContext(taskId: string): Promise<DashboardTa
     taskId,
     primaryBookingId: primaryBooking.id,
     linkedContextVersion: group.version,
+    hasLocalChanges: bookings.some((booking) => booking.sync.hasLocalChanges),
+    localChangedFields: Array.from(new Set(bookings.flatMap((booking) => booking.sync.localChangedFields))).sort(),
+    groupSyncStatus: bookings.some((booking) => booking.sync.externalSyncStatus === 'conflict')
+      ? 'conflict'
+      : bookings.some((booking) => booking.sync.hasLocalChanges)
+        ? 'pending_update'
+        : 'synced',
     linkedBookings: bookings.map((booking) => ({
       id: booking.id,
       lastUpdated: booking.lastUpdated,
+      regiondoBookingId: booking.regiondoBookingId,
       updateCapabilities: booking.updateCapabilities
     })),
     shared
@@ -2251,6 +2365,236 @@ export async function getBookingSync(bookingId: string): Promise<DashboardBookin
   }
 
   return mapBookingSyncRow(row);
+}
+
+type BookingSyncValues = Record<string, unknown>;
+
+function normalizeSyncProducts(products: Array<{ regiondoProductId?: string | null; productId?: string | null; quantity: number; unitPrice: number }>) {
+  return products
+    .map((product) => ({
+      productId: product.regiondoProductId ?? product.productId ?? null,
+      quantity: product.quantity,
+      unitPriceCents: Math.round(product.unitPrice * 100)
+    }))
+    .sort((left, right) => String(left.productId).localeCompare(String(right.productId)));
+}
+
+function buildProviderSyncValues(input: NormalizedRegiondoBookingImport): BookingSyncValues {
+  return {
+    status: input.status.toLowerCase(),
+    schedule: { bookingDate: new Date(input.dtFrom).toISOString(), bookingEndDate: new Date(input.dtTo).toISOString() },
+    attendees: input.guestCount,
+    contact: {
+      firstName: input.client.firstName.trim(),
+      lastName: input.client.lastName.trim(),
+      email: input.client.email?.trim().toLowerCase() ?? null,
+      phoneNumber: input.client.phoneNumber?.trim() ?? null
+    },
+    location: { regiondoLocationId: input.location.regiondoLocationId?.trim() ?? null },
+    products: normalizeSyncProducts(input.items),
+    payment: {
+      amountToPayCents: Math.round(input.totalAmount * 100),
+      amountPaidCents: Math.round(input.paidAmount * 100),
+      paymentMethod: input.payments[0]?.type ?? null
+    }
+  };
+}
+
+async function buildDashboardSyncValues(bookingId: string): Promise<BookingSyncValues> {
+  const detail = await getBooking(bookingId);
+  const locationResult = await pool.query<{ regiondo_location_id: string | null }>(
+    `SELECT location.regiondo_location_id
+     FROM bookings booking
+     LEFT JOIN locations location ON location.location_id = booking.location_id
+     WHERE booking.booking_id = $1`,
+    [bookingId]
+  );
+  return {
+    status: detail.externalStatus.toLowerCase(),
+    schedule: { bookingDate: new Date(detail.bookingDate).toISOString(), bookingEndDate: new Date(detail.bookingEndDate).toISOString() },
+    attendees: detail.attendees,
+    contact: {
+      firstName: detail.drawerData.contact.firstName?.trim() ?? '',
+      lastName: detail.drawerData.contact.lastName?.trim() ?? '',
+      email: detail.drawerData.contact.email?.trim().toLowerCase() ?? null,
+      phoneNumber: detail.drawerData.contact.phoneNumber?.trim() ?? null
+    },
+    location: {
+      regiondoLocationId: detail.locationDataStatus === 'none' ? null : locationResult.rows[0]?.regiondo_location_id?.trim() ?? null
+    },
+    products: normalizeSyncProducts(detail.products),
+    payment: {
+      amountToPayCents: Math.round(detail.drawerData.payment.amountToPay * 100),
+      amountPaidCents: Math.round(detail.drawerData.payment.amountPaid * 100),
+      paymentMethod: detail.drawerData.payment.paymentMethod
+        ? mapPaymentMethodToType(detail.drawerData.payment.paymentMethod)
+        : null
+    }
+  };
+}
+
+function createProviderFingerprint(values: BookingSyncValues): string {
+  return createHash('sha256').update(JSON.stringify(values)).digest('hex');
+}
+
+async function fetchNormalizedRegiondoBooking(input: {
+  bookingKey: string;
+  orderNumber: string | null;
+}): Promise<NormalizedRegiondoBookingImport> {
+  const snapshot = await regiondoClient.hydrateBookingOrder({
+    bookingKey: input.bookingKey,
+    orderNumber: input.orderNumber
+  });
+  return normalizeRegiondoBookingImport({
+    bookingKey: input.bookingKey,
+    purchaseData: snapshot.purchaseData,
+    supplierBookings: snapshot.supplierBookings,
+    webhookPayload: null
+  });
+}
+
+async function fetchRegiondoSyncGroup(bookingId: string) {
+  const group = await resolveLinkedBookingGroup(pool, { bookingId });
+  const details = await Promise.all(group.bookingIds.map((id) => getBooking(id)));
+  const snapshots = await Promise.all(details.map(async (detail) => {
+    if (!detail.regiondoBookingId) {
+      throw new DashboardValidationError('Every booking in the linked group must have a Regiondo booking ID.');
+    }
+    return fetchNormalizedRegiondoBooking({
+      bookingKey: detail.regiondoBookingId,
+      orderNumber: detail.regiondoOrderNumber
+    });
+  }));
+  return { group, details, snapshots };
+}
+
+export async function previewRegiondoBookingSync(bookingId: string): Promise<DashboardRegiondoSyncPreview> {
+  const { group, details, snapshots } = await fetchRegiondoSyncGroup(bookingId);
+  const bookings = await Promise.all(details.map(async (detail, index) => {
+    const dashboardValues = await buildDashboardSyncValues(detail.id);
+    const regiondoValues = buildProviderSyncValues(snapshots[index]);
+    const fields = Object.keys(regiondoValues) as Array<keyof typeof regiondoValues>;
+    const differences = fields.flatMap((field) =>
+      JSON.stringify(dashboardValues[field]) === JSON.stringify(regiondoValues[field])
+        ? []
+        : [{
+            field: field as import('../types.js').DashboardRegiondoSyncField,
+            dashboardValue: dashboardValues[field],
+            regiondoValue: regiondoValues[field],
+            localOverride: detail.sync.localChangedFields.includes(field)
+          }]
+    );
+    const provider = getBookingProvider('regiondo');
+    const directExternalUrl = provider.getExternalBookingUrl({
+      externalBookingId: detail.regiondoBookingId,
+      orderNumber: detail.regiondoOrderNumber
+    });
+    return {
+      bookingId: detail.id,
+      regiondoBookingId: detail.regiondoBookingId!,
+      regiondoOrderNumber: detail.regiondoOrderNumber,
+      externalUrl: directExternalUrl ?? appConfig.REGIONDO_DASHBOARD_BOOKINGS_URL,
+      externalUrlIsFallback: !directExternalUrl,
+      providerFingerprint: createProviderFingerprint(regiondoValues),
+      differences
+    };
+  }));
+  return {
+    linkedContextVersion: group.version,
+    hasDifferences: bookings.some((booking) => booking.differences.length > 0),
+    bookings
+  };
+}
+
+export async function applyRegiondoBookingSync(input: {
+  bookingId: string;
+  expectedLinkedContextVersion: string;
+  expectedProviderFingerprints: Record<string, string>;
+  actor?: DashboardTaskMutationActor;
+}): Promise<{ bookingIds: string[]; fields: string[] }> {
+  const { group, details, snapshots } = await fetchRegiondoSyncGroup(input.bookingId);
+  if (group.version !== input.expectedLinkedContextVersion) {
+    throw new DashboardConflictError('Linked booking data changed. Review the Regiondo differences again.');
+  }
+  snapshots.forEach((snapshot, index) => {
+    const expected = input.expectedProviderFingerprints[details[index].id];
+    const actual = createProviderFingerprint(buildProviderSyncValues(snapshot));
+    if (!expected || expected !== actual) {
+      throw new DashboardConflictError('Regiondo changed after the preview. Review the differences again.');
+    }
+  });
+  const dashboardValues = await Promise.all(details.map((detail) => buildDashboardSyncValues(detail.id)));
+  const fields = Array.from(new Set(snapshots.flatMap((snapshot, index) => {
+    const providerValues = buildProviderSyncValues(snapshot);
+    return Object.keys(providerValues).filter(
+      (field) => JSON.stringify(dashboardValues[index][field]) !== JSON.stringify(providerValues[field])
+    );
+  }))).sort();
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `SELECT booking_id FROM bookings WHERE booking_id = ANY($1::uuid[]) ORDER BY booking_id FOR UPDATE`,
+      [group.bookingIds]
+    );
+    const lockedGroup = await resolveLinkedBookingGroup(client, { bookingId: input.bookingId });
+    if (lockedGroup.version !== group.version) {
+      throw new DashboardConflictError('Linked booking data changed. Review the Regiondo differences again.');
+    }
+    await client.query(
+      `UPDATE booking_admin_metadata
+       SET local_override_fields = ARRAY[]::text[], location_override = NULL, updated_at = now()
+       WHERE booking_id = ANY($1::uuid[])`,
+      [group.bookingIds]
+    );
+    await client.query(
+      `UPDATE booking_change_requests
+       SET status = 'completed', completed_at = now(), resolved_by = $2,
+           resolution = $3::jsonb
+       WHERE booking_id = ANY($1::uuid[]) AND status IN ('pending', 'conflict')`,
+      [
+        group.bookingIds,
+        input.actor?.name ?? 'Admin',
+        JSON.stringify({ source: 'manual_regiondo_sync', action: 'apply_to_dashboard' })
+      ]
+    );
+    for (const snapshot of snapshots) {
+      await upsertNormalizedRegiondoBooking(client, snapshot, { ignoreLocalOverrides: true });
+    }
+    const primary = await getBookingWithExecutor(client, input.bookingId);
+    await syncLinkedTasksFromBookingInTransaction(
+      client,
+      lockedGroup,
+      primary,
+      {
+        attendees: primary.attendees,
+        bookingDate: primary.bookingDate,
+        bookingEndDate: primary.bookingEndDate,
+        contact: {
+          email: primary.drawerData.contact.email,
+          firstName: primary.drawerData.contact.firstName ?? undefined,
+          lastName: primary.drawerData.contact.lastName ?? undefined,
+          phoneNumber: primary.drawerData.contact.phoneNumber
+        },
+        locationId: primary.locationId,
+        products: primary.products.map((product) => ({
+          productId: product.productId,
+          quantity: product.quantity,
+          unitPrice: product.unitPrice
+        }))
+      },
+      input.actor
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+  await Promise.all(group.bookingIds.map((id) => rebuildConsumptionsForBooking(id)));
+  return { bookingIds: group.bookingIds, fields };
 }
 
 export async function listBookings(
@@ -2890,29 +3234,26 @@ async function updateBookingLocally(
   updateProducts: boolean,
   updatePayment: boolean,
   preserveProviderSnapshot: boolean,
-  preserveClientContact: boolean
+  updateClientContact: boolean
 ): Promise<void> {
-  await executor.query(
-    `UPDATE clients
-     SET first_name = $2,
-         last_name = $3,
-         email = $4,
-         phone_number = $5,
-         local_override_fields = CASE
-           WHEN $6::boolean THEN ARRAY(SELECT DISTINCT field FROM unnest(COALESCE(local_override_fields, ARRAY[]::text[]) || ARRAY['first_name', 'last_name', 'email', 'phone_number']::text[]) AS field)
-           ELSE local_override_fields
-         END,
-         updated_at = now()
-     WHERE client_id = $1`,
-    [
-      current.client_id,
-      update.contact.firstName,
-      update.contact.lastName,
-      update.contact.email,
-      update.contact.phoneNumber,
-      preserveClientContact
-    ]
-  );
+  if (updateClientContact) {
+    await executor.query(
+      `UPDATE clients
+       SET first_name = $2,
+           last_name = $3,
+           email = $4,
+           phone_number = $5,
+           updated_at = now()
+       WHERE client_id = $1`,
+      [
+        current.client_id,
+        update.contact.firstName,
+        update.contact.lastName,
+        update.contact.email,
+        update.contact.phoneNumber
+      ]
+    );
+  }
 
   await executor.query(
     `UPDATE bookings
@@ -2960,83 +3301,76 @@ async function updateBookingLocally(
   }
 }
 
-async function updateBookingRecord(
+async function updateBookingRecordInTransaction(
+  client: PoolClient,
   bookingId: string,
   input: UpdateDashboardBookingInput,
   actor?: DashboardTaskMutationActor
-): Promise<DashboardBookingDetail> {
-  const client = await pool.connect();
-  let rebuildConsumptions = false;
+): Promise<{ booking: DashboardBookingDetail; rebuildConsumptions: boolean }> {
+  const current = await queryBookingForUpdate(client, bookingId);
+  if (!current) {
+    throw new DashboardNotFoundError("Booking not found.");
+  }
 
-  try {
-    await client.query("BEGIN");
-    const current = await queryBookingForUpdate(client, bookingId);
-    if (!current) {
-      throw new DashboardNotFoundError("Booking not found.");
-    }
+  const currentProducts = await queryBookingProducts(client, bookingId);
+  const update = await buildResolvedBookingUpdate(client, current, currentProducts, input);
+  const isRegiondoBooking = current.source === 'regiondo' || Boolean(current.regiondo_booking_id);
+  const hasBookingMutation = update.changedFields.some((field) => !['opsNotes', 'opsStatus'].includes(field));
+  const provider = getBookingProvider(current.source);
+  const providerChanges = buildProviderChangeSet(current, currentProducts, update);
+  const hasProviderChanges = Object.keys(providerChanges).length > 0 && isRegiondoBooking;
 
-    const currentProducts = await queryBookingProducts(client, bookingId);
-    const update = await buildResolvedBookingUpdate(client, current, currentProducts, input);
-    const isRegiondoBooking = current.source === 'regiondo' || Boolean(current.regiondo_booking_id);
-    const hasBookingMutation = update.changedFields.some((field) => !['opsNotes', 'opsStatus'].includes(field));
-    const provider = getBookingProvider(current.source);
-    const providerChanges = buildProviderChangeSet(current, currentProducts, update);
-    const hasProviderChanges = Object.keys(providerChanges).length > 0 && isRegiondoBooking;
+  if (hasBookingMutation) {
+    await updateBookingLocally(
+      client,
+      bookingId,
+      current,
+      update,
+      update.changedFields.includes('products'),
+      update.changedFields.includes('payment'),
+      isRegiondoBooking,
+      !isRegiondoBooking
+    );
+  }
 
-    if (hasBookingMutation && !hasProviderChanges) {
-      await updateBookingLocally(
-        client,
-        bookingId,
-        current,
-        update,
-        update.changedFields.includes('products'),
-        update.changedFields.includes('payment'),
-        false,
-        false
-      );
-    }
-
-    if (hasProviderChanges) {
-      await createOrMergeBookingChangeRequest({
-        client,
-        bookingId,
-        changes: providerChanges,
-        providerKey: provider.key,
-        requestedBy: actor?.name ?? 'Admin'
-      });
-    }
-
-    await upsertBookingAdminMetadata(client, bookingId, {
-      lastProviderEditError: current.last_provider_edit_error,
-      locationOverride: update.locationOverride,
-      localOverrideFields: [],
-      opsNotes: update.opsNotes,
-      opsStatus: update.opsStatus,
-      providerUpdateAt: null,
-      providerUpdateChangedFields: [],
-      providerUpdateMessage: null,
-      providerUpdateOutcome: null
+  if (hasProviderChanges) {
+    await createOrMergeBookingChangeRequest({
+      client,
+      bookingId,
+      changes: providerChanges,
+      providerKey: provider.key,
+      requestedBy: actor?.name ?? 'Admin'
     });
-
-    rebuildConsumptions = update.rebuildConsumptions;
-
-    await client.query("COMMIT");
-  } catch (error) {
-    try {
-      await client.query("ROLLBACK");
-    } catch {
-      // Ignore rollback failures so the original error remains visible.
-    }
-    throw error;
-  } finally {
-    client.release();
   }
 
-  if (rebuildConsumptions) {
-    await rebuildConsumptionsForBooking(bookingId);
-  }
+  const activeRequest = isRegiondoBooking
+    ? await client.query<{ changes: unknown }>(
+        `SELECT changes FROM booking_change_requests
+         WHERE booking_id = $1 AND status IN ('pending', 'conflict')
+         ORDER BY requested_at DESC LIMIT 1`,
+        [bookingId]
+      )
+    : null;
+  const localOverrideFields = activeRequest?.rowCount && isRecord(activeRequest.rows[0].changes)
+    ? Object.keys(activeRequest.rows[0].changes)
+    : [];
 
-  return await getBooking(bookingId);
+  await upsertBookingAdminMetadata(client, bookingId, {
+    lastProviderEditError: current.last_provider_edit_error,
+    locationOverride: update.locationOverride,
+    localOverrideFields,
+    opsNotes: update.opsNotes,
+    opsStatus: update.opsStatus,
+    providerUpdateAt: null,
+    providerUpdateChangedFields: [],
+    providerUpdateMessage: null,
+    providerUpdateOutcome: null
+  });
+
+  return {
+    booking: await getBookingWithExecutor(client, bookingId),
+    rebuildConsumptions: update.rebuildConsumptions
+  };
 }
 
 function buildSharedBookingPatch(input: UpdateDashboardBookingInput): UpdateDashboardLinkedBookingSharedInput {
@@ -3045,7 +3379,8 @@ function buildSharedBookingPatch(input: UpdateDashboardBookingInput): UpdateDash
     ...(input.bookingDate !== undefined ? { bookingDate: input.bookingDate } : {}),
     ...(input.bookingEndDate !== undefined ? { bookingEndDate: input.bookingEndDate } : {}),
     ...(input.contact !== undefined ? { contact: input.contact } : {}),
-    ...('locationId' in input ? { locationId: input.locationId } : {})
+    ...('locationId' in input ? { locationId: input.locationId } : {}),
+    ...(input.products !== undefined ? { products: input.products } : {})
   };
 }
 
@@ -3124,6 +3459,17 @@ function buildLinkedTaskProjection(
     changedFields.push('contact');
   }
 
+  if (patch.products) {
+    bookingData.options = booking.drawerData.regiondoSelections.map((selection) => ({
+      option_id: selection.optionValueLabel ?? '',
+      product_id: selection.regiondoProductId ?? selection.productId ?? '',
+      qty: selection.quantity,
+      variation_id: selection.variationLabel ?? ''
+    }));
+    bookingData.qty = booking.products[0]?.quantity ?? 1;
+    changedFields.push('products');
+  }
+
   bookingData.contact_data = contactData;
   rawJson.booking_data = bookingData;
   delete rawJson.bookingData;
@@ -3200,8 +3546,10 @@ function buildLinkedTaskProjection(
   };
 }
 
-export async function syncLinkedTasksFromBooking(
-  bookingId: string,
+async function syncLinkedTasksFromBookingInTransaction(
+  executor: Queryable,
+  group: LinkedBookingGroup,
+  booking: DashboardBookingDetail,
   patch: UpdateDashboardLinkedBookingSharedInput,
   actor?: DashboardTaskMutationActor,
   providerUpdate?: Pick<DashboardBookingSyncInfo, 'providerUpdateAt' | 'providerUpdateChangedFields' | 'providerUpdateOutcome' | 'providerUpdateMessage' | 'activeChangeRequest' | 'externalSyncStatus'>,
@@ -3211,35 +3559,53 @@ export async function syncLinkedTasksFromBooking(
     return;
   }
 
-  const group = await resolveLinkedBookingGroup(pool, { bookingId });
   if (!group.taskIds.length) {
     return;
   }
 
-  const booking = await getBooking(bookingId);
-  const taskRows = await pool.query<TaskRow>(
+  const taskRows = await executor.query<TaskRow>(
     `${TASK_SELECT_QUERY}
      WHERE t.id = ANY($1::uuid[])
        AND t.is_deleted = false`,
     [group.taskIds]
   );
 
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    for (const row of taskRows.rows) {
-      const task = mapTaskRow(row);
-      const projection = buildLinkedTaskProjection(task, booking, patch, actor, providerUpdate, changeRequestActivity);
-      await client.query(
+  for (const row of taskRows.rows) {
+    const task = mapTaskRow(row);
+    const projection = buildLinkedTaskProjection(task, booking, patch, actor, providerUpdate, changeRequestActivity);
+    await executor.query(
         `UPDATE tasks
          SET event_date_time = $2::timestamptz,
              raw_json = $3::jsonb,
              update_log = $4::jsonb
          WHERE id = $1
            AND is_deleted = false`,
-        [task.id, projection.eventDateTime, JSON.stringify(projection.rawJson), JSON.stringify(projection.updateLog)]
-      );
-    }
+      [task.id, projection.eventDateTime, JSON.stringify(projection.rawJson), JSON.stringify(projection.updateLog)]
+    );
+  }
+}
+
+export async function syncLinkedTasksFromBooking(
+  bookingId: string,
+  patch: UpdateDashboardLinkedBookingSharedInput,
+  actor?: DashboardTaskMutationActor,
+  providerUpdate?: Pick<DashboardBookingSyncInfo, 'providerUpdateAt' | 'providerUpdateChangedFields' | 'providerUpdateOutcome' | 'providerUpdateMessage' | 'activeChangeRequest' | 'externalSyncStatus'>,
+  changeRequestActivity?: { id: string; providerKey: string; status: string; changes: Record<string, unknown> }
+): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const group = await resolveLinkedBookingGroup(client, { bookingId });
+    const booking = await getBookingWithExecutor(client, bookingId);
+    await syncLinkedTasksFromBookingInTransaction(
+      client,
+      group,
+      booking,
+      patch,
+      actor,
+      providerUpdate,
+      changeRequestActivity
+    );
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');
@@ -3254,37 +3620,92 @@ export async function updateBooking(
   input: UpdateDashboardBookingInput,
   actor?: DashboardTaskMutationActor
 ): Promise<DashboardBookingDetail> {
-  const group = await resolveLinkedBookingGroup(pool, { bookingId });
-  await assertLinkedContextVersion(pool, group, input.expectedLinkedContextVersion);
-
   const sharedPatch = buildSharedBookingPatch(input);
   const recordInput = { ...input };
   delete recordInput.expectedLinkedContextVersion;
-  const updatedBookingIds: string[] = [];
-
+  const client = await pool.connect();
+  const consumptionRebuilds = new Set<string>();
   try {
-    const primaryBooking = await updateBookingRecord(bookingId, recordInput, actor);
-    updatedBookingIds.push(bookingId);
+    await client.query('BEGIN');
+    const group = await resolveLinkedBookingGroup(client, { bookingId });
+    await assertLinkedContextVersion(client, group, input.expectedLinkedContextVersion);
+    const primaryResult = await updateBookingRecordInTransaction(client, bookingId, recordInput, actor);
+    if (primaryResult.rebuildConsumptions) consumptionRebuilds.add(bookingId);
 
     if (hasSharedBookingPatch(sharedPatch)) {
       for (const linkedBookingId of group.bookingIds) {
         if (linkedBookingId === bookingId) {
           continue;
         }
-        await updateBookingRecord(linkedBookingId, sharedPatch, actor);
-        updatedBookingIds.push(linkedBookingId);
+        const result = await updateBookingRecordInTransaction(client, linkedBookingId, sharedPatch, actor);
+        if (result.rebuildConsumptions) consumptionRebuilds.add(linkedBookingId);
       }
     }
-    const taskPatch = primaryBooking.sync.activeChangeRequest ? {} : sharedPatch;
-    await syncLinkedTasksFromBooking(bookingId, taskPatch, actor, primaryBooking.sync);
+    const primaryBooking = await getBookingWithExecutor(client, bookingId);
+    await syncLinkedTasksFromBookingInTransaction(client, group, primaryBooking, sharedPatch, actor, primaryBooking.sync);
+    await client.query('COMMIT');
   } catch (error) {
-    if (updatedBookingIds.length) {
-      throw new DashboardConflictError(
-        `Linked booking update was only partially applied to ${updatedBookingIds.join(', ')}. Reconcile the linked group before retrying.`
-      );
-    }
+    await client.query('ROLLBACK');
     throw error;
+  } finally {
+    client.release();
   }
 
+  await Promise.all([...consumptionRebuilds].map((id) => rebuildConsumptionsForBooking(id)));
   return getBooking(bookingId);
+}
+
+export async function updateTaskWithLinkedBookingsAtomically(input: {
+  taskId: string;
+  task: UpdateDashboardTaskInput;
+  sharedBooking?: UpdateDashboardLinkedBookingSharedInput;
+  expectedLinkedContextVersion?: string;
+  actor?: DashboardTaskMutationActor;
+}): Promise<{ bookingIds: string[] }> {
+  const client = await pool.connect();
+  const consumptionRebuilds = new Set<string>();
+  let bookingIds: string[] = [];
+  try {
+    await client.query('BEGIN');
+    const group = await resolveLinkedBookingGroup(client, { taskId: input.taskId });
+    bookingIds = group.bookingIds;
+    if (input.sharedBooking) {
+      if (!group.bookingIds.length) throw new DashboardValidationError('Task is not linked to a booking.');
+      await assertLinkedContextVersion(client, group, input.expectedLinkedContextVersion);
+      for (const linkedBookingId of group.bookingIds) {
+        const result = await updateBookingRecordInTransaction(
+          client,
+          linkedBookingId,
+          input.sharedBooking,
+          input.actor
+        );
+        if (result.rebuildConsumptions) consumptionRebuilds.add(linkedBookingId);
+      }
+    }
+
+    await updateTaskRecord(client, input.taskId, input.task, input.actor);
+
+    if (input.sharedBooking && group.bookingIds.length) {
+      const taskRow = await queryTaskForBookingCreation(client, input.taskId);
+      const primaryBookingId = taskRow?.connected_booking_key ?? group.bookingIds[0];
+      const primaryBooking = await getBookingWithExecutor(client, primaryBookingId);
+      await syncLinkedTasksFromBookingInTransaction(
+        client,
+        group,
+        primaryBooking,
+        input.sharedBooking,
+        input.actor,
+        primaryBooking.sync
+      );
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  await Promise.all([...consumptionRebuilds].map((id) => rebuildConsumptionsForBooking(id)));
+  return { bookingIds };
 }

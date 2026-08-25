@@ -148,6 +148,7 @@ function setupRepositoryQueries(input: {
   finalRow?: Record<string, unknown>;
   locationRows?: Record<string, Record<string, unknown>>;
 }) {
+  let activeChanges: Record<string, unknown> = {};
   const finalRow = input.finalRow ?? createFinalBookingRow();
   const locationRows = {
     [knownLocationId]: {
@@ -177,8 +178,40 @@ function setupRepositoryQueries(input: {
       return { rowCount: 1, rows: [input.currentRow] };
     }
 
+    if (sql.includes('LEFT JOIN locations location')) {
+      return { rowCount: 1, rows: [{ ...finalRow, active_change_request_changes: activeChanges }] };
+    }
+
     if (sql.includes('FROM booking_products bp')) {
       return { rowCount: 0, rows: [] };
+    }
+
+    if (sql.includes('LEFT JOIN LATERAL')) {
+      return {
+        rowCount: 1,
+        rows: [{
+          ...syncRow,
+          active_change_request_id: Object.keys(activeChanges).length ? 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' : null,
+          active_change_request_status: Object.keys(activeChanges).length ? 'pending' : null,
+          active_change_request_changes: activeChanges,
+          active_change_request_provider_key: Object.keys(activeChanges).length ? 'regiondo' : null
+        }]
+      };
+    }
+
+    if (sql.includes('SELECT change_request_id, changes') && sql.includes('booking_change_requests')) {
+      return { rowCount: 0, rows: [] };
+    }
+
+    if (sql.includes('INSERT INTO booking_change_requests')) {
+      activeChanges = JSON.parse(String(values?.[4] ?? '{}')) as Record<string, unknown>;
+      return { rowCount: 1, rows: [] };
+    }
+
+    if (sql.includes('SELECT changes FROM booking_change_requests')) {
+      return Object.keys(activeChanges).length
+        ? { rowCount: 1, rows: [{ changes: activeChanges }] }
+        : { rowCount: 0, rows: [] };
     }
 
     if (sql.includes('FROM clients') && sql.includes('client_id <>')) {
@@ -312,7 +345,7 @@ describe('dashboard booking update location overrides', () => {
     const metadataUpsert = clientQueryMock.mock.calls.find(
       ([sql]: [string]) => sql.includes('INSERT INTO booking_admin_metadata') && sql.includes('provider_update_outcome')
     );
-    expect(metadataUpsert?.[1]?.[5]).toEqual([]);
+    expect(metadataUpsert?.[1]?.[5]).toEqual(['contact']);
     expect(metadataUpsert?.[1]?.[6]).toBeNull();
   });
 
@@ -348,7 +381,7 @@ describe('dashboard booking update location overrides', () => {
     expect(updateBookingMock).not.toHaveBeenCalled();
   });
 
-  it('does not write deprecated local override flags for Regiondo location requests', async () => {
+  it('reactivates local override flags for Regiondo location requests', async () => {
     setupRepositoryQueries({
       currentRow: createCurrentBookingRow({
         location_id: noLocationId,
@@ -374,7 +407,7 @@ describe('dashboard booking update location overrides', () => {
     const metadataUpsert = clientQueryMock.mock.calls.find(
       ([sql]: [string]) => sql.includes('INSERT INTO booking_admin_metadata') && sql.includes('location_override')
     );
-    expect(metadataUpsert?.[1]?.slice(0, 6)).toEqual([bookingId, 'normal', '', null, null, []]);
+    expect(metadataUpsert?.[1]?.slice(0, 6)).toEqual([bookingId, 'normal', '', null, null, ['location']]);
   });
 
   it('rejects direct system placeholder ids in booking updates', async () => {

@@ -98,6 +98,7 @@ export interface BookingRow {
   ops_status: string | null;
   ops_notes: string | null;
   external_sync_status?: 'synced' | 'pending_update' | 'conflict';
+  active_change_request_changes?: unknown;
 }
 
 export interface ExistingBookingRow {
@@ -301,8 +302,13 @@ export function mapTaskRow(row: TaskRow): DashboardTask {
     columnTitle: column.title,
     columnPosition: column.position,
     bookingRelated: column.booking_related,
+    bookingCreationEligible: isTaskBookingCreationEligibleColumnPosition(column.position),
     connectedBookingId: row.connected_booking_key
   };
+}
+
+export function isTaskBookingCreationEligibleColumnPosition(position: number): boolean {
+  return position >= 0 && position <= 7;
 }
 
 export function mapTaskColumnRow(row: TaskColumnRow): DashboardTaskColumn {
@@ -553,13 +559,19 @@ export function mapBookingRow(row: BookingRow): DashboardBooking {
         ? 'unknown'
         : 'known';
 
+  const activeChanges = isRecord(row.active_change_request_changes) ? row.active_change_request_changes : {};
+  const contactChange = isRecord(activeChanges.contact) ? activeChanges.contact : null;
+  const localContact = contactChange && isRecord(contactChange.to) ? contactChange.to : null;
+
   return {
     id: row.id,
     familyName:
+      (typeof localContact?.lastName === 'string' ? localContact.lastName : null) ??
       extractPurchaseContactField(row.booking_raw, 'lastname') ??
       row.last_name ??
       (customerDataStatus === 'unknown' ? 'Unknown customer' : 'Unknown'),
     childName:
+      (typeof localContact?.firstName === 'string' ? localContact.firstName : null) ??
       extractPurchaseContactField(row.booking_raw, 'firstname') ??
       row.first_name ??
       (customerDataStatus === 'unknown' ? 'Unknown child' : 'Unknown'),
@@ -570,7 +582,9 @@ export function mapBookingRow(row: BookingRow): DashboardBooking {
     status,
     externalStatus,
     opsStatus,
-    contactEmail: extractPurchaseContactField(row.booking_raw, 'email') ?? row.email ?? '',
+    contactEmail:
+      (typeof localContact?.email === 'string' ? localContact.email : null) ??
+      extractPurchaseContactField(row.booking_raw, 'email') ?? row.email ?? '',
     attendees: Math.max(1, row.guest_count),
     source: extractBookingSource(row.booking_raw),
     specialRequirements: extractBookingNotes(row.booking_raw),
