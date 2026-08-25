@@ -62,8 +62,8 @@ describe('Regiondo booking import location overrides', () => {
         return { rowCount: 1, rows: [{ location_id: providerLocationId }] };
       }
 
-      if (sql.includes('SELECT admin.location_override')) {
-        return { rowCount: 1, rows: [{ location_override: 'none' }] };
+      if (sql.includes('SELECT b.booking_id, b.client_id, admin.local_override_fields')) {
+        return { rowCount: 1, rows: [{ booking_id: bookingId, client_id: clientId, local_override_fields: [], location_override: 'none' }] };
       }
 
       if (sql.includes('INSERT INTO bookings')) {
@@ -81,5 +81,27 @@ describe('Regiondo booking import location overrides', () => {
 
     const bookingInsert = queryMock.mock.calls.find(([sql]: [string]) => sql.includes('INSERT INTO bookings'));
     expect(bookingInsert?.[1]?.[1]).toBe(noLocationId);
+  });
+
+  it('keeps locally overridden booking fields while importing the fresh Regiondo snapshot', async () => {
+    const queryMock = vi.fn(async (sql: string) => {
+      if (sql.includes('SELECT b.booking_id, b.client_id, admin.local_override_fields')) {
+        return {
+          rowCount: 1,
+          rows: [{ booking_id: bookingId, client_id: clientId, local_override_fields: ['schedule', 'products', 'payment'], location_override: null }]
+        };
+      }
+      if (sql.includes('INSERT INTO clients')) return { rowCount: 1, rows: [{ client_id: clientId }] };
+      if (sql.includes('INSERT INTO locations')) return { rowCount: 1, rows: [{ location_id: providerLocationId }] };
+      if (sql.includes('INSERT INTO bookings')) return { rowCount: 1, rows: [{ booking_id: bookingId }] };
+      return { rowCount: 0, rows: [] };
+    });
+
+    await upsertNormalizedRegiondoBooking({ query: queryMock } as never, normalizedBooking);
+
+    const bookingInsert = queryMock.mock.calls.find(([sql]: [string]) => sql.includes('INSERT INTO bookings'));
+    expect(bookingInsert?.[1]?.slice(12)).toEqual([false, false, false, true, true]);
+    expect(queryMock.mock.calls.some(([sql]: [string]) => sql.includes('DELETE FROM booking_products'))).toBe(false);
+    expect(queryMock.mock.calls.some(([sql]: [string]) => sql.includes('DELETE FROM payments'))).toBe(false);
   });
 });

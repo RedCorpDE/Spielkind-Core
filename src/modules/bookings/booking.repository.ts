@@ -14,10 +14,10 @@ async function upsertClient(client: PoolClient, input: NormalizedRegiondoBooking
       `INSERT INTO clients (first_name, last_name, email, phone_number, regiondo_customer_id, regiondo_raw)
        VALUES ($1, $2, $3, $4, $5, $6::jsonb)
        ON CONFLICT (regiondo_customer_id)
-       DO UPDATE SET first_name = EXCLUDED.first_name,
-                     last_name = EXCLUDED.last_name,
-                     email = COALESCE(EXCLUDED.email, clients.email),
-                     phone_number = COALESCE(EXCLUDED.phone_number, clients.phone_number),
+       DO UPDATE SET first_name = CASE WHEN 'first_name' = ANY(clients.local_override_fields) THEN clients.first_name ELSE EXCLUDED.first_name END,
+                     last_name = CASE WHEN 'last_name' = ANY(clients.local_override_fields) THEN clients.last_name ELSE EXCLUDED.last_name END,
+                     email = CASE WHEN 'email' = ANY(clients.local_override_fields) THEN clients.email ELSE COALESCE(EXCLUDED.email, clients.email) END,
+                     phone_number = CASE WHEN 'phone_number' = ANY(clients.local_override_fields) THEN clients.phone_number ELSE COALESCE(EXCLUDED.phone_number, clients.phone_number) END,
                      regiondo_raw = EXCLUDED.regiondo_raw,
                      updated_at = now()
        RETURNING client_id`,
@@ -32,9 +32,9 @@ async function upsertClient(client: PoolClient, input: NormalizedRegiondoBooking
       `INSERT INTO clients (first_name, last_name, email, phone_number, regiondo_raw)
        VALUES ($1, $2, $3, $4, $5::jsonb)
        ON CONFLICT (email)
-       DO UPDATE SET first_name = EXCLUDED.first_name,
-                     last_name = EXCLUDED.last_name,
-                     phone_number = COALESCE(EXCLUDED.phone_number, clients.phone_number),
+       DO UPDATE SET first_name = CASE WHEN 'first_name' = ANY(clients.local_override_fields) THEN clients.first_name ELSE EXCLUDED.first_name END,
+                     last_name = CASE WHEN 'last_name' = ANY(clients.local_override_fields) THEN clients.last_name ELSE EXCLUDED.last_name END,
+                     phone_number = CASE WHEN 'phone_number' = ANY(clients.local_override_fields) THEN clients.phone_number ELSE COALESCE(EXCLUDED.phone_number, clients.phone_number) END,
                      regiondo_raw = EXCLUDED.regiondo_raw,
                      updated_at = now()
        RETURNING client_id`,
@@ -121,9 +121,16 @@ async function resolveNoLocationPlaceholder(client: PoolClient): Promise<string>
   return result.rows[0].location_id;
 }
 
-async function hasNoLocationOverride(client: PoolClient, bookingKey: string): Promise<boolean> {
-  const result = await client.query<{ location_override: string | null }>(
-    `SELECT admin.location_override
+interface ExistingBookingOverrides {
+  booking_id: string;
+  client_id: string;
+  local_override_fields: string[] | null;
+  location_override: string | null;
+}
+
+async function getExistingBookingOverrides(client: PoolClient, bookingKey: string): Promise<ExistingBookingOverrides | null> {
+  const result = await client.query<ExistingBookingOverrides>(
+    `SELECT b.booking_id, b.client_id, admin.local_override_fields, admin.location_override
      FROM bookings b
      LEFT JOIN booking_admin_metadata admin ON admin.booking_id = b.booking_id
      WHERE b.regiondo_booking_id = $1
@@ -132,7 +139,7 @@ async function hasNoLocationOverride(client: PoolClient, bookingKey: string): Pr
     [bookingKey]
   );
 
-  return result.rows[0]?.location_override === 'none';
+  return result.rows[0] ?? null;
 }
 
 async function ensureProductStub(
@@ -161,12 +168,14 @@ export async function upsertNormalizedRegiondoBooking(
   client: PoolClient,
   input: NormalizedRegiondoBookingImport
 ): Promise<{ bookingId: string }> {
+  const existing = await getExistingBookingOverrides(client, input.bookingKey);
+  const localOverrideFields = new Set(existing?.local_override_fields ?? []);
   const clientId = await upsertClient(client, input.client);
   const providerLocationId = await resolveLocation(client, {
     location: input.location,
     regiondoProductIds: input.items.map((item) => item.regiondoProductId)
   });
-  const locationId = (await hasNoLocationOverride(client, input.bookingKey))
+  const locationId = existing?.location_override === 'none'
     ? await resolveNoLocationPlaceholder(client)
     : providerLocationId;
 
@@ -188,14 +197,14 @@ export async function upsertNormalizedRegiondoBooking(
      )
      VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, 'regiondo', $9, $10, $11::timestamptz, $12::jsonb)
      ON CONFLICT (regiondo_booking_id)
-     DO UPDATE SET client_id = EXCLUDED.client_id,
-                   location_id = EXCLUDED.location_id,
+     DO UPDATE SET client_id = CASE WHEN $13::boolean THEN bookings.client_id ELSE EXCLUDED.client_id END,
+                   location_id = CASE WHEN $14::boolean THEN bookings.location_id ELSE EXCLUDED.location_id END,
                    status = EXCLUDED.status,
-                   guest_count = EXCLUDED.guest_count,
-                   total_amount = EXCLUDED.total_amount,
-                   paid_amount = EXCLUDED.paid_amount,
-                   dt_from = EXCLUDED.dt_from,
-                   dt_to = EXCLUDED.dt_to,
+                   guest_count = CASE WHEN $15::boolean THEN bookings.guest_count ELSE EXCLUDED.guest_count END,
+                   total_amount = CASE WHEN $16::boolean THEN bookings.total_amount ELSE EXCLUDED.total_amount END,
+                   paid_amount = CASE WHEN $16::boolean THEN bookings.paid_amount ELSE EXCLUDED.paid_amount END,
+                   dt_from = CASE WHEN $17::boolean THEN bookings.dt_from ELSE EXCLUDED.dt_from END,
+                   dt_to = CASE WHEN $17::boolean THEN bookings.dt_to ELSE EXCLUDED.dt_to END,
                    regiondo_order_number = EXCLUDED.regiondo_order_number,
                    regiondo_snapshot_generated_at = EXCLUDED.regiondo_snapshot_generated_at,
                    regiondo_raw = EXCLUDED.regiondo_raw,
@@ -213,33 +222,42 @@ export async function upsertNormalizedRegiondoBooking(
       input.bookingKey,
       input.orderNumber,
       input.snapshotGeneratedAt,
-      JSON.stringify(input.raw)
+      JSON.stringify(input.raw),
+      localOverrideFields.has('contact'),
+      localOverrideFields.has('location') || existing?.location_override === 'none',
+      localOverrideFields.has('attendees'),
+      localOverrideFields.has('payment'),
+      localOverrideFields.has('schedule')
     ]
   );
 
   const bookingId = bookingResult.rows[0].booking_id;
 
-  await client.query('DELETE FROM booking_products WHERE booking_id = $1', [bookingId]);
+  if (!localOverrideFields.has('products')) {
+    await client.query('DELETE FROM booking_products WHERE booking_id = $1', [bookingId]);
 
-  for (const item of input.items) {
-    const productId = await ensureProductStub(client, item);
-    await client.query(
-      `INSERT INTO booking_products (booking_id, product_id, quantity, unit_price)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (booking_id, product_id)
-       DO UPDATE SET quantity = EXCLUDED.quantity, unit_price = EXCLUDED.unit_price`,
-      [bookingId, productId, item.quantity, item.unitPrice]
-    );
+    for (const item of input.items) {
+      const productId = await ensureProductStub(client, item);
+      await client.query(
+        `INSERT INTO booking_products (booking_id, product_id, quantity, unit_price)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (booking_id, product_id)
+         DO UPDATE SET quantity = EXCLUDED.quantity, unit_price = EXCLUDED.unit_price`,
+        [bookingId, productId, item.quantity, item.unitPrice]
+      );
+    }
   }
 
-  await client.query('DELETE FROM payments WHERE booking_id = $1', [bookingId]);
+  if (!localOverrideFields.has('payment')) {
+    await client.query('DELETE FROM payments WHERE booking_id = $1', [bookingId]);
 
-  for (const payment of input.payments) {
-    await client.query(
-      `INSERT INTO payments (booking_id, amount, type, provider_ref)
-       VALUES ($1, $2, $3, $4)`,
-      [bookingId, payment.amount, payment.type, payment.providerRef]
-    );
+    for (const payment of input.payments) {
+      await client.query(
+        `INSERT INTO payments (booking_id, amount, type, provider_ref)
+         VALUES ($1, $2, $3, $4)`,
+        [bookingId, payment.amount, payment.type, payment.providerRef]
+      );
+    }
   }
 
   return { bookingId };

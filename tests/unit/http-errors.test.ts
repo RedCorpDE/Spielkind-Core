@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { registerErrorHandler } from '../../src/http/errors.js';
 import {
   RegiondoApiError,
-  RegiondoBookingUpdateUnsupportedError,
   RegiondoLocationValidationError,
   RegiondoPurchaseRecoveryRequiredError,
   RegiondoTransientError
@@ -44,22 +43,6 @@ describe('registerErrorHandler', () => {
       ok: false,
       code: 'REGIONDO_LOCATION_INVALID',
       error: 'Regiondo location ID 5467 is a region, not a city.'
-    });
-  });
-
-  it('returns a clear non-retryable response when supplier booking updates are unsupported', async () => {
-    const handler = registerErrorHandler();
-    const reply = createReplyDouble();
-    const request = createRequestDouble();
-
-    await handler(new RegiondoBookingUpdateUnsupportedError(), request as never, reply as never);
-
-    expect(reply.status).toHaveBeenCalledWith(422);
-    expect(reply.send).toHaveBeenCalledWith({
-      ok: false,
-      code: 'REGIONDO_BOOKING_UPDATE_UNSUPPORTED',
-      retryable: false,
-      error: 'Regiondo does not allow this booking to be edited through the supplier API. No changes were saved. Update the booking in Regiondo, then synchronize it here.'
     });
   });
 

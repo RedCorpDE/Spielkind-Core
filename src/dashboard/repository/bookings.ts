@@ -6,8 +6,7 @@ import { upsertNormalizedRegiondoBooking } from '../../modules/bookings/booking.
 import {
   regiondoClient,
   type RegiondoCheckoutCartItem,
-  type RegiondoCheckoutContactData,
-  type RegiondoUpdateBookingInput
+  type RegiondoCheckoutContactData
 } from '../../modules/regiondo/regiondo.client.js';
 import { formatRegiondoDateTime } from '../../modules/regiondo/regiondo-datetime.js';
 import { rebuildConsumptionsForBooking } from '../../modules/resources/consumption.service.js';
@@ -88,6 +87,11 @@ interface BookingForUpdateRow {
   ops_status: string | null;
   ops_notes: string | null;
   last_provider_edit_error: string | null;
+  provider_update_outcome: 'not_supported' | 'succeeded' | 'failed' | null;
+  provider_update_at: Date | string | null;
+  provider_update_changed_fields: unknown;
+  provider_update_message: string | null;
+  local_override_fields: string[] | null;
   location_override: string | null;
 }
 
@@ -133,7 +137,6 @@ interface ResolvedBookingProductUpdate {
 
 interface ResolvedBookingUpdate {
   changedFields: string[];
-  clearProviderEditError: boolean;
   contact: {
     email: string | null;
     firstName: string;
@@ -154,7 +157,6 @@ interface ResolvedBookingUpdate {
   };
   products: ResolvedBookingProductUpdate[];
   regiondoLocationId: string | null;
-  providerInput: RegiondoUpdateBookingInput | null;
   raw: unknown;
   rebuildConsumptions: boolean;
 }
@@ -165,6 +167,10 @@ interface BookingSyncRow {
   regiondo_order_number: string | null;
   regiondo_snapshot_generated_at: Date | string | null;
   last_provider_edit_error: string | null;
+  provider_update_outcome: 'not_supported' | 'succeeded' | 'failed' | null;
+  provider_update_at: Date | string | null;
+  provider_update_changed_fields: unknown;
+  provider_update_message: string | null;
   latest_event_id: string | null;
   latest_event_status: DashboardRegiondoWebhookEventStatus | null;
   latest_event_action_type: string | null;
@@ -1513,6 +1519,10 @@ async function queryBookingSyncRow(executor: Queryable, bookingId: string): Prom
        b.regiondo_order_number,
        b.regiondo_snapshot_generated_at,
        admin.last_provider_edit_error,
+       admin.provider_update_outcome,
+       admin.provider_update_at,
+       admin.provider_update_changed_fields,
+       admin.provider_update_message,
        latest.event_id AS latest_event_id,
        latest.status AS latest_event_status,
        latest.action_type AS latest_event_action_type,
@@ -1588,6 +1598,12 @@ function mapBookingSyncRow(row: BookingSyncRow): DashboardBookingSyncInfo {
     latestEventProcessedAt,
     latestEventAttemptCount: row.latest_event_attempt_count ?? 0,
     lastProviderEditError: row.last_provider_edit_error,
+    providerUpdateOutcome: row.provider_update_outcome,
+    providerUpdateAt: toIsoString(row.provider_update_at),
+    providerUpdateChangedFields: Array.isArray(row.provider_update_changed_fields)
+      ? row.provider_update_changed_fields.filter((field): field is string => typeof field === 'string')
+      : [],
+    providerUpdateMessage: row.provider_update_message,
     lastSyncError: row.latest_event_last_error,
     isQueued,
     isStale
@@ -2392,95 +2408,6 @@ function mapPaymentMethodToType(paymentMethod: string | null): 'cash' | 'card' |
   return 'other';
 }
 
-function buildRegiondoUpdateInput(
-  current: BookingForUpdateRow,
-  update: ResolvedBookingUpdate,
-  changes: {
-    attendees: boolean;
-    contact: boolean;
-    location: boolean;
-    payment: boolean;
-    products: boolean;
-    schedule: boolean;
-  }
-): RegiondoUpdateBookingInput | null {
-  if (!current.regiondo_booking_id) {
-    return null;
-  }
-
-  const providerInput: RegiondoUpdateBookingInput = {
-    bookingKey: current.regiondo_booking_id,
-    orderNumber: current.regiondo_order_number
-  };
-  let hasProviderMutation = false;
-
-  if (changes.contact) {
-    providerInput.contactData = {
-      ...(update.contact.email ? { email: update.contact.email } : {}),
-      firstname: update.contact.firstName,
-      lastname: update.contact.lastName,
-      ...(update.contact.phoneNumber ? { telephone: update.contact.phoneNumber } : {})
-    };
-    hasProviderMutation = true;
-  }
-
-  if (changes.schedule) {
-    const startsAt = formatRegiondoDateTime(update.dtFrom);
-    const endsAt = formatRegiondoDateTime(update.dtTo);
-    if (!startsAt || !endsAt) {
-      throw new DashboardValidationError('Booking date/time is invalid for Regiondo.');
-    }
-    providerInput.startsAt = startsAt;
-    providerInput.endsAt = endsAt;
-    hasProviderMutation = true;
-  }
-
-  if (changes.attendees) {
-    providerInput.guestCount = update.guestCount;
-    hasProviderMutation = true;
-  }
-
-  if (changes.location) {
-    if (!update.regiondoLocationId) {
-      throw new DashboardValidationError('Selected location cannot be updated in Regiondo because it has no Regiondo location ID.');
-    }
-    providerInput.locationId = update.regiondoLocationId;
-    hasProviderMutation = true;
-  }
-
-  if (changes.products) {
-    const itemDateTime = formatRegiondoDateTime(update.dtFrom);
-    if (!itemDateTime) {
-      throw new DashboardValidationError('Booking date/time is invalid for Regiondo products.');
-    }
-
-    providerInput.items = update.products.map((product) => {
-      if (!product.regiondoProductId) {
-        throw new DashboardValidationError('Selected products must be synced with Regiondo before updating a Regiondo booking.');
-      }
-
-      return {
-        date_time: itemDateTime,
-        product_id: product.regiondoProductId,
-        qty: product.quantity,
-        unit_price: product.unitPrice
-      } satisfies RegiondoCheckoutCartItem;
-    });
-    hasProviderMutation = true;
-  }
-
-  if (changes.payment) {
-    providerInput.payment = {
-      amountPaid: update.payment.amountPaid,
-      amountToPay: update.payment.amountToPay,
-      paymentMethod: update.payment.paymentMethod
-    };
-    hasProviderMutation = true;
-  }
-
-  return hasProviderMutation ? providerInput : null;
-}
-
 async function queryBookingForUpdate(executor: Queryable, bookingId: string): Promise<BookingForUpdateRow | null> {
   const result = await executor.query<BookingForUpdateRow>(
     `SELECT
@@ -2505,6 +2432,11 @@ async function queryBookingForUpdate(executor: Queryable, bookingId: string): Pr
        admin.ops_status,
        admin.ops_notes,
        admin.last_provider_edit_error,
+       admin.provider_update_outcome,
+       admin.provider_update_at,
+       admin.provider_update_changed_fields,
+       admin.provider_update_message,
+       admin.local_override_fields,
        admin.location_override
      FROM bookings b
      INNER JOIN clients c ON c.client_id = b.client_id
@@ -2574,10 +2506,8 @@ async function buildResolvedBookingUpdate(
     ...(ops.statusChanged ? ['opsStatus'] : []),
     ...(ops.notesChanged ? ['opsNotes'] : [])
   ];
-  const isRegiondoBooking = current.source === 'regiondo' || Boolean(current.regiondo_booking_id);
   const resolved: ResolvedBookingUpdate = {
     changedFields,
-    clearProviderEditError: !isRegiondoBooking,
     contact: contact.next,
     dtFrom: dateRange.nextStart,
     dtTo: dateRange.nextEnd,
@@ -2588,32 +2518,10 @@ async function buildResolvedBookingUpdate(
     opsStatus: ops.nextOpsStatus,
     payment: payment.next,
     products: products.products,
-    providerInput: null,
     raw: current.regiondo_raw,
     regiondoLocationId: location.location.regiondo_location_id,
     rebuildConsumptions: dateRange.changed || products.changed
   };
-
-  resolved.providerInput = buildRegiondoUpdateInput(current, resolved, {
-    attendees: attendeeChanged,
-    contact: contact.changed,
-    location: location.changed && location.locationOverride !== 'none',
-    payment: payment.changed,
-    products: products.changed,
-    schedule: dateRange.changed
-  });
-  if (resolved.providerInput && !resolved.providerInput.locationId) {
-    if (
-      !resolved.regiondoLocationId ||
-      SYSTEM_LOCATION_PROVIDER_IDS.has(resolved.regiondoLocationId)
-    ) {
-      throw new DashboardValidationError(
-        'Select a Regiondo-mapped location before updating this Regiondo booking.'
-      );
-    }
-    resolved.providerInput.locationId = resolved.regiondoLocationId;
-  }
-  resolved.clearProviderEditError = resolved.clearProviderEditError || Boolean(resolved.providerInput);
 
   return resolved;
 }
@@ -2624,45 +2532,57 @@ async function upsertBookingAdminMetadata(
   input: {
     lastProviderEditError: string | null;
     locationOverride: BookingLocationOverride;
+    localOverrideFields: string[];
     opsNotes: string;
     opsStatus: 'normal' | 'escalated';
+    providerUpdateAt: Date | string | null;
+    providerUpdateChangedFields: string[];
+    providerUpdateMessage: string | null;
+    providerUpdateOutcome: 'not_supported' | 'succeeded' | 'failed' | null;
   }
 ): Promise<void> {
   await executor.query(
-    `INSERT INTO booking_admin_metadata (booking_id, ops_status, ops_notes, last_provider_edit_error, location_override)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO booking_admin_metadata (
+       booking_id, ops_status, ops_notes, last_provider_edit_error, location_override,
+       local_override_fields, provider_update_outcome, provider_update_at,
+       provider_update_changed_fields, provider_update_message
+     )
+     VALUES ($1, $2, $3, $4, $5, $6::text[], $7, $8::timestamptz, $9::jsonb, $10)
      ON CONFLICT (booking_id)
      DO UPDATE SET ops_status = EXCLUDED.ops_status,
                    ops_notes = EXCLUDED.ops_notes,
                    last_provider_edit_error = EXCLUDED.last_provider_edit_error,
                    location_override = EXCLUDED.location_override,
+                   local_override_fields = EXCLUDED.local_override_fields,
+                   provider_update_outcome = EXCLUDED.provider_update_outcome,
+                   provider_update_at = EXCLUDED.provider_update_at,
+                   provider_update_changed_fields = EXCLUDED.provider_update_changed_fields,
+                   provider_update_message = EXCLUDED.provider_update_message,
                    updated_at = now()`,
-    [bookingId, input.opsStatus, input.opsNotes, input.lastProviderEditError, input.locationOverride]
+    [
+      bookingId,
+      input.opsStatus,
+      input.opsNotes,
+      input.lastProviderEditError,
+      input.locationOverride,
+      input.localOverrideFields,
+      input.providerUpdateOutcome,
+      input.providerUpdateAt,
+      JSON.stringify(input.providerUpdateChangedFields),
+      input.providerUpdateMessage
+    ]
   );
 }
 
-async function recordBookingProviderEditError(bookingId: string, message: string): Promise<void> {
-  await pool.query(
-    `INSERT INTO booking_admin_metadata (booking_id, last_provider_edit_error)
-     VALUES ($1, $2)
-     ON CONFLICT (booking_id)
-     DO UPDATE SET last_provider_edit_error = EXCLUDED.last_provider_edit_error,
-                   updated_at = now()`,
-    [bookingId, message]
-  );
-}
-
-function getProviderEditErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'Regiondo booking update failed.';
-}
-
-async function updateManualBooking(
+async function updateBookingLocally(
   executor: Queryable,
   bookingId: string,
   current: BookingForUpdateRow,
   update: ResolvedBookingUpdate,
   updateProducts: boolean,
-  updatePayment: boolean
+  updatePayment: boolean,
+  preserveProviderSnapshot: boolean,
+  preserveClientContact: boolean
 ): Promise<void> {
   await executor.query(
     `UPDATE clients
@@ -2670,9 +2590,20 @@ async function updateManualBooking(
          last_name = $3,
          email = $4,
          phone_number = $5,
+         local_override_fields = CASE
+           WHEN $6::boolean THEN ARRAY(SELECT DISTINCT field FROM unnest(COALESCE(local_override_fields, ARRAY[]::text[]) || ARRAY['first_name', 'last_name', 'email', 'phone_number']::text[]) AS field)
+           ELSE local_override_fields
+         END,
          updated_at = now()
      WHERE client_id = $1`,
-    [current.client_id, update.contact.firstName, update.contact.lastName, update.contact.email, update.contact.phoneNumber]
+    [
+      current.client_id,
+      update.contact.firstName,
+      update.contact.lastName,
+      update.contact.email,
+      update.contact.phoneNumber,
+      preserveClientContact
+    ]
   );
 
   await executor.query(
@@ -2694,7 +2625,7 @@ async function updateManualBooking(
       update.payment.amountPaid,
       update.dtFrom,
       update.dtTo,
-      JSON.stringify(buildManualBookingRaw(update))
+      JSON.stringify(preserveProviderSnapshot ? current.regiondo_raw : buildManualBookingRaw(update))
     ]
   );
 
@@ -2721,31 +2652,16 @@ async function updateManualBooking(
   }
 }
 
-async function applyBookingLocationOverride(
-  executor: Queryable,
-  bookingId: string,
-  update: ResolvedBookingUpdate
-): Promise<void> {
-  if (update.locationOverride !== 'none') {
-    return;
-  }
+const REGIONDO_UPDATE_NOT_SUPPORTED_MESSAGE =
+  'Regiondo does not provide a supported API for editing existing bookings. The booking was saved locally.';
 
-  await executor.query(
-    `UPDATE bookings
-     SET location_id = $2,
-         updated_at = now()
-     WHERE booking_id = $1`,
-    [bookingId, update.locationId]
-  );
-}
+const BOOKING_PROVIDER_FIELDS = new Set(['contact', 'schedule', 'attendees', 'location', 'products', 'payment']);
 
 async function updateBookingRecord(
   bookingId: string,
-  input: UpdateDashboardBookingInput,
-  providerEmailOverride?: string | null
+  input: UpdateDashboardBookingInput
 ): Promise<DashboardBookingDetail> {
   const client = await pool.connect();
-  let providerEditError: string | null = null;
   let rebuildConsumptions = false;
 
   try {
@@ -2757,79 +2673,50 @@ async function updateBookingRecord(
 
     const currentProducts = await queryBookingProducts(client, bookingId);
     const update = await buildResolvedBookingUpdate(client, current, currentProducts, input);
-    if (providerEmailOverride && update.providerInput?.contactData) {
-      update.providerInput.contactData.email = providerEmailOverride;
-    }
     const isRegiondoBooking = current.source === 'regiondo' || Boolean(current.regiondo_booking_id);
     const hasBookingMutation = update.changedFields.some((field) => !['opsNotes', 'opsStatus'].includes(field));
-    const hasLocalNoLocationOverride = update.locationOverride === 'none' && update.changedFields.includes('location');
 
-    if (isRegiondoBooking && hasBookingMutation) {
-      if (!update.providerInput && !hasLocalNoLocationOverride) {
-        throw new DashboardValidationError('This Regiondo booking does not support the requested update.');
-      }
-
-      if (update.providerInput) {
-        if (!current.regiondo_booking_id) {
-          throw new DashboardValidationError('This Regiondo booking does not support the requested update.');
-        }
-
-        try {
-          await regiondoClient.updateBooking(update.providerInput);
-          const snapshot = await regiondoClient.hydrateBookingOrder({
-            bookingKey: current.regiondo_booking_id,
-            orderNumber: current.regiondo_order_number
-          });
-          const normalizedBooking = normalizeRegiondoBookingImport({
-            bookingKey: current.regiondo_booking_id,
-            purchaseData: snapshot.purchaseData,
-            supplierBookings: snapshot.supplierBookings,
-            webhookPayload: null
-          });
-          await upsertNormalizedRegiondoBooking(client, normalizedBooking);
-          if (providerEmailOverride && input.contact) {
-            await client.query(
-              `UPDATE clients
-               SET first_name = $2,
-                   last_name = $3,
-                   email = $4,
-                   phone_number = $5,
-                   updated_at = now()
-               WHERE client_id = $1`,
-              [
-                current.client_id,
-                update.contact.firstName,
-                update.contact.lastName,
-                update.contact.email,
-                update.contact.phoneNumber
-              ]
-            );
-          }
-        } catch (error) {
-          providerEditError = getProviderEditErrorMessage(error);
-          throw error;
-        }
-      }
-
-      if (hasLocalNoLocationOverride) {
-        await applyBookingLocationOverride(client, bookingId, update);
-      }
-    } else if (!isRegiondoBooking && hasBookingMutation) {
-      await updateManualBooking(
+    if (hasBookingMutation) {
+      await updateBookingLocally(
         client,
         bookingId,
         current,
         update,
         update.changedFields.includes('products'),
-        update.changedFields.includes('payment')
+        update.changedFields.includes('payment'),
+        isRegiondoBooking,
+        isRegiondoBooking && update.changedFields.includes('contact')
       );
     }
 
+    const providerChangedFields = update.changedFields.filter((field) => BOOKING_PROVIDER_FIELDS.has(field));
+    const localOverrideFields = Array.from(
+      new Set([...(current.local_override_fields ?? []), ...(isRegiondoBooking ? providerChangedFields : [])])
+    );
+    const providerUpdateOutcome =
+      isRegiondoBooking && providerChangedFields.length ? 'not_supported' : current.provider_update_outcome;
+    const providerUpdateAt =
+      isRegiondoBooking && providerChangedFields.length ? new Date() : current.provider_update_at;
+    const providerUpdateMessage =
+      isRegiondoBooking && providerChangedFields.length
+        ? REGIONDO_UPDATE_NOT_SUPPORTED_MESSAGE
+        : current.provider_update_message;
+
     await upsertBookingAdminMetadata(client, bookingId, {
-      lastProviderEditError: update.clearProviderEditError ? null : current.last_provider_edit_error,
+      lastProviderEditError: providerUpdateOutcome === 'not_supported' ? null : current.last_provider_edit_error,
       locationOverride: update.locationOverride,
+      localOverrideFields,
       opsNotes: update.opsNotes,
-      opsStatus: update.opsStatus
+      opsStatus: update.opsStatus,
+      providerUpdateAt,
+      providerUpdateChangedFields:
+        isRegiondoBooking && providerChangedFields.length
+          ? providerChangedFields
+          : Array.isArray(current.provider_update_changed_fields)
+            ? current.provider_update_changed_fields.filter((field): field is string => typeof field === 'string')
+            : [],
+      providerUpdateMessage,
+      providerUpdateOutcome
     });
 
     rebuildConsumptions = update.rebuildConsumptions;
@@ -2840,9 +2727,6 @@ async function updateBookingRecord(
       await client.query("ROLLBACK");
     } catch {
       // Ignore rollback failures so the original error remains visible.
-    }
-    if (providerEditError) {
-      await recordBookingProviderEditError(bookingId, providerEditError);
     }
     throw error;
   } finally {
@@ -2870,42 +2754,6 @@ function hasSharedBookingPatch(input: UpdateDashboardLinkedBookingSharedInput): 
   return Object.keys(input).length > 0;
 }
 
-async function resolveAlternateRegiondoEmail(
-  group: LinkedBookingGroup,
-  bookingId: string,
-  patch: UpdateDashboardLinkedBookingSharedInput
-): Promise<string | null> {
-  if (patch.contact?.email === undefined || !group.taskIds.length) {
-    return null;
-  }
-
-  const result = await pool.query<{ raw_json: unknown }>(
-    `SELECT raw_json
-     FROM tasks
-     WHERE id = ANY($1::uuid[])
-       AND is_deleted = false
-     ORDER BY (connected_booking_key = $2::uuid) DESC, updated_at DESC`,
-    [group.taskIds, bookingId]
-  );
-
-  for (const row of result.rows) {
-    const rawJson = isRecord(row.raw_json) ? row.raw_json : null;
-    const bookingDataValue = rawJson?.booking_data ?? rawJson?.bookingData;
-    const bookingData = isRecord(bookingDataValue) ? bookingDataValue : null;
-    const usesAlternateEmail = readRecordBoolean(
-      bookingData,
-      'send_regiondo_bookings_to_alternate_email',
-      'sendRegiondoBookingsToAlternateEmail'
-    );
-    const alternateEmail = readRecordText(bookingData, 'regiondo_booking_email', 'regiondoBookingEmail');
-    if (usesAlternateEmail && alternateEmail) {
-      return alternateEmail;
-    }
-  }
-
-  return null;
-}
-
 function cloneRecord(value: unknown): Record<string, unknown> {
   return isRecord(value) ? structuredClone(value) : {};
 }
@@ -2914,7 +2762,8 @@ function buildLinkedTaskProjection(
   task: DashboardTask,
   booking: DashboardBookingDetail,
   patch: UpdateDashboardLinkedBookingSharedInput,
-  actor?: DashboardTaskMutationActor
+  actor?: DashboardTaskMutationActor,
+  providerUpdate?: Pick<DashboardBookingSyncInfo, 'providerUpdateAt' | 'providerUpdateChangedFields' | 'providerUpdateOutcome' | 'providerUpdateMessage'>
 ): {
   eventDateTime: string | null;
   rawJson: Record<string, unknown>;
@@ -2991,21 +2840,46 @@ function buildLinkedTaskProjection(
     occurredAt: new Date().toISOString(),
     type: 'synced'
   };
+  const providerUpdateEntry: DashboardTaskActivityEntry | null = providerUpdate?.providerUpdateOutcome
+    ? {
+        id: `task-activity-${randomUUID()}`,
+        actor: {
+          name: 'Regiondo',
+          role: 'Provider',
+          source: 'external'
+        },
+        changes: [],
+        metadata: {
+          bookingId: booking.id,
+          outcome: providerUpdate.providerUpdateOutcome,
+          changedFields: providerUpdate.providerUpdateChangedFields.join(', '),
+          message: providerUpdate.providerUpdateMessage,
+          providerUpdateAt: providerUpdate.providerUpdateAt
+        },
+        occurredAt: providerUpdate.providerUpdateAt ?? new Date().toISOString(),
+        type: 'provider_update'
+      }
+    : null;
 
   return {
     eventDateTime,
     rawJson,
     site,
-    updateLog: changedFields.length ? [activityEntry, ...task.activityLog] : task.activityLog
+    updateLog: [
+      ...(providerUpdateEntry ? [providerUpdateEntry] : []),
+      ...(changedFields.length ? [activityEntry] : []),
+      ...task.activityLog
+    ]
   };
 }
 
 export async function syncLinkedTasksFromBooking(
   bookingId: string,
   patch: UpdateDashboardLinkedBookingSharedInput,
-  actor?: DashboardTaskMutationActor
+  actor?: DashboardTaskMutationActor,
+  providerUpdate?: Pick<DashboardBookingSyncInfo, 'providerUpdateAt' | 'providerUpdateChangedFields' | 'providerUpdateOutcome' | 'providerUpdateMessage'>
 ): Promise<void> {
-  if (!hasSharedBookingPatch(patch)) {
+  if (!hasSharedBookingPatch(patch) && !providerUpdate?.providerUpdateOutcome) {
     return;
   }
 
@@ -3027,7 +2901,7 @@ export async function syncLinkedTasksFromBooking(
     await client.query('BEGIN');
     for (const row of taskRows.rows) {
       const task = mapTaskRow(row);
-      const projection = buildLinkedTaskProjection(task, booking, patch, actor);
+      const projection = buildLinkedTaskProjection(task, booking, patch, actor, providerUpdate);
       await client.query(
         `UPDATE tasks
          SET event_date_time = $2::timestamptz,
@@ -3056,13 +2930,12 @@ export async function updateBooking(
   await assertLinkedContextVersion(pool, group, input.expectedLinkedContextVersion);
 
   const sharedPatch = buildSharedBookingPatch(input);
-  const alternateRegiondoEmail = await resolveAlternateRegiondoEmail(group, bookingId, sharedPatch);
   const recordInput = { ...input };
   delete recordInput.expectedLinkedContextVersion;
   const updatedBookingIds: string[] = [];
 
   try {
-    await updateBookingRecord(bookingId, recordInput, alternateRegiondoEmail);
+    const primaryBooking = await updateBookingRecord(bookingId, recordInput);
     updatedBookingIds.push(bookingId);
 
     if (hasSharedBookingPatch(sharedPatch)) {
@@ -3070,11 +2943,11 @@ export async function updateBooking(
         if (linkedBookingId === bookingId) {
           continue;
         }
-        await updateBookingRecord(linkedBookingId, sharedPatch, alternateRegiondoEmail);
+        await updateBookingRecord(linkedBookingId, sharedPatch);
         updatedBookingIds.push(linkedBookingId);
       }
-      await syncLinkedTasksFromBooking(bookingId, sharedPatch, actor);
     }
+    await syncLinkedTasksFromBooking(bookingId, sharedPatch, actor, primaryBooking.sync);
   } catch (error) {
     if (updatedBookingIds.length) {
       throw new DashboardConflictError(

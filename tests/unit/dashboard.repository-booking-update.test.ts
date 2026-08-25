@@ -83,6 +83,11 @@ const createCurrentBookingRow = (overrides: Record<string, unknown> = {}) => ({
   ops_status: 'normal',
   ops_notes: '',
   last_provider_edit_error: null,
+  provider_update_outcome: null,
+  provider_update_at: null,
+  provider_update_changed_fields: [],
+  provider_update_message: null,
+  local_override_fields: [],
   location_override: null,
   ...overrides
 });
@@ -111,6 +116,10 @@ const createFinalBookingRow = (overrides: Record<string, unknown> = {}) => ({
   location_regiondo_location_id: SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID,
   location_override: 'none',
   last_provider_edit_error: null,
+  provider_update_outcome: null,
+  provider_update_at: null,
+  provider_update_changed_fields: [],
+  provider_update_message: null,
   ops_status: 'normal',
   ops_notes: '',
   ...overrides
@@ -238,7 +247,7 @@ describe('dashboard booking update location overrides', () => {
     const metadataUpsert = clientQueryMock.mock.calls.find(
       ([sql]: [string]) => sql.includes('INSERT INTO booking_admin_metadata') && sql.includes('location_override')
     );
-    expect(metadataUpsert?.[1]).toEqual([bookingId, 'normal', '', null, 'none']);
+    expect(metadataUpsert?.[1]?.slice(0, 6)).toEqual([bookingId, 'normal', '', null, 'none', []]);
   });
 
   it('does not call Regiondo when a Regiondo booking is only cleared to no location', async () => {
@@ -260,9 +269,10 @@ describe('dashboard booking update location overrides', () => {
     expect(updateBookingMock).not.toHaveBeenCalled();
     expect(hydrateBookingOrderMock).not.toHaveBeenCalled();
     expect(upsertNormalizedRegiondoBookingMock).not.toHaveBeenCalled();
+
   });
 
-  it('includes the unchanged provider location with supported Regiondo edits', async () => {
+  it('saves Regiondo booking edits locally and marks the provider update as unsupported', async () => {
     setupRepositoryQueries({
       currentRow: createCurrentBookingRow({
         source: 'regiondo',
@@ -279,11 +289,6 @@ describe('dashboard booking update location overrides', () => {
         regiondo_order_number: 'order-1'
       })
     });
-    updateBookingMock.mockResolvedValue({ result: 'ok' });
-    hydrateBookingOrderMock.mockResolvedValue({ purchaseData: {}, supplierBookings: [] });
-    normalizeRegiondoBookingImportMock.mockReturnValue({ bookingKey: 'booking-key-1' });
-    upsertNormalizedRegiondoBookingMock.mockResolvedValue({ bookingId });
-
     await updateBooking(bookingId, {
       contact: {
         email: 'family@example.com',
@@ -293,15 +298,21 @@ describe('dashboard booking update location overrides', () => {
       }
     });
 
-    expect(updateBookingMock).toHaveBeenCalledWith(
-      expect.objectContaining({ bookingKey: 'booking-key-1', locationId: 'regiondo-location-1' })
-    );
-    expect(upsertNormalizedRegiondoBookingMock).toHaveBeenCalledTimes(1);
+    expect(updateBookingMock).not.toHaveBeenCalled();
+    expect(hydrateBookingOrderMock).not.toHaveBeenCalled();
+    expect(upsertNormalizedRegiondoBookingMock).not.toHaveBeenCalled();
 
     const localLocationUpdates = clientQueryMock.mock.calls.filter(
       ([sql]: [string]) => sql.includes('UPDATE bookings') && sql.includes('SET location_id = $2')
     );
-    expect(localLocationUpdates).toHaveLength(0);
+    expect(localLocationUpdates).toHaveLength(1);
+
+    const metadataUpsert = clientQueryMock.mock.calls.find(
+      ([sql]: [string]) => sql.includes('INSERT INTO booking_admin_metadata') && sql.includes('provider_update_outcome')
+    );
+    expect(metadataUpsert?.[1]?.[5]).toEqual(['contact']);
+    expect(metadataUpsert?.[1]?.[6]).toBe('not_supported');
+    expect(metadataUpsert?.[1]?.[8]).toBe(JSON.stringify(['contact']));
   });
 
   it('allows local-only metadata saves without a provider location', async () => {
@@ -321,7 +332,7 @@ describe('dashboard booking update location overrides', () => {
     expect(hydrateBookingOrderMock).not.toHaveBeenCalled();
   });
 
-  it('rejects provider-owned edits before the network call when no provider location exists', async () => {
+  it('allows provider-owned edits without a mapped provider location and saves them locally', async () => {
     setupRepositoryQueries({
       currentRow: createCurrentBookingRow({
         location_id: noLocationId,
@@ -332,7 +343,7 @@ describe('dashboard booking update location overrides', () => {
       })
     });
 
-    await expect(updateBooking(bookingId, { attendees: 3 })).rejects.toThrow(/Regiondo-mapped location/i);
+    await expect(updateBooking(bookingId, { attendees: 3 })).resolves.toBeDefined();
     expect(updateBookingMock).not.toHaveBeenCalled();
   });
 
@@ -355,19 +366,14 @@ describe('dashboard booking update location overrides', () => {
         regiondo_order_number: 'order-1'
       })
     });
-    updateBookingMock.mockResolvedValue({ result: 'ok' });
-    hydrateBookingOrderMock.mockResolvedValue({ purchaseData: {}, supplierBookings: [] });
-    normalizeRegiondoBookingImportMock.mockReturnValue({ bookingKey: 'booking-key-1' });
-    upsertNormalizedRegiondoBookingMock.mockResolvedValue({ bookingId });
-
     await updateBooking(bookingId, { locationId: knownLocationId });
 
-    expect(updateBookingMock).toHaveBeenCalledWith(expect.objectContaining({ locationId: 'regiondo-location-1' }));
+    expect(updateBookingMock).not.toHaveBeenCalled();
 
     const metadataUpsert = clientQueryMock.mock.calls.find(
       ([sql]: [string]) => sql.includes('INSERT INTO booking_admin_metadata') && sql.includes('location_override')
     );
-    expect(metadataUpsert?.[1]).toEqual([bookingId, 'normal', '', null, null]);
+    expect(metadataUpsert?.[1]?.slice(0, 6)).toEqual([bookingId, 'normal', '', null, null, ['location']]);
   });
 
   it('rejects direct system placeholder ids in booking updates', async () => {

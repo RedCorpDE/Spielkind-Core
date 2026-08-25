@@ -91,22 +91,6 @@ export interface RegiondoPurchaseOrderInput {
   syncTicketsProcessing?: boolean;
 }
 
-export interface RegiondoUpdateBookingInput {
-  bookingKey: string;
-  orderNumber?: string | null;
-  contactData?: Partial<RegiondoCheckoutContactData>;
-  startsAt?: string;
-  endsAt?: string;
-  guestCount?: number;
-  locationId?: string | null;
-  items?: RegiondoCheckoutCartItem[];
-  payment?: {
-    amountPaid?: number;
-    amountToPay?: number;
-    paymentMethod?: string | null;
-  };
-}
-
 export interface RegiondoListSupplierBookingsInput {
   bookingKey?: string;
   dateRange?: string;
@@ -192,21 +176,6 @@ export class RegiondoLocationValidationError extends RegiondoApiError {
   constructor(message: string, cause?: unknown) {
     super(message, 400);
     this.name = 'RegiondoLocationValidationError';
-    if (cause !== undefined) {
-      this.cause = cause;
-    }
-  }
-}
-
-const REGIONDO_BOOKING_UPDATE_UNSUPPORTED_MESSAGE =
-  'Regiondo does not allow this booking to be edited through the supplier API. No changes were saved. Update the booking in Regiondo, then synchronize it here.';
-
-export class RegiondoBookingUpdateUnsupportedError extends RegiondoApiError {
-  readonly retryable = false;
-
-  constructor(cause?: unknown) {
-    super(REGIONDO_BOOKING_UPDATE_UNSUPPORTED_MESSAGE, 404);
-    this.name = 'RegiondoBookingUpdateUnsupportedError';
     if (cause !== undefined) {
       this.cause = cause;
     }
@@ -1088,48 +1057,6 @@ export class RegiondoClient {
     }
 
     return this.resolvePurchaseOrderSnapshot(purchaseDataRaw, { subId: input.subId });
-  }
-
-  async updateBooking(input: RegiondoUpdateBookingInput): Promise<unknown> {
-    const body = {
-      booking_key: input.bookingKey,
-      ...(input.orderNumber ? { order_number: input.orderNumber } : {}),
-      ...(input.contactData ? { contact_data: input.contactData } : {}),
-      ...(input.startsAt ? { date_time: input.startsAt, dt_from: input.startsAt } : {}),
-      ...(input.endsAt ? { dt_to: input.endsAt } : {}),
-      ...(input.guestCount !== undefined ? { guest_count: input.guestCount } : {}),
-      ...(input.locationId ? { location_id: input.locationId } : {}),
-      ...(input.items ? { items: input.items } : {}),
-      ...(input.payment
-        ? {
-            payment: {
-              ...(input.payment.amountPaid !== undefined ? { amount_paid: input.payment.amountPaid } : {}),
-              ...(input.payment.amountToPay !== undefined ? { amount_to_pay: input.payment.amountToPay } : {}),
-              ...(input.payment.paymentMethod !== undefined ? { payment_method: input.payment.paymentMethod } : {})
-            }
-          }
-        : {})
-    };
-
-    try {
-      return await this.requestJson<unknown>(`/supplier/bookings/${encodeURIComponent(input.bookingKey)}`, {
-        body,
-        method: 'PUT',
-        params: {
-          ...(input.orderNumber ? { order_number: input.orderNumber } : {}),
-          store_locale: this.language
-        }
-      });
-    } catch (error) {
-      // Regiondo documents supplier bookings as a read API. Some accounts have
-      // historically exposed a private update operation, while others answer
-      // with 404 for the operation itself. This is not a location-mapping error
-      // and retrying the same ambiguous write is unsafe.
-      if (error instanceof RegiondoApiError && error.status === 404) {
-        throw new RegiondoBookingUpdateUnsupportedError(error);
-      }
-      throw error;
-    }
   }
 
   async cancelTickets(referenceIds: string[]): Promise<void> {

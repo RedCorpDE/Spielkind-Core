@@ -312,6 +312,10 @@ export interface DashboardBookingSyncInfo {
   latestEventProcessedAt: string | null;
   latestEventAttemptCount: number;
   lastProviderEditError: string | null;
+  providerUpdateOutcome: 'not_supported' | 'succeeded' | 'failed' | null;
+  providerUpdateAt: string | null;
+  providerUpdateChangedFields: string[];
+  providerUpdateMessage: string | null;
   lastSyncError: string | null;
   isQueued: boolean;
   isStale: boolean;
