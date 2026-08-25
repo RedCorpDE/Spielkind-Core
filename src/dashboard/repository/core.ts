@@ -97,6 +97,7 @@ export interface BookingRow {
   last_provider_edit_error: string | null;
   ops_status: string | null;
   ops_notes: string | null;
+  external_sync_status?: 'synced' | 'pending_update' | 'conflict';
 }
 
 export interface ExistingBookingRow {
@@ -585,6 +586,7 @@ export function mapBookingRow(row: BookingRow): DashboardBooking {
     locationDataStatus,
     regiondoBookingId: row.regiondo_booking_id,
     regiondoOrderNumber: row.regiondo_order_number,
+    externalSyncStatus: row.external_sync_status ?? 'synced',
     lastUpdated: requireIsoString(row.updated_at, 'bookings.updated_at'),
     updateCapabilities: {
       attendees: true,

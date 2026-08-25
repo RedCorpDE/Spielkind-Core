@@ -7,6 +7,7 @@ import {
   SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID
 } from '../../sync/mappers.js';
 import type { NormalizedRegiondoBookingImport } from './booking-normalizer.js';
+import { resolveBookingChangeRequests } from './booking-change-request.repository.js';
 
 async function upsertClient(client: PoolClient, input: NormalizedRegiondoBookingImport['client']): Promise<string> {
   if (input.regiondoCustomerId) {
@@ -14,10 +15,10 @@ async function upsertClient(client: PoolClient, input: NormalizedRegiondoBooking
       `INSERT INTO clients (first_name, last_name, email, phone_number, regiondo_customer_id, regiondo_raw)
        VALUES ($1, $2, $3, $4, $5, $6::jsonb)
        ON CONFLICT (regiondo_customer_id)
-       DO UPDATE SET first_name = CASE WHEN 'first_name' = ANY(clients.local_override_fields) THEN clients.first_name ELSE EXCLUDED.first_name END,
-                     last_name = CASE WHEN 'last_name' = ANY(clients.local_override_fields) THEN clients.last_name ELSE EXCLUDED.last_name END,
-                     email = CASE WHEN 'email' = ANY(clients.local_override_fields) THEN clients.email ELSE COALESCE(EXCLUDED.email, clients.email) END,
-                     phone_number = CASE WHEN 'phone_number' = ANY(clients.local_override_fields) THEN clients.phone_number ELSE COALESCE(EXCLUDED.phone_number, clients.phone_number) END,
+       DO UPDATE SET first_name = EXCLUDED.first_name,
+                     last_name = EXCLUDED.last_name,
+                     email = COALESCE(EXCLUDED.email, clients.email),
+                     phone_number = COALESCE(EXCLUDED.phone_number, clients.phone_number),
                      regiondo_raw = EXCLUDED.regiondo_raw,
                      updated_at = now()
        RETURNING client_id`,
@@ -32,9 +33,9 @@ async function upsertClient(client: PoolClient, input: NormalizedRegiondoBooking
       `INSERT INTO clients (first_name, last_name, email, phone_number, regiondo_raw)
        VALUES ($1, $2, $3, $4, $5::jsonb)
        ON CONFLICT (email)
-       DO UPDATE SET first_name = CASE WHEN 'first_name' = ANY(clients.local_override_fields) THEN clients.first_name ELSE EXCLUDED.first_name END,
-                     last_name = CASE WHEN 'last_name' = ANY(clients.local_override_fields) THEN clients.last_name ELSE EXCLUDED.last_name END,
-                     phone_number = CASE WHEN 'phone_number' = ANY(clients.local_override_fields) THEN clients.phone_number ELSE COALESCE(EXCLUDED.phone_number, clients.phone_number) END,
+       DO UPDATE SET first_name = EXCLUDED.first_name,
+                     last_name = EXCLUDED.last_name,
+                     phone_number = COALESCE(EXCLUDED.phone_number, clients.phone_number),
                      regiondo_raw = EXCLUDED.regiondo_raw,
                      updated_at = now()
        RETURNING client_id`,
@@ -121,27 +122,6 @@ async function resolveNoLocationPlaceholder(client: PoolClient): Promise<string>
   return result.rows[0].location_id;
 }
 
-interface ExistingBookingOverrides {
-  booking_id: string;
-  client_id: string;
-  local_override_fields: string[] | null;
-  location_override: string | null;
-}
-
-async function getExistingBookingOverrides(client: PoolClient, bookingKey: string): Promise<ExistingBookingOverrides | null> {
-  const result = await client.query<ExistingBookingOverrides>(
-    `SELECT b.booking_id, b.client_id, admin.local_override_fields, admin.location_override
-     FROM bookings b
-     LEFT JOIN booking_admin_metadata admin ON admin.booking_id = b.booking_id
-     WHERE b.regiondo_booking_id = $1
-     LIMIT 1
-     FOR UPDATE OF b`,
-    [bookingKey]
-  );
-
-  return result.rows[0] ?? null;
-}
-
 async function ensureProductStub(
   client: PoolClient,
   input: NormalizedRegiondoBookingImport['items'][number]
@@ -168,16 +148,13 @@ export async function upsertNormalizedRegiondoBooking(
   client: PoolClient,
   input: NormalizedRegiondoBookingImport
 ): Promise<{ bookingId: string }> {
-  const existing = await getExistingBookingOverrides(client, input.bookingKey);
-  const localOverrideFields = new Set(existing?.local_override_fields ?? []);
+  const localOverrideFields = new Set<string>();
   const clientId = await upsertClient(client, input.client);
   const providerLocationId = await resolveLocation(client, {
     location: input.location,
     regiondoProductIds: input.items.map((item) => item.regiondoProductId)
   });
-  const locationId = existing?.location_override === 'none'
-    ? await resolveNoLocationPlaceholder(client)
-    : providerLocationId;
+  const locationId = providerLocationId;
 
   const bookingResult = await client.query<{ booking_id: string }>(
     `INSERT INTO bookings (
@@ -224,7 +201,7 @@ export async function upsertNormalizedRegiondoBooking(
       input.snapshotGeneratedAt,
       JSON.stringify(input.raw),
       localOverrideFields.has('contact'),
-      localOverrideFields.has('location') || existing?.location_override === 'none',
+      localOverrideFields.has('location'),
       localOverrideFields.has('attendees'),
       localOverrideFields.has('payment'),
       localOverrideFields.has('schedule')
@@ -259,6 +236,24 @@ export async function upsertNormalizedRegiondoBooking(
       );
     }
   }
+
+  await resolveBookingChangeRequests({
+    client,
+    bookingId,
+    providerValues: {
+      attendees: input.guestCount,
+      schedule: { bookingDate: input.dtFrom, bookingEndDate: input.dtTo },
+      contact: {
+        firstName: input.client.firstName,
+        lastName: input.client.lastName,
+        email: input.client.email,
+        phoneNumber: input.client.phoneNumber
+      },
+      payment: { amountToPay: input.totalAmount, amountPaid: input.paidAmount },
+      products: input.items.map((item) => ({ productId: item.regiondoProductId, quantity: item.quantity, unitPrice: item.unitPrice })),
+      location: input.location.regiondoLocationId
+    }
+  });
 
   return { bookingId };
 }

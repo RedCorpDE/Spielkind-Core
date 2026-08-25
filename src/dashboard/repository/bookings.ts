@@ -3,6 +3,8 @@ import type { PoolClient } from 'pg';
 import { pool } from '../../db/client.js';
 import { normalizeRegiondoBookingImport } from '../../modules/bookings/booking-normalizer.js';
 import { upsertNormalizedRegiondoBooking } from '../../modules/bookings/booking.repository.js';
+import { createOrMergeBookingChangeRequest } from '../../modules/bookings/booking-change-request.repository.js';
+import { getBookingProvider } from '../../modules/bookings/booking-provider.js';
 import {
   regiondoClient,
   type RegiondoCheckoutCartItem,
@@ -69,6 +71,7 @@ interface BookingForUpdateRow {
   booking_id: string;
   client_id: string;
   location_id: string | null;
+  regiondo_location_id: string | null;
   status: string;
   guest_count: number;
   total_amount: string | number;
@@ -171,6 +174,10 @@ interface BookingSyncRow {
   provider_update_at: Date | string | null;
   provider_update_changed_fields: unknown;
   provider_update_message: string | null;
+  active_change_request_id: string | null;
+  active_change_request_status: 'pending' | 'conflict' | null;
+  active_change_request_changes: unknown;
+  active_change_request_provider_key: string | null;
   latest_event_id: string | null;
   latest_event_status: DashboardRegiondoWebhookEventStatus | null;
   latest_event_action_type: string | null;
@@ -1314,11 +1321,19 @@ function buildBookingBaseQuery() {
        admin.location_override,
        admin.last_provider_edit_error,
        admin.ops_status,
-       admin.ops_notes
+       admin.ops_notes,
+       COALESCE(request.status::text, 'synced') AS external_sync_status
      FROM bookings b
      INNER JOIN clients c ON c.client_id = b.client_id
      LEFT JOIN locations location ON location.location_id = b.location_id
      LEFT JOIN booking_admin_metadata admin ON admin.booking_id = b.booking_id
+     LEFT JOIN LATERAL (
+       SELECT status
+       FROM booking_change_requests
+       WHERE booking_id = b.booking_id AND status IN ('pending', 'conflict')
+       ORDER BY requested_at DESC
+       LIMIT 1
+     ) AS request ON true
      LEFT JOIN LATERAL (
        SELECT
          MIN(p.title) AS primary_product_title,
@@ -1396,6 +1411,20 @@ function buildListBookingsQuery(filters: ListDashboardBookingsFilters = {}) {
   if (resolved.opsStatus) {
     values.push(resolved.opsStatus === "Escalated" ? "escalated" : "normal");
     where.push(`COALESCE(admin.ops_status, 'normal') = $${values.length}`);
+  }
+
+  if (resolved.externalSyncStatus) {
+    const providerRequestStatus = resolved.externalSyncStatus === 'pending_update'
+      ? 'pending'
+      : resolved.externalSyncStatus === 'conflict'
+        ? 'conflict'
+        : 'synced';
+    if (providerRequestStatus === 'synced') {
+      where.push(`request.status IS NULL`);
+    } else {
+      values.push(providerRequestStatus);
+      where.push(`request.status = $${values.length}`);
+    }
   }
 
   if (resolved.locationId) {
@@ -1523,6 +1552,10 @@ async function queryBookingSyncRow(executor: Queryable, bookingId: string): Prom
        admin.provider_update_at,
        admin.provider_update_changed_fields,
        admin.provider_update_message,
+       request.change_request_id AS active_change_request_id,
+       request.status AS active_change_request_status,
+       request.changes AS active_change_request_changes,
+       request.provider_key AS active_change_request_provider_key,
        latest.event_id AS latest_event_id,
        latest.status AS latest_event_status,
        latest.action_type AS latest_event_action_type,
@@ -1535,6 +1568,13 @@ async function queryBookingSyncRow(executor: Queryable, bookingId: string): Prom
        latest.last_error AS latest_event_last_error
      FROM bookings b
      LEFT JOIN booking_admin_metadata admin ON admin.booking_id = b.booking_id
+     LEFT JOIN LATERAL (
+       SELECT change_request_id, status, changes, provider_key
+       FROM booking_change_requests
+       WHERE booking_id = b.booking_id AND status IN ('pending', 'conflict')
+       ORDER BY requested_at DESC
+       LIMIT 1
+     ) AS request ON true
      LEFT JOIN LATERAL (
        SELECT
          event_id,
@@ -1604,6 +1644,15 @@ function mapBookingSyncRow(row: BookingSyncRow): DashboardBookingSyncInfo {
       ? row.provider_update_changed_fields.filter((field): field is string => typeof field === 'string')
       : [],
     providerUpdateMessage: row.provider_update_message,
+    externalSyncStatus: row.active_change_request_status === 'conflict' ? 'conflict' : row.active_change_request_status === 'pending' ? 'pending_update' : 'synced',
+    activeChangeRequest: row.active_change_request_id
+      ? {
+          id: row.active_change_request_id,
+          providerKey: row.active_change_request_provider_key ?? 'external',
+          status: row.active_change_request_status ?? 'pending',
+          changes: isRecord(row.active_change_request_changes) ? row.active_change_request_changes : {}
+        }
+      : null,
     lastSyncError: row.latest_event_last_error,
     isQueued,
     isStale
@@ -2384,6 +2433,38 @@ function buildManualBookingRaw(input: ResolvedBookingUpdate): Record<string, unk
   return raw;
 }
 
+function buildProviderChangeSet(
+  current: BookingForUpdateRow,
+  currentProducts: DashboardBookingProduct[],
+  update: ResolvedBookingUpdate
+): Record<string, { from: unknown; to: unknown }> {
+  const changes: Record<string, { from: unknown; to: unknown }> = {};
+  if (update.changedFields.includes('contact')) {
+    changes.contact = {
+      from: { firstName: current.first_name, lastName: current.last_name, email: current.email, phoneNumber: current.phone_number },
+      to: update.contact
+    };
+  }
+  if (update.changedFields.includes('schedule')) changes.schedule = { from: { bookingDate: current.dt_from, bookingEndDate: current.dt_to }, to: { bookingDate: update.dtFrom, bookingEndDate: update.dtTo } };
+  if (update.changedFields.includes('attendees')) changes.attendees = { from: current.guest_count, to: update.guestCount };
+  if (update.changedFields.includes('location')) {
+    changes.location = { from: current.regiondo_location_id, to: update.regiondoLocationId };
+  }
+  if (update.changedFields.includes('products')) {
+    changes.products = {
+      from: currentProducts.map((product) => ({ productId: product.regiondoProductId, quantity: product.quantity, unitPrice: product.unitPrice })),
+      to: update.products.map((product) => ({ productId: product.regiondoProductId, quantity: product.quantity, unitPrice: product.unitPrice }))
+    };
+  }
+  if (update.changedFields.includes('payment')) {
+    changes.payment = {
+      from: { amountToPay: Number(current.total_amount), amountPaid: Number(current.paid_amount) },
+      to: { amountToPay: update.payment.amountToPay, amountPaid: update.payment.amountPaid }
+    };
+  }
+  return changes;
+}
+
 function mapPaymentMethodToType(paymentMethod: string | null): 'cash' | 'card' | 'paypal' | 'sepa' | 'bank_transfer' | 'voucher' | 'other' {
   const normalized = paymentMethod?.toLowerCase() ?? '';
   if (normalized.includes('paypal')) {
@@ -2414,6 +2495,7 @@ async function queryBookingForUpdate(executor: Queryable, bookingId: string): Pr
        b.booking_id,
        b.client_id,
        b.location_id,
+       location.regiondo_location_id,
        b.status,
        b.guest_count,
        b.total_amount,
@@ -2440,6 +2522,7 @@ async function queryBookingForUpdate(executor: Queryable, bookingId: string): Pr
        admin.location_override
      FROM bookings b
      INNER JOIN clients c ON c.client_id = b.client_id
+     LEFT JOIN locations location ON location.location_id = b.location_id
      LEFT JOIN booking_admin_metadata admin ON admin.booking_id = b.booking_id
      WHERE b.booking_id = $1
      LIMIT 1
@@ -2652,14 +2735,10 @@ async function updateBookingLocally(
   }
 }
 
-const REGIONDO_UPDATE_NOT_SUPPORTED_MESSAGE =
-  'Regiondo does not provide a supported API for editing existing bookings. The booking was saved locally.';
-
-const BOOKING_PROVIDER_FIELDS = new Set(['contact', 'schedule', 'attendees', 'location', 'products', 'payment']);
-
 async function updateBookingRecord(
   bookingId: string,
-  input: UpdateDashboardBookingInput
+  input: UpdateDashboardBookingInput,
+  actor?: DashboardTaskMutationActor
 ): Promise<DashboardBookingDetail> {
   const client = await pool.connect();
   let rebuildConsumptions = false;
@@ -2675,8 +2754,11 @@ async function updateBookingRecord(
     const update = await buildResolvedBookingUpdate(client, current, currentProducts, input);
     const isRegiondoBooking = current.source === 'regiondo' || Boolean(current.regiondo_booking_id);
     const hasBookingMutation = update.changedFields.some((field) => !['opsNotes', 'opsStatus'].includes(field));
+    const provider = getBookingProvider(current.source);
+    const providerChanges = buildProviderChangeSet(current, currentProducts, update);
+    const hasProviderChanges = Object.keys(providerChanges).length > 0 && isRegiondoBooking;
 
-    if (hasBookingMutation) {
+    if (hasBookingMutation && !hasProviderChanges) {
       await updateBookingLocally(
         client,
         bookingId,
@@ -2684,39 +2766,31 @@ async function updateBookingRecord(
         update,
         update.changedFields.includes('products'),
         update.changedFields.includes('payment'),
-        isRegiondoBooking,
-        isRegiondoBooking && update.changedFields.includes('contact')
+        false,
+        false
       );
     }
 
-    const providerChangedFields = update.changedFields.filter((field) => BOOKING_PROVIDER_FIELDS.has(field));
-    const localOverrideFields = Array.from(
-      new Set([...(current.local_override_fields ?? []), ...(isRegiondoBooking ? providerChangedFields : [])])
-    );
-    const providerUpdateOutcome =
-      isRegiondoBooking && providerChangedFields.length ? 'not_supported' : current.provider_update_outcome;
-    const providerUpdateAt =
-      isRegiondoBooking && providerChangedFields.length ? new Date() : current.provider_update_at;
-    const providerUpdateMessage =
-      isRegiondoBooking && providerChangedFields.length
-        ? REGIONDO_UPDATE_NOT_SUPPORTED_MESSAGE
-        : current.provider_update_message;
+    if (hasProviderChanges) {
+      await createOrMergeBookingChangeRequest({
+        client,
+        bookingId,
+        changes: providerChanges,
+        providerKey: provider.key,
+        requestedBy: actor?.name ?? 'Admin'
+      });
+    }
 
     await upsertBookingAdminMetadata(client, bookingId, {
-      lastProviderEditError: providerUpdateOutcome === 'not_supported' ? null : current.last_provider_edit_error,
+      lastProviderEditError: current.last_provider_edit_error,
       locationOverride: update.locationOverride,
-      localOverrideFields,
+      localOverrideFields: [],
       opsNotes: update.opsNotes,
       opsStatus: update.opsStatus,
-      providerUpdateAt,
-      providerUpdateChangedFields:
-        isRegiondoBooking && providerChangedFields.length
-          ? providerChangedFields
-          : Array.isArray(current.provider_update_changed_fields)
-            ? current.provider_update_changed_fields.filter((field): field is string => typeof field === 'string')
-            : [],
-      providerUpdateMessage,
-      providerUpdateOutcome
+      providerUpdateAt: null,
+      providerUpdateChangedFields: [],
+      providerUpdateMessage: null,
+      providerUpdateOutcome: null
     });
 
     rebuildConsumptions = update.rebuildConsumptions;
@@ -2763,7 +2837,8 @@ function buildLinkedTaskProjection(
   booking: DashboardBookingDetail,
   patch: UpdateDashboardLinkedBookingSharedInput,
   actor?: DashboardTaskMutationActor,
-  providerUpdate?: Pick<DashboardBookingSyncInfo, 'providerUpdateAt' | 'providerUpdateChangedFields' | 'providerUpdateOutcome' | 'providerUpdateMessage'>
+  providerUpdate?: Pick<DashboardBookingSyncInfo, 'providerUpdateAt' | 'providerUpdateChangedFields' | 'providerUpdateOutcome' | 'providerUpdateMessage' | 'activeChangeRequest' | 'externalSyncStatus'>,
+  changeRequestActivity?: { id: string; providerKey: string; status: string; changes: Record<string, unknown> }
 ): {
   eventDateTime: string | null;
   rawJson: Record<string, unknown>;
@@ -2860,12 +2935,39 @@ function buildLinkedTaskProjection(
         type: 'provider_update'
       }
     : null;
+  const requestActivity = changeRequestActivity ?? providerUpdate?.activeChangeRequest;
+  const changeRequestEntry: DashboardTaskActivityEntry | null = requestActivity
+    ? {
+        id: `task-activity-${randomUUID()}`,
+        actor: {
+          name: actor?.name ?? 'Admin',
+          role: actor?.role ?? 'Admin',
+          source: actor?.source ?? 'user'
+        },
+        changes: Object.keys(requestActivity.changes).map((field) => ({ field })),
+        metadata: {
+          bookingId: booking.id,
+          changeRequestId: requestActivity.id,
+          provider: requestActivity.providerKey,
+          status: changeRequestActivity?.status ?? providerUpdate?.externalSyncStatus ?? 'pending_update'
+        },
+        occurredAt: new Date().toISOString(),
+        type: (changeRequestActivity?.status ?? providerUpdate?.externalSyncStatus) === 'conflict'
+          ? 'booking_change_conflict'
+          : changeRequestActivity?.status === 'completed'
+            ? 'booking_change_completed'
+            : changeRequestActivity?.status === 'cancelled'
+              ? 'booking_change_cancelled'
+              : 'booking_change_requested'
+      }
+    : null;
 
   return {
     eventDateTime,
     rawJson,
     site,
     updateLog: [
+      ...(changeRequestEntry ? [changeRequestEntry] : []),
       ...(providerUpdateEntry ? [providerUpdateEntry] : []),
       ...(changedFields.length ? [activityEntry] : []),
       ...task.activityLog
@@ -2877,9 +2979,10 @@ export async function syncLinkedTasksFromBooking(
   bookingId: string,
   patch: UpdateDashboardLinkedBookingSharedInput,
   actor?: DashboardTaskMutationActor,
-  providerUpdate?: Pick<DashboardBookingSyncInfo, 'providerUpdateAt' | 'providerUpdateChangedFields' | 'providerUpdateOutcome' | 'providerUpdateMessage'>
+  providerUpdate?: Pick<DashboardBookingSyncInfo, 'providerUpdateAt' | 'providerUpdateChangedFields' | 'providerUpdateOutcome' | 'providerUpdateMessage' | 'activeChangeRequest' | 'externalSyncStatus'>,
+  changeRequestActivity?: { id: string; providerKey: string; status: string; changes: Record<string, unknown> }
 ): Promise<void> {
-  if (!hasSharedBookingPatch(patch) && !providerUpdate?.providerUpdateOutcome) {
+  if (!hasSharedBookingPatch(patch) && !providerUpdate?.providerUpdateOutcome && !providerUpdate?.activeChangeRequest && !changeRequestActivity) {
     return;
   }
 
@@ -2901,7 +3004,7 @@ export async function syncLinkedTasksFromBooking(
     await client.query('BEGIN');
     for (const row of taskRows.rows) {
       const task = mapTaskRow(row);
-      const projection = buildLinkedTaskProjection(task, booking, patch, actor, providerUpdate);
+      const projection = buildLinkedTaskProjection(task, booking, patch, actor, providerUpdate, changeRequestActivity);
       await client.query(
         `UPDATE tasks
          SET event_date_time = $2::timestamptz,
@@ -2935,7 +3038,7 @@ export async function updateBooking(
   const updatedBookingIds: string[] = [];
 
   try {
-    const primaryBooking = await updateBookingRecord(bookingId, recordInput);
+    const primaryBooking = await updateBookingRecord(bookingId, recordInput, actor);
     updatedBookingIds.push(bookingId);
 
     if (hasSharedBookingPatch(sharedPatch)) {
@@ -2943,11 +3046,12 @@ export async function updateBooking(
         if (linkedBookingId === bookingId) {
           continue;
         }
-        await updateBookingRecord(linkedBookingId, sharedPatch);
+        await updateBookingRecord(linkedBookingId, sharedPatch, actor);
         updatedBookingIds.push(linkedBookingId);
       }
     }
-    await syncLinkedTasksFromBooking(bookingId, sharedPatch, actor, primaryBooking.sync);
+    const taskPatch = primaryBooking.sync.activeChangeRequest ? {} : sharedPatch;
+    await syncLinkedTasksFromBooking(bookingId, taskPatch, actor, primaryBooking.sync);
   } catch (error) {
     if (updatedBookingIds.length) {
       throw new DashboardConflictError(

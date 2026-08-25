@@ -248,6 +248,7 @@ export interface DashboardBooking {
   locationDataStatus: 'known' | 'unknown' | 'none';
   regiondoBookingId: string | null;
   regiondoOrderNumber: string | null;
+  externalSyncStatus: 'synced' | 'pending_update' | 'syncing' | 'conflict' | 'error';
   lastUpdated: string;
   updateCapabilities: DashboardBookingUpdateCapabilities;
 }
@@ -316,6 +317,8 @@ export interface DashboardBookingSyncInfo {
   providerUpdateAt: string | null;
   providerUpdateChangedFields: string[];
   providerUpdateMessage: string | null;
+  externalSyncStatus: 'synced' | 'pending_update' | 'syncing' | 'conflict' | 'error';
+  activeChangeRequest: { id: string; providerKey: string; status: 'pending' | 'conflict'; changes: Record<string, unknown> } | null;
   lastSyncError: string | null;
   isQueued: boolean;
   isStale: boolean;
@@ -491,6 +494,7 @@ export interface ListDashboardTasksFilters {
 export interface ListDashboardBookingsFilters {
   status?: DashboardBookingStatus;
   externalStatus?: DashboardBookingExternalStatus;
+  externalSyncStatus?: 'synced' | 'pending_update' | 'syncing' | 'conflict' | 'error';
   opsStatus?: DashboardBookingOpsStatus;
   locationId?: string;
   search?: string;

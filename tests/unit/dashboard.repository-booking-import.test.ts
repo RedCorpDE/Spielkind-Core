@@ -47,8 +47,8 @@ const normalizedBooking: NormalizedRegiondoBookingImport = {
   totalAmount: 40
 };
 
-describe('Regiondo booking import location overrides', () => {
-  it('preserves an admin no-location override during normalized imports', async () => {
+describe('Regiondo booking import change requests', () => {
+  it('keeps the synchronized provider location while a request is pending', async () => {
     const queryMock = vi.fn(async (sql: string, values?: unknown[]) => {
       if (sql.includes('INSERT INTO clients')) {
         return { rowCount: 1, rows: [{ client_id: clientId }] };
@@ -60,10 +60,6 @@ describe('Regiondo booking import location overrides', () => {
 
       if (sql.includes('INSERT INTO locations')) {
         return { rowCount: 1, rows: [{ location_id: providerLocationId }] };
-      }
-
-      if (sql.includes('SELECT b.booking_id, b.client_id, admin.local_override_fields')) {
-        return { rowCount: 1, rows: [{ booking_id: bookingId, client_id: clientId, local_override_fields: [], location_override: 'none' }] };
       }
 
       if (sql.includes('INSERT INTO bookings')) {
@@ -80,28 +76,23 @@ describe('Regiondo booking import location overrides', () => {
     await upsertNormalizedRegiondoBooking({ query: queryMock } as never, normalizedBooking);
 
     const bookingInsert = queryMock.mock.calls.find(([sql]: [string]) => sql.includes('INSERT INTO bookings'));
-    expect(bookingInsert?.[1]?.[1]).toBe(noLocationId);
+    expect(bookingInsert?.[1]?.[1]).toBe(providerLocationId);
   });
 
-  it('keeps locally overridden booking fields while importing the fresh Regiondo snapshot', async () => {
+  it('imports fresh provider fields after retiring local override guards', async () => {
     const queryMock = vi.fn(async (sql: string) => {
-      if (sql.includes('SELECT b.booking_id, b.client_id, admin.local_override_fields')) {
-        return {
-          rowCount: 1,
-          rows: [{ booking_id: bookingId, client_id: clientId, local_override_fields: ['schedule', 'products', 'payment'], location_override: null }]
-        };
-      }
       if (sql.includes('INSERT INTO clients')) return { rowCount: 1, rows: [{ client_id: clientId }] };
       if (sql.includes('INSERT INTO locations')) return { rowCount: 1, rows: [{ location_id: providerLocationId }] };
       if (sql.includes('INSERT INTO bookings')) return { rowCount: 1, rows: [{ booking_id: bookingId }] };
+      if (sql.includes('INSERT INTO products')) return { rowCount: 1, rows: [{ product_id: productId }] };
       return { rowCount: 0, rows: [] };
     });
 
     await upsertNormalizedRegiondoBooking({ query: queryMock } as never, normalizedBooking);
 
     const bookingInsert = queryMock.mock.calls.find(([sql]: [string]) => sql.includes('INSERT INTO bookings'));
-    expect(bookingInsert?.[1]?.slice(12)).toEqual([false, false, false, true, true]);
-    expect(queryMock.mock.calls.some(([sql]: [string]) => sql.includes('DELETE FROM booking_products'))).toBe(false);
-    expect(queryMock.mock.calls.some(([sql]: [string]) => sql.includes('DELETE FROM payments'))).toBe(false);
+    expect(bookingInsert?.[1]?.slice(12)).toEqual([false, false, false, false, false]);
+    expect(queryMock.mock.calls.some(([sql]: [string]) => sql.includes('DELETE FROM booking_products'))).toBe(true);
+    expect(queryMock.mock.calls.some(([sql]: [string]) => sql.includes('DELETE FROM payments'))).toBe(true);
   });
 });

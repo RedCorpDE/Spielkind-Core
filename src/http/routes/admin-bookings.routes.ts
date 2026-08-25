@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { getBooking, getLinkedBookingIds, listBookings, updateBooking } from '../../dashboard/repository/bookings.js';
+import { getBooking, getLinkedBookingIds, listBookings, syncLinkedTasksFromBooking, updateBooking } from '../../dashboard/repository/bookings.js';
 import { DashboardConflictError, DashboardNotFoundError, DashboardValidationError } from '../../dashboard/repository/core.js';
 import { recordAdminWriteAudit } from '../admin-audit.js';
 import { type AdminFastifyRequest } from '../admin.js';
@@ -11,16 +11,20 @@ import {
   cancelBookingLocally
 } from '../../modules/bookings/admin-booking.repository.js';
 import { rebuildConsumptionsForBooking } from '../../modules/resources/consumption.service.js';
+import { pool } from '../../db/client.js';
+import { resolveBookingChangeRequestByAdmin } from '../../modules/bookings/booking-change-request.repository.js';
 
 const bookingExternalStatusSchema = z.enum(['Pending', 'Processing', 'Confirmed', 'Completed', 'Rejected', 'Canceled', 'Unknown']);
 const bookingOpsStatusSchema = z.enum(['Normal', 'Escalated']);
 const bookingStatusSchema = z.union([bookingExternalStatusSchema, z.literal('Escalated')]);
+const bookingExternalSyncStatusSchema = z.enum(['synced', 'pending_update', 'syncing', 'conflict', 'error']);
 const bookingSortSchema = z.enum(['bookingDate', 'lastUpdated']);
 const sortDirectionSchema = z.enum(['asc', 'desc']);
 
 const listBookingsQuerySchema = z.object({
   status: bookingStatusSchema.optional(),
   externalStatus: bookingExternalStatusSchema.optional(),
+  externalSyncStatus: bookingExternalSyncStatusSchema.optional(),
   opsStatus: bookingOpsStatusSchema.optional(),
   locationId: z.string().uuid().optional(),
   search: z.string().trim().optional(),
@@ -194,6 +198,35 @@ export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<
     } catch (error) {
       sendError(error);
     }
+  });
+
+  app.post('/api/admin/bookings/:bookingId/change-requests/:changeRequestId/:action', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'update');
+    const { bookingId, changeRequestId, action } = request.params as { bookingId: string; changeRequestId: string; action: 'accept_external' | 'keep_requested' | 'cancel' };
+    if (!['accept_external', 'keep_requested', 'cancel'].includes(action)) throw new ValidationHttpError('Invalid booking change-request action.');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await resolveBookingChangeRequestByAdmin({ client, bookingId, changeRequestId, action, resolvedBy: auth.user.displayName });
+      await client.query('COMMIT');
+      await syncLinkedTasksFromBooking(
+        bookingId,
+        {},
+        { name: auth.user.displayName, role: auth.user.role, source: 'user' },
+        undefined,
+        { id: changeRequestId, providerKey: result.providerKey, status: result.status, changes: result.changes }
+      );
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    await recordAdminWriteAudit({
+      request, auth, action: 'admin.booking.change_request_resolved', entityType: 'booking', entityId: bookingId,
+      details: { changeRequestId, resolution: action }
+    });
+    return { ok: true, item: await getBooking(bookingId) };
   });
 
   app.post('/api/admin/bookings/:bookingId/rebuild-consumptions', async (request) => {
