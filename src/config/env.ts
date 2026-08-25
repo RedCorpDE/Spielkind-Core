@@ -92,7 +92,10 @@ const schema = z
     REGIONDO_PUBLIC_KEY: z.string().min(1),
     REGIONDO_SECRET_KEY: z.string().min(1),
     REGIONDO_PRODUCT_SUPPLIER_ID: z.string().min(1),
-    REGIONDO_DASHBOARD_BOOKING_URL_TEMPLATE: z.string().url().optional(),
+    REGIONDO_DASHBOARD_BOOKING_URL_TEMPLATE: z
+      .string()
+      .url()
+      .default('https://www.regiondo.com/resellers/account/bookingsview/key/{bookingId}'),
     REGIONDO_DASHBOARD_BOOKINGS_URL: z.string().url().default('https://login.regiondo.com'),
     REGIONDO_LANGUAGE: z.string().default('de-DE'),
     REGIONDO_CURRENCY: z.string().default('EUR'),

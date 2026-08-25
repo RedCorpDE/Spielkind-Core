@@ -40,7 +40,7 @@ services:
       - key: REGIONDO_PRODUCT_SUPPLIER_ID
         sync: false
       - key: REGIONDO_DASHBOARD_BOOKING_URL_TEMPLATE
-        sync: false
+        value: https://www.regiondo.com/resellers/account/bookingsview/key/{bookingId}
       - key: REGIONDO_DASHBOARD_BOOKINGS_URL
         value: https://login.regiondo.com
       - key: WEBHOOK_AUTH_HEADER_NAME
