@@ -16,6 +16,7 @@ const {
 
 vi.mock('../../src/db/client.js', () => ({
   pool: {
+    query: queryMock,
     connect: vi.fn(async () => ({
       query: queryMock,
       release: vi.fn()
@@ -90,6 +91,7 @@ const createTaskRow = (bookingData: Record<string, unknown>, description = 'Sing
 });
 
 const mockTaskForBookingCreation = (bookingData: Record<string, unknown>, description?: string) => {
+  let attemptCreated = false;
   queryMock.mockImplementation(async (sql: string) => {
     if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
       return { rowCount: 0, rows: [] };
@@ -100,6 +102,29 @@ const mockTaskForBookingCreation = (bookingData: Record<string, unknown>, descri
         rowCount: 1,
         rows: [createTaskRow(bookingData, description)]
       };
+    }
+
+    if (sql.includes('FROM task_booking_attempts')) {
+      return attemptCreated
+        ? {
+            rowCount: 1,
+            rows: [{
+              attempt_id: 'attempt-1',
+              task_id: '11111111-1111-1111-1111-111111111111',
+              status: 'pending_snapshot',
+              sub_id: '11111111-1111-1111-1111-111111111111',
+              booking_keys: ['booking-key-1'],
+              order_number: 'order-123',
+              booking_ids: [],
+              purchase_data: { order_number: 'order-123' }
+            }]
+          }
+        : { rowCount: 0, rows: [] };
+    }
+
+    if (sql.includes('INSERT INTO task_booking_attempts')) {
+      attemptCreated = true;
+      return { rowCount: 1, rows: [] };
     }
 
     return { rowCount: 0, rows: [] };
@@ -188,6 +213,7 @@ describe('task booking links', () => {
   });
 
   it('links every Regiondo booking created for a multi-product task order', async () => {
+    let attemptCreated = false;
     queryMock.mockImplementation(async (sql: string) => {
       if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
         return { rowCount: 0, rows: [] };
@@ -243,6 +269,23 @@ describe('task booking links', () => {
             }
           ]
         };
+      }
+
+      if (sql.includes('FROM task_booking_attempts')) {
+        return attemptCreated
+          ? {
+              rowCount: 1,
+              rows: [{
+                attempt_id: 'attempt-1', task_id: '11111111-1111-1111-1111-111111111111', status: 'pending_snapshot',
+                sub_id: '11111111-1111-1111-1111-111111111111', booking_keys: ['booking-key-1', 'booking-key-2'],
+                order_number: 'order-123', booking_ids: [], purchase_data: { order_number: 'order-123' }
+              }]
+            }
+          : { rowCount: 0, rows: [] };
+      }
+      if (sql.includes('INSERT INTO task_booking_attempts')) {
+        attemptCreated = true;
+        return { rowCount: 1, rows: [] };
       }
 
       return { rowCount: 0, rows: [] };
@@ -327,8 +370,8 @@ describe('task booking links', () => {
       .mockResolvedValueOnce({ bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' })
       .mockResolvedValueOnce({ bookingId: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' });
 
-    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toEqual({
-      bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toMatchObject({
+      status: 'completed', bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
     });
 
     expect(upsertNormalizedRegiondoBookingMock).toHaveBeenCalledTimes(2);
@@ -388,9 +431,7 @@ describe('task booking links', () => {
     );
     mockSingleRegiondoBookingSuccess();
 
-    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toEqual({
-      bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-    });
+    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toMatchObject({ status: 'completed', bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' });
 
     expect(purchaseOrderMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -418,9 +459,7 @@ describe('task booking links', () => {
     );
     mockSingleRegiondoBookingSuccess();
 
-    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toEqual({
-      bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-    });
+    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toMatchObject({ status: 'completed', bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' });
 
     expect(purchaseOrderMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -450,9 +489,7 @@ describe('task booking links', () => {
     );
     mockSingleRegiondoBookingSuccess();
 
-    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toEqual({
-      bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-    });
+    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toMatchObject({ status: 'completed', bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' });
 
     expect(purchaseOrderMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -499,9 +536,7 @@ describe('task booking links', () => {
     mockTaskForBookingCreation(bookingData);
     mockSingleRegiondoBookingSuccess();
 
-    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toEqual({
-      bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-    });
+    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toMatchObject({ status: 'completed', bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' });
 
     expect(bookingData.email).toBe('family@example.com');
     expect(purchaseOrderMock).toHaveBeenCalledWith(
@@ -539,9 +574,7 @@ describe('task booking links', () => {
     );
     mockSingleRegiondoBookingSuccess();
 
-    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toEqual({
-      bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-    });
+    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toMatchObject({ status: 'completed', bookingId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' });
 
     expect(purchaseOrderMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -552,7 +585,23 @@ describe('task booking links', () => {
     );
   });
 
-  it('rolls back local booking work when the Regiondo purchase requires reconciliation', async () => {
+  it('does not submit a second Regiondo purchase while a supplier snapshot is pending', async () => {
+    mockTaskForBookingCreation(createTaskBookingData());
+    mockSingleRegiondoBookingSuccess();
+    const snapshotError = new Error('Supplier booking is not visible yet.');
+    snapshotError.name = 'RegiondoPayloadError';
+    normalizeRegiondoBookingImportMock.mockImplementation(() => {
+      throw snapshotError;
+    });
+
+    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toMatchObject({ status: 'pending', bookingId: null });
+    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toMatchObject({ status: 'pending', bookingId: null });
+
+    expect(purchaseOrderMock).toHaveBeenCalledTimes(1);
+    expect(listSupplierBookingsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('records a pending attempt when the Regiondo purchase requires reconciliation', async () => {
     mockTaskForBookingCreation(createTaskBookingData());
     const recoveryError = new RegiondoPurchaseRecoveryRequiredError({
       reason: 'snapshot_unavailable',
@@ -562,9 +611,9 @@ describe('task booking links', () => {
     });
     purchaseOrderMock.mockRejectedValue(recoveryError);
 
-    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).rejects.toBe(recoveryError);
+    await expect(createBookingFromTask('11111111-1111-1111-1111-111111111111')).resolves.toMatchObject({ status: 'pending', bookingId: null });
 
-    expect(queryMock).toHaveBeenCalledWith('ROLLBACK');
+    expect(queryMock.mock.calls.some(([sql]: [string]) => sql.includes('INSERT INTO task_booking_attempts'))).toBe(true);
     expect(listSupplierBookingsMock).not.toHaveBeenCalled();
     expect(upsertNormalizedRegiondoBookingMock).not.toHaveBeenCalled();
     expect(

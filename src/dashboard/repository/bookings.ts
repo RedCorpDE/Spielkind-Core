@@ -930,6 +930,26 @@ function createTaskBookingActivityLog(
   ];
 }
 
+function createTaskBookingAttemptActivityLog(
+  task: DashboardTask,
+  attemptId: string,
+  actor?: DashboardTaskMutationActor
+): DashboardTaskActivityEntry[] {
+  return [
+    {
+      id: `task-activity-${randomUUID()}`,
+      actor: actor?.name && actor.role
+        ? { name: actor.name, role: actor.role, source: actor.source ?? 'user' }
+        : { name: 'System', role: 'Operations', source: 'system' },
+      changes: [],
+      metadata: { attemptId, provider: 'regiondo', status: 'pending_snapshot' },
+      occurredAt: new Date().toISOString(),
+      type: 'booking_confirmation_requested'
+    },
+    ...task.activityLog
+  ];
+}
+
 async function queryTaskForBookingCreation(executor: Queryable, taskId: string, forUpdate = false): Promise<TaskRow | null> {
   const result = await executor.query<TaskRow>(
     `${TASK_SELECT_QUERY}
@@ -1761,53 +1781,258 @@ function mapBookingSyncActivityRow(row: BookingSyncActivityRow): DashboardBookin
   };
 }
 
-export async function createBookingFromTask(
-  taskId: string,
-  actor?: DashboardTaskMutationActor
-): Promise<{ bookingId: string }> {
-  const client = await pool.connect();
+type TaskBookingAttemptStatus = 'submitting' | 'pending_snapshot' | 'completed' | 'failed' | 'needs_review';
 
+interface TaskBookingAttemptRow {
+  attempt_id: string;
+  task_id: string;
+  status: TaskBookingAttemptStatus;
+  sub_id: string;
+  booking_keys: string[];
+  order_number: string | null;
+  booking_ids: string[];
+  purchase_data: unknown;
+}
+
+export type CreateBookingFromTaskResult =
+  | { status: 'completed'; bookingId: string; attemptId: string }
+  | { status: 'pending'; bookingId: null; attemptId: string };
+
+function isRecoverableTaskBookingSnapshotError(error: unknown): boolean {
+  return error instanceof Error && (
+    error.name === 'RegiondoPayloadError' ||
+    error.name === 'RegiondoTransientError' ||
+    error.name === 'RegiondoRateLimitError' ||
+    error.name === 'AbortError' ||
+    error instanceof TypeError
+  );
+}
+
+async function markTaskBookingAttemptFailure(
+  attemptId: string,
+  status: Extract<TaskBookingAttemptStatus, 'pending_snapshot' | 'needs_review' | 'failed'>,
+  error: unknown
+): Promise<void> {
+  const message = error instanceof Error ? error.message : String(error);
+  const details = error && typeof error === 'object' && 'responseBody' in error
+    ? String((error as { responseBody?: unknown }).responseBody ?? '') || null
+    : null;
+  await pool.query(
+    `UPDATE task_booking_attempts
+     SET status = $2, diagnostic_message = $3, diagnostic_details = $4, last_attempted_at = now()
+     WHERE attempt_id = $1`,
+    [attemptId, status, message, details]
+  );
+}
+
+async function getTaskBookingAttempt(executor: Queryable, attemptId: string, forUpdate = false): Promise<TaskBookingAttemptRow | null> {
+  const result = await executor.query<TaskBookingAttemptRow>(
+    `SELECT attempt_id, task_id, status, sub_id, booking_keys, order_number, booking_ids, purchase_data
+     FROM task_booking_attempts
+     WHERE attempt_id = $1
+     ${forUpdate ? 'FOR UPDATE' : ''}`,
+    [attemptId]
+  );
+  return result.rowCount ? result.rows[0] : null;
+}
+
+async function completeTaskBookingAttempt(input: {
+  attemptId: string;
+  actor?: DashboardTaskMutationActor;
+  bookingIds: string[];
+}): Promise<string> {
+  const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const taskRow = await queryTaskForBookingCreation(client, taskId, true);
-
-    if (!taskRow) {
-      throw new DashboardNotFoundError('Task not found.');
+    const attempt = await getTaskBookingAttempt(client, input.attemptId, true);
+    if (!attempt) throw new DashboardNotFoundError('Task booking attempt not found.');
+    if (attempt.status === 'completed' && attempt.booking_ids[0]) {
+      await client.query('COMMIT');
+      return attempt.booking_ids[0];
     }
-
+    const taskRow = await queryTaskForBookingCreation(client, attempt.task_id, true);
+    if (!taskRow) throw new DashboardNotFoundError('Task not found.');
     const task = mapTaskRow(taskRow);
-
-    if (task.connectedBookingId) {
-      throw new DashboardValidationError('Task is already linked to a booking.');
+    const primaryBookingId = input.bookingIds[0];
+    if (task.connectedBookingId && task.connectedBookingId !== primaryBookingId) {
+      throw new DashboardConflictError('Task is already linked to another booking; the Regiondo purchase needs review.');
     }
-
-    if (!canCreateBookingFromTaskColumnPosition(task.columnPosition)) {
-      throw new DashboardValidationError('Bookings can only be created from the configured confirmation columns.');
-    }
-
-    const { bookingIds, primaryBookingId } = await createRegiondoBookingsForTask(client, task);
-    await seedBookingNotesFromTaskDescription(client, task, bookingIds);
-
+    await seedBookingNotesFromTaskDescription(client, task, input.bookingIds);
     await client.query(
-      `UPDATE tasks
-       SET update_log = $1::jsonb
-       WHERE id = $2`,
-      [JSON.stringify(createTaskBookingActivityLog(task, primaryBookingId, actor)), task.id]
+      `UPDATE tasks SET update_log = $1::jsonb WHERE id = $2`,
+      [JSON.stringify(createTaskBookingActivityLog(task, primaryBookingId, input.actor)), task.id]
     );
-    await appendTaskBookingLinks(client, {
-      taskId: task.id,
-      bookingIds,
-      primaryBookingId
-    });
-
+    await appendTaskBookingLinks(client, { taskId: task.id, bookingIds: input.bookingIds, primaryBookingId });
+    await client.query(
+      `UPDATE task_booking_attempts
+       SET status = 'completed', booking_ids = $2::uuid[], completed_at = now(), diagnostic_message = NULL, diagnostic_details = NULL
+       WHERE attempt_id = $1`,
+      [attempt.attempt_id, input.bookingIds]
+    );
     await client.query('COMMIT');
-    return { bookingId: primaryBookingId };
+    return primaryBookingId;
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
   } finally {
     client.release();
   }
+}
+
+export async function recoverTaskBookingAttempt(
+  attemptId: string,
+  actor?: DashboardTaskMutationActor
+): Promise<CreateBookingFromTaskResult> {
+  const attempt = await getTaskBookingAttempt(pool, attemptId);
+  if (!attempt) throw new DashboardNotFoundError('Task booking attempt not found.');
+  if (attempt.status === 'completed' && attempt.booking_ids[0]) {
+    return { status: 'completed', bookingId: attempt.booking_ids[0], attemptId };
+  }
+  if (!attempt.booking_keys.length || !attempt.order_number) {
+    return { status: 'pending', bookingId: null, attemptId };
+  }
+
+  try {
+    await pool.query(
+      `UPDATE task_booking_attempts
+       SET attempt_count = attempt_count + 1, last_attempted_at = now()
+       WHERE attempt_id = $1`,
+      [attemptId]
+    );
+    const bookingIds: string[] = [];
+    const importClient = await pool.connect();
+    try {
+      await importClient.query('BEGIN');
+      const storedPurchaseData = attempt.purchase_data && typeof attempt.purchase_data === 'object'
+        ? attempt.purchase_data
+        : null;
+      for (const bookingKey of attempt.booking_keys) {
+        const snapshot = storedPurchaseData
+          ? {
+              purchaseData: storedPurchaseData,
+              supplierBookings: await regiondoClient.listSupplierBookings({ bookingKey, limit: 250 })
+            }
+          : await regiondoClient.hydrateBookingOrder({ bookingKey, orderNumber: attempt.order_number });
+        const normalized = normalizeRegiondoBookingImport({
+          bookingKey,
+          purchaseData: snapshot.purchaseData as Parameters<typeof normalizeRegiondoBookingImport>[0]['purchaseData'],
+          supplierBookings: snapshot.supplierBookings,
+          webhookPayload: null
+        });
+        const { bookingId } = await upsertNormalizedRegiondoBooking(importClient, normalized);
+        bookingIds.push(bookingId);
+      }
+      await importClient.query('COMMIT');
+    } catch (error) {
+      await importClient.query('ROLLBACK');
+      throw error;
+    } finally {
+      importClient.release();
+    }
+    const bookingId = await completeTaskBookingAttempt({ attemptId, actor, bookingIds });
+    return { status: 'completed', bookingId, attemptId };
+  } catch (error) {
+    await markTaskBookingAttemptFailure(attemptId, isRecoverableTaskBookingSnapshotError(error) ? 'pending_snapshot' : 'needs_review', error);
+    return { status: 'pending', bookingId: null, attemptId };
+  }
+}
+
+export async function createBookingFromTask(
+  taskId: string,
+  actor?: DashboardTaskMutationActor
+): Promise<CreateBookingFromTaskResult> {
+  const client = await pool.connect();
+  let attemptId: string;
+  let purchasePayload: TaskRegiondoBookingPayload;
+  try {
+    await client.query('BEGIN');
+    const taskRow = await queryTaskForBookingCreation(client, taskId, true);
+    if (!taskRow) throw new DashboardNotFoundError('Task not found.');
+    const task = mapTaskRow(taskRow);
+    const existing = await client.query<TaskBookingAttemptRow>(
+      `SELECT attempt_id, task_id, status, sub_id, booking_keys, order_number, booking_ids, purchase_data
+       FROM task_booking_attempts WHERE task_id = $1 FOR UPDATE`,
+      [taskId]
+    );
+    if (existing.rowCount) {
+      const attempt = existing.rows[0];
+      await client.query('COMMIT');
+      if (attempt.status === 'completed' && attempt.booking_ids[0]) {
+        return { status: 'completed', bookingId: attempt.booking_ids[0], attemptId: attempt.attempt_id };
+      }
+      return recoverTaskBookingAttempt(attempt.attempt_id, actor);
+    }
+    if (task.connectedBookingId) throw new DashboardValidationError('Task is already linked to a booking.');
+    if (!canCreateBookingFromTaskColumnPosition(task.columnPosition)) {
+      throw new DashboardValidationError('Bookings can only be created from the configured confirmation columns.');
+    }
+    purchasePayload = buildTaskRegiondoBookingPayload(task);
+    attemptId = randomUUID();
+    const fingerprint = createHash('sha256').update(JSON.stringify(purchasePayload)).digest('hex');
+    await client.query(
+      `INSERT INTO task_booking_attempts (attempt_id, task_id, sub_id, request_fingerprint, status, attempt_count, last_attempted_at)
+       VALUES ($1, $2, $3, $4, 'submitting', 1, now())`,
+      [attemptId, task.id, purchasePayload.subId, fingerprint]
+    );
+    await client.query(
+      `UPDATE tasks SET update_log = $1::jsonb WHERE id = $2`,
+      [JSON.stringify(createTaskBookingAttemptActivityLog(task, attemptId, actor)), task.id]
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  try {
+    const purchaseData = await regiondoClient.purchaseOrder({
+      attendeeData: purchasePayload!.attendeeData,
+      buyerData: purchasePayload!.buyerData,
+      comment: purchasePayload!.comment ?? undefined,
+      contactData: purchasePayload!.contactData,
+      items: purchasePayload!.items,
+      sendTicketsToCustomer: purchasePayload!.sendTicketsToCustomer,
+      storeLocale: purchasePayload!.storeLocale ?? undefined,
+      subId: purchasePayload!.subId,
+      syncTicketsProcessing: purchasePayload!.syncTicketsProcessing
+    });
+    const bookingKeys = extractRegiondoBookingKeysFromPurchase(purchaseData as unknown as Record<string, unknown>);
+    await pool.query(
+      `UPDATE task_booking_attempts
+       SET status = 'pending_snapshot', booking_keys = $2::text[], order_number = $3, purchase_data = $4::jsonb, last_attempted_at = now()
+       WHERE attempt_id = $1`,
+      [attemptId!, bookingKeys, purchaseData.order_number, JSON.stringify(purchaseData)]
+    );
+    return recoverTaskBookingAttempt(attemptId!, actor);
+  } catch (error) {
+    await markTaskBookingAttemptFailure(attemptId!, 'needs_review', error);
+    return { status: 'pending', bookingId: null, attemptId: attemptId! };
+  }
+}
+
+export async function recoverPendingTaskBookingAttempts(limit = 50): Promise<{ completedCount: number; candidateCount: number }> {
+  const result = await pool.query<{ attempt_id: string }>(
+    `SELECT attempt_id
+     FROM task_booking_attempts
+     WHERE status = 'pending_snapshot'
+       AND cardinality(booking_keys) > 0
+       AND order_number IS NOT NULL
+     ORDER BY updated_at ASC
+     LIMIT $1`,
+    [limit]
+  );
+  let completedCount = 0;
+  for (const row of result.rows) {
+    const recovery = await recoverTaskBookingAttempt(row.attempt_id, {
+      name: 'Regiondo recovery',
+      role: 'System',
+      source: 'system'
+    });
+    if (recovery.status === 'completed') completedCount += 1;
+  }
+  return { completedCount, candidateCount: result.rowCount ?? result.rows.length };
 }
 
 async function resolveLinkedBookingGroup(

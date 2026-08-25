@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { appConfig } from '../config/env.js';
 import { runReconcileRegiondoBookingsJob } from '../modules/bookings/reconcile-regiondo-bookings.job.js';
+import { runRecoverTaskBookingAttemptsJob } from '../modules/bookings/task-booking-recovery.job.js';
 import { runSyncRegiondoBookingsJob } from '../modules/regiondo/regiondo-booking-sync.job.js';
 import { runDispatchRemindersJob } from '../modules/reminders/dispatch-reminders.job.js';
 import { runRegiondoCatalogSyncJob } from '../modules/regiondo/regiondo-catalog-sync.job.js';
@@ -72,6 +73,14 @@ export const internalJobDefinitions = [
     embeddedCron: '15 */6 * * *',
     bodySchema: limitBodySchema,
     run: async (body) => runReconcileRegiondoBookingsJob({ limit: body.limit })
+  }),
+  defineInternalJob({
+    routePath: 'recover-task-booking-attempts',
+    jobType: JOB_TYPES.RECOVER_TASK_BOOKING_ATTEMPTS,
+    description: 'Recovers Regiondo purchases whose supplier snapshots were not immediately available.',
+    embeddedCron: '*/5 * * * *',
+    bodySchema: limitBodySchema,
+    run: async (body) => runRecoverTaskBookingAttemptsJob({ limit: body.limit })
   }),
   defineInternalJob({
     routePath: 'prune-admin-errors',

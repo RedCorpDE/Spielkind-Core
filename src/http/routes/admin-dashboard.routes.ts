@@ -971,16 +971,28 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
     }
   });
 
-  app.post('/api/admin/tasks/:taskId/booking', async (request) => {
+  app.post('/api/admin/tasks/:taskId/booking', async (request, reply) => {
     const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'create');
     const { taskId } = request.params as { taskId: string };
 
     try {
-      const { bookingId } = await createBookingFromTask(taskId, {
+      const result = await createBookingFromTask(taskId, {
         name: auth.user.displayName,
         role: auth.user.role,
         source: 'user'
       });
+      if (result.status === 'pending') {
+        await recordAdminWriteAudit({
+          request,
+          auth,
+          action: 'admin.booking.created_from_task_pending_reconciliation',
+          entityType: 'task',
+          entityId: taskId,
+          details: { attemptId: result.attemptId }
+        });
+        return reply.status(202).send({ ok: true, status: 'pending', attemptId: result.attemptId });
+      }
+      const { bookingId } = result;
       const booking = await getBooking(bookingId);
 
       await recordAdminWriteAudit({
