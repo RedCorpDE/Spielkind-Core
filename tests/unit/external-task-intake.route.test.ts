@@ -117,6 +117,48 @@ describe('external task intake route', () => {
     }
   });
 
+  it.each([
+    ['omitted', undefined],
+    ['null', null],
+    ['blank', '   ']
+  ])('accepts eventDateTime when it is %s', async (_label, eventDateTime) => {
+    const task = { id: 'task-1', title: validPayload.title };
+    createExternalClientEmailTaskMock.mockResolvedValue({
+      created: true,
+      item: task
+    });
+
+    vi.resetModules();
+    const { createApp } = await import('../../src/app.js');
+    const app = createApp();
+
+    try {
+      const payload: Record<string, unknown> = { ...validPayload };
+      if (eventDateTime === undefined) {
+        delete payload.eventDateTime;
+      } else {
+        payload.eventDateTime = eventDateTime;
+      }
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/webhooks/external/client-emails',
+        headers: {
+          'x-external-task-secret': 'test-external-task-token'
+        },
+        payload
+      });
+
+      expect(response.statusCode).toBe(201);
+      expect(createExternalClientEmailTaskMock).toHaveBeenCalledWith({
+        ...payload,
+        ...(eventDateTime === '   ' ? { eventDateTime: '' } : {})
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
   it('returns 200 when the idempotency key was already processed', async () => {
     const task = { id: 'task-1', title: validPayload.title };
     createExternalClientEmailTaskMock.mockResolvedValue({

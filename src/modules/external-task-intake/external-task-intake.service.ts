@@ -32,7 +32,7 @@ export interface ExternalClientEmailTaskInput {
   columnId?: string | null;
   description: string;
   email?: string | null;
-  eventDateTime: string;
+  eventDateTime?: string | null;
   externalMessageId: string;
   firstName?: string | null;
   fixedPrice?: string | null;
@@ -137,7 +137,7 @@ export function normalizeExternalClientEmailTaskInput(
     columnId: normalizeOptionalNullableText(input.columnId),
     description: input.description.trim(),
     email: trimOptional(input.email),
-    eventDateTime: input.eventDateTime.trim(),
+    eventDateTime: normalizeOptionalNullableText(input.eventDateTime),
     externalMessageId: input.externalMessageId.trim(),
     firstName: trimOptional(input.firstName),
     fixedPrice: trimOptional(input.fixedPrice),

@@ -107,7 +107,8 @@ External client-email task intake:
 - `POST /webhooks/external/client-emails`
 - Header key: `EXTERNAL_TASK_WEBHOOK_AUTH_HEADER_NAME`, default `x-external-task-secret`
 - Header value: `EXTERNAL_TASK_WEBHOOK_AUTH_HEADER_VALUE`
-- The external service must send parsed task fields, including `externalMessageId`, `title`, `description`, `eventDateTime`, `site`, and `originalClientEmail`
+- The external service must send parsed task fields, including `externalMessageId`, `title`, `description`, `site`, and `originalClientEmail`
+- `eventDateTime` is optional; omitted, `null`, and blank values create a task without an event date
 - Reposting the same `externalMessageId` with the same payload returns the existing task; reposting it with changed payload returns `409 Conflict`
 
 Regiondo booking webhook setup:

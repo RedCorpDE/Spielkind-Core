@@ -129,6 +129,22 @@ describe('external task intake service', () => {
     expect(taskInput.reservedCapacityDate).toBeUndefined();
   });
 
+  it.each([
+    ['omitted', undefined],
+    ['null', null],
+    ['blank', '   ']
+  ])('creates task input with no event date when eventDateTime is %s', (_label, eventDateTime) => {
+    const { eventDateTime: _existingEventDateTime, ...inputWithoutEventDateTime } = validInput;
+    const input = {
+      ...inputWithoutEventDateTime,
+      ...(eventDateTime === undefined ? {} : { eventDateTime })
+    };
+
+    const taskInput = buildCreateTaskInputFromExternalClientEmail(input);
+
+    expect(taskInput.eventDateTime).toBe(eventDateTime === null ? null : undefined);
+  });
+
   it('creates a task, records the idempotency key, and uses an external actor', async () => {
     mockIntakeEventQuery([]);
 

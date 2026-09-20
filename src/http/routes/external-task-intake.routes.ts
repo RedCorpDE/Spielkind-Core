@@ -21,7 +21,7 @@ const externalClientEmailTaskSchema = z.object({
   columnId: z.union([z.string().uuid(), z.literal('none')]).nullable().optional(),
   description: z.string().trim().min(1),
   email: z.string().nullable().optional(),
-  eventDateTime: z.string().trim().min(1),
+  eventDateTime: z.string().trim().nullable().optional(),
   externalMessageId: z.string().trim().min(1),
   firstName: z.string().nullable().optional(),
   fixedPrice: z.string().nullable().optional(),
