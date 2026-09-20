@@ -5,7 +5,7 @@ import {
   createExternalClientEmailTask,
   ExternalTaskIntakeConflictError
 } from '../../modules/external-task-intake/external-task-intake.service.js';
-import { ConflictHttpError, UnauthorizedHttpError, ValidationHttpError } from '../errors.js';
+import { ConflictHttpError, UnauthorizedHttpError } from '../errors.js';
 
 const externalTaskOptionSchema = z.object({
   optionId: z.string().trim().nullable().optional(),
@@ -61,7 +61,18 @@ export async function registerExternalTaskIntakeRoutes(app: FastifyInstance): Pr
 
     const parsed = externalClientEmailTaskSchema.safeParse(request.body);
     if (!parsed.success) {
-      throw new ValidationHttpError('Invalid external task payload.');
+      const issues = parsed.error.issues.map((issue) => ({
+        field: issue.path.length ? issue.path.join('.') : 'body',
+        code: issue.code,
+        message: issue.message
+      }));
+
+      request.log.warn({ validationIssues: issues }, 'Invalid external task payload');
+      return reply.status(400).send({
+        ok: false,
+        error: 'Invalid external task payload.',
+        issues
+      });
     }
 
     try {

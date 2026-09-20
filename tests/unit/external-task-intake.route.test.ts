@@ -74,9 +74,15 @@ describe('external task intake route', () => {
       });
 
       expect(response.statusCode).toBe(400);
-      expect(response.json()).toEqual({
+      expect(response.json()).toMatchObject({
         ok: false,
-        error: 'Invalid external task payload.'
+        error: 'Invalid external task payload.',
+        issues: [
+          {
+            field: 'externalMessageId',
+            code: 'too_small'
+          }
+        ]
       });
       expect(createExternalClientEmailTaskMock).not.toHaveBeenCalled();
     } finally {
@@ -154,6 +160,48 @@ describe('external task intake route', () => {
         ...payload,
         ...(eventDateTime === '   ' ? { eventDateTime: '' } : {})
       });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('accepts the nullable optional fields sent by the Retool workflow', async () => {
+    const payload = {
+      externalMessageId: '69db497536bd707ba9c872abbde89507a1164467dcefda5d4232b4ada2d8d872',
+      title: 'Invoice May 2026',
+      description: 'Hello, attached is the invoice...',
+      originalClientEmail: 'Hello, attached is the invoice...',
+      site: 'VirtuaLounge',
+      eventDateTime: null,
+      firstName: null,
+      lastName: null,
+      email: 'client@example.com',
+      phoneNumber: null,
+      attendees: null,
+      source: 'retool_client_email'
+    };
+    const task = { id: 'task-1', title: payload.title };
+    createExternalClientEmailTaskMock.mockResolvedValue({
+      created: true,
+      item: task
+    });
+
+    vi.resetModules();
+    const { createApp } = await import('../../src/app.js');
+    const app = createApp();
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/webhooks/external/client-emails',
+        headers: {
+          'x-external-task-secret': 'test-external-task-token'
+        },
+        payload
+      });
+
+      expect(response.statusCode).toBe(201);
+      expect(createExternalClientEmailTaskMock).toHaveBeenCalledWith(payload);
     } finally {
       await app.close();
     }
