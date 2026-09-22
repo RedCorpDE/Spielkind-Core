@@ -15,6 +15,7 @@ import { getDashboardSummary } from '../../src/dashboard/repository/summary.js';
 import { mapTaskRow, resolveTaskColumnReorderOrder } from '../../src/dashboard/repository/core.js';
 import { assertRoleExists, getRoleByIdentifier, listRoles } from '../../src/dashboard/repository/roles.js';
 import { listTasks } from '../../src/dashboard/repository/tasks.js';
+import { listBookings } from '../../src/dashboard/repository/bookings.js';
 
 describe('dashboard repository queries', () => {
   beforeEach(() => {
@@ -112,6 +113,70 @@ describe('dashboard repository queries', () => {
         qty: 1
       }
     });
+  });
+
+  it('lists bookings by newest event date by default', async () => {
+    queryMock.mockResolvedValueOnce({ rows: [] });
+
+    await listBookings();
+
+    const [bookingQuery, bookingValues] = queryMock.mock.calls[0] as [string, Array<string | number>];
+    expect(bookingQuery).toContain('ORDER BY b.dt_from DESC, b.booking_id DESC');
+    expect(bookingValues).toEqual([51]);
+  });
+
+  it('applies global search and combined booking filters before pagination', async () => {
+    queryMock.mockResolvedValueOnce({ rows: [] });
+
+    await listBookings({
+      depositStatus: 'paid',
+      direction: 'asc',
+      externalSyncStatus: 'conflict',
+      from: '2026-03-28T23:00:00.000Z',
+      limit: 10,
+      locationId: '11111111-1111-4111-8111-111111111111',
+      search: 'Schmidt',
+      sort: 'lastUpdated',
+      status: 'Confirmed',
+      to: '2026-03-29T21:59:59.999Z'
+    });
+
+    const [bookingQuery, bookingValues] = queryMock.mock.calls[0] as [string, Array<string | number>];
+    expect(bookingQuery).toContain('b.status = $1');
+    expect(bookingQuery).toContain("request.status = $2");
+    expect(bookingQuery).toContain('b.location_id = $3::uuid');
+    expect(bookingQuery).toContain('(b.paid_amount > 0 OR b.paid_amount >= b.total_amount)');
+    expect(bookingQuery).toContain('b.dt_from >= $4::timestamptz');
+    expect(bookingQuery).toContain('b.dt_from <= $5::timestamptz');
+    expect(bookingQuery).toContain('ILIKE $6');
+    expect(bookingQuery.indexOf('ILIKE $6')).toBeLessThan(bookingQuery.indexOf('LIMIT $7'));
+    expect(bookingQuery).toContain('ORDER BY b.updated_at ASC, b.booking_id ASC');
+    expect(bookingValues).toEqual([
+      'confirmed',
+      'conflict',
+      '11111111-1111-4111-8111-111111111111',
+      '2026-03-28T23:00:00.000Z',
+      '2026-03-29T21:59:59.999Z',
+      '%Schmidt%',
+      11
+    ]);
+  });
+
+  it('applies the inverse of the booking deposit-paid rule for pending deposits', async () => {
+    queryMock.mockResolvedValueOnce({ rows: [] });
+
+    await listBookings({ depositStatus: 'pending' });
+
+    const [bookingQuery] = queryMock.mock.calls[0] as [string, Array<string | number>];
+    expect(bookingQuery).toContain('NOT (b.paid_amount > 0 OR b.paid_amount >= b.total_amount)');
+  });
+
+  it('rejects inverted booking date ranges before querying', async () => {
+    await expect(listBookings({
+      from: '2026-05-02T00:00:00.000Z',
+      to: '2026-05-01T23:59:59.999Z'
+    })).rejects.toThrow('from must be before or equal to to');
+    expect(queryMock).not.toHaveBeenCalled();
   });
 
   it('validates task column reorders against the complete current set', () => {

@@ -555,6 +555,7 @@ export interface ListDashboardBookingsFilters {
   status?: DashboardBookingStatus;
   externalStatus?: DashboardBookingExternalStatus;
   externalSyncStatus?: 'synced' | 'pending_update' | 'syncing' | 'conflict' | 'error';
+  depositStatus?: 'paid' | 'pending';
   opsStatus?: DashboardBookingOpsStatus;
   locationId?: string;
   search?: string;

@@ -1498,7 +1498,7 @@ function decodeBookingCursor(
 
 function getBookingSortConfig(filters: ListDashboardBookingsFilters) {
   const sort = filters.sort ?? "bookingDate";
-  const direction = filters.direction ?? "asc";
+  const direction = filters.direction ?? "desc";
 
   return {
     sort,
@@ -1543,13 +1543,25 @@ function buildListBookingsQuery(filters: ListDashboardBookingsFilters = {}) {
     where.push(`b.location_id = $${values.length}::uuid`);
   }
 
-  if (resolved.from) {
-    values.push(toIsoStringOrThrow(resolved.from, "from"));
+  if (resolved.depositStatus === 'paid') {
+    where.push('(b.paid_amount > 0 OR b.paid_amount >= b.total_amount)');
+  } else if (resolved.depositStatus === 'pending') {
+    where.push('NOT (b.paid_amount > 0 OR b.paid_amount >= b.total_amount)');
+  }
+
+  const normalizedFrom = resolved.from ? toIsoStringOrThrow(resolved.from, "from") : null;
+  const normalizedTo = resolved.to ? toIsoStringOrThrow(resolved.to, "to") : null;
+  if (normalizedFrom && normalizedTo && new Date(normalizedFrom).getTime() > new Date(normalizedTo).getTime()) {
+    throw new DashboardValidationError('from must be before or equal to to.');
+  }
+
+  if (normalizedFrom) {
+    values.push(normalizedFrom);
     where.push(`b.dt_from >= $${values.length}::timestamptz`);
   }
 
-  if (resolved.to) {
-    values.push(toIsoStringOrThrow(resolved.to, "to"));
+  if (normalizedTo) {
+    values.push(normalizedTo);
     where.push(`b.dt_from <= $${values.length}::timestamptz`);
   }
 
@@ -2610,7 +2622,7 @@ export async function listBookings(
     nextCursor: nextRow
       ? encodeBookingCursor({
           sort,
-          direction: filters.direction ?? "asc",
+          direction: filters.direction ?? "desc",
           sortValue:
             sort === "lastUpdated"
               ? requireIsoString(nextRow.updated_at, 'bookings.updated_at')

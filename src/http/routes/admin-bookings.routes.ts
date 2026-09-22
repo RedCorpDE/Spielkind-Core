@@ -26,6 +26,7 @@ const bookingExternalStatusSchema = z.enum(['Pending', 'Processing', 'Confirmed'
 const bookingOpsStatusSchema = z.enum(['Normal', 'Escalated']);
 const bookingStatusSchema = z.union([bookingExternalStatusSchema, z.literal('Escalated')]);
 const bookingExternalSyncStatusSchema = z.enum(['synced', 'pending_update', 'syncing', 'conflict', 'error']);
+const bookingDepositStatusSchema = z.enum(['paid', 'pending']);
 const bookingSortSchema = z.enum(['bookingDate', 'lastUpdated']);
 const sortDirectionSchema = z.enum(['asc', 'desc']);
 const applyRegiondoSyncSchema = z.object({
@@ -33,21 +34,32 @@ const applyRegiondoSyncSchema = z.object({
   expectedProviderFingerprints: z.record(z.string().uuid(), z.string().length(64))
 });
 
-const listBookingsQuerySchema = z.object({
-  status: bookingStatusSchema.optional(),
-  externalStatus: bookingExternalStatusSchema.optional(),
-  externalSyncStatus: bookingExternalSyncStatusSchema.optional(),
-  opsStatus: bookingOpsStatusSchema.optional(),
-  locationId: z.string().uuid().optional(),
-  search: z.string().trim().optional(),
-  from: z.string().optional(),
-  to: z.string().optional(),
-  updatedSince: z.string().optional(),
-  cursor: z.string().optional(),
-  sort: bookingSortSchema.optional(),
-  direction: sortDirectionSchema.optional(),
-  limit: z.coerce.number().int().positive().max(200).optional()
-});
+const listBookingsQuerySchema = z
+  .object({
+    status: bookingStatusSchema.optional(),
+    externalStatus: bookingExternalStatusSchema.optional(),
+    externalSyncStatus: bookingExternalSyncStatusSchema.optional(),
+    depositStatus: bookingDepositStatusSchema.optional(),
+    opsStatus: bookingOpsStatusSchema.optional(),
+    locationId: z.string().uuid().optional(),
+    search: z.string().trim().optional(),
+    from: z.string().datetime({ offset: true }).optional(),
+    to: z.string().datetime({ offset: true }).optional(),
+    updatedSince: z.string().datetime({ offset: true }).optional(),
+    cursor: z.string().optional(),
+    sort: bookingSortSchema.optional(),
+    direction: sortDirectionSchema.optional(),
+    limit: z.coerce.number().int().positive().max(200).optional()
+  })
+  .superRefine((value, context) => {
+    if (value.from && value.to && new Date(value.from).getTime() > new Date(value.to).getTime()) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'from must be before or equal to to.',
+        path: ['to']
+      });
+    }
+  });
 
 const updateBookingMetadataSchema = z
   .object({
