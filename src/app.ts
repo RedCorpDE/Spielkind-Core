@@ -1,6 +1,7 @@
 import Fastify, { type FastifyRequest } from 'fastify';
 import { appConfig } from './config/env.js';
 import { applyAdminCors } from './http/admin.js';
+import { applyClientCors } from './http/client.js';
 import { registerErrorHandler } from './http/errors.js';
 import { registerAdminAuthRoutes } from './http/routes/admin-auth.routes.js';
 import { registerAdminBookingRoutes } from './http/routes/admin-bookings.routes.js';
@@ -17,6 +18,8 @@ import { registerExternalTaskIntakeRoutes } from './http/routes/external-task-in
 import { registerHealthRoutes } from './http/routes/health.routes.js';
 import { registerInternalJobRoutes } from './http/routes/internal-jobs.routes.js';
 import { registerRegiondoWebhookRoutes } from './http/routes/regiondo-webhook.routes.js';
+import { registerClientAuthRoutes } from './http/routes/client-auth.routes.js';
+import { registerClientApiRoutes } from './http/routes/client-api.routes.js';
 
 export function createApp() {
   const app = Fastify({
@@ -56,12 +59,18 @@ export function createApp() {
       return reply;
     }
 
+    if (applyClientCors(request, reply)) {
+      return reply;
+    }
+
     return undefined;
   });
 
   app.setErrorHandler(registerErrorHandler());
 
   void registerHealthRoutes(app);
+  void registerClientAuthRoutes(app);
+  void registerClientApiRoutes(app);
   void registerAdminAuthRoutes(app);
   void registerAdminProductRoutes(app);
   void registerExternalTaskIntakeRoutes(app);

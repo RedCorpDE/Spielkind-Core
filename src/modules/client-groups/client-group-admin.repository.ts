@@ -71,8 +71,11 @@ export async function getAdminClientGroup(groupId: string): Promise<AdminClientG
 
 export async function createAdminClientGroup(title: string): Promise<AdminClientGroup> {
   const result = await pool.query<{ group_id: string }>(
-    `INSERT INTO client_groups (title)
-     VALUES ($1)
+    `INSERT INTO client_groups (title, slug)
+     VALUES (
+       $1,
+       LOWER(REGEXP_REPLACE(TRIM($1), '[^a-zA-Z0-9]+', '-', 'g')) || '-' || LEFT(gen_random_uuid()::text, 8)
+     )
      RETURNING group_id`,
     [title.trim()]
   );

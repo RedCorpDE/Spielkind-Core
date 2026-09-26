@@ -8,6 +8,7 @@ Core is a TypeScript Node.js backend for:
 - reminder delivery dispatch through an external provider webhook
 - WhatsApp reminder dispatch through Spielkind Messenger with delivery-state reconciliation
 - admin APIs for products, bookings, resources, clients, groups, and reminders
+- customer APIs for the Spielkind App, backed by Core's booking and client tables
 
 The runtime is built around:
 - Fastify
@@ -91,6 +92,8 @@ Important operational variables:
 - `REMINDER_DISPATCH_CRON`
 - `DASHBOARD_ALLOWED_ORIGIN`
 - `ADMIN_ACCESS_TOKEN_SECRET`
+- `CLIENT_ALLOWED_ORIGIN`
+- `CLIENT_ACCESS_TOKEN_SECRET` (falls back to the admin secret when omitted)
 
 ## HTTP Surface
 
@@ -98,6 +101,16 @@ System:
 - `GET /healthz`
 - `GET /readyz`
 - `GET /version`
+
+Spielkind customer App:
+- `POST /api/client/auth/register|login|refresh|logout`
+- `POST /api/client/auth/forgot-password|reset-password|verify-email|resend-verification`
+- `GET|PATCH /api/client/me` and `/api/client/preferences`
+- `GET /api/client/bookings`, `/api/client/bookings/:bookingId`, and booking access
+- `GET|POST|PATCH|DELETE /api/client/groups/*` for member-visible group data and invites
+- `GET /api/client/access`, `/api/client/locations/*`, `/api/client/notifications`, `/api/client/payments`, and `/api/client/connected-accounts`
+- `POST /api/client/support` creates a linked task intake event
+- All non-auth endpoints require a customer bearer token. Refresh tokens are rotated and stored only as hashes.
 
 Regiondo webhook:
 - `GET /webhooks/regiondo/bookings`

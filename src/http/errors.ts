@@ -148,7 +148,11 @@ export function registerErrorHandler() {
 
     if (error instanceof HttpError) {
       request.log.warn({ err: error }, 'Handled HTTP error');
-      reply.status(error.statusCode).send({ ok: false, error: error.message });
+      reply.status(error.statusCode).send({
+        ok: false,
+        error: error.message,
+        ...(request.url.startsWith('/api/client') ? { message: error.message } : {})
+      });
       return;
     }
 

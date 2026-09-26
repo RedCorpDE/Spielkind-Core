@@ -143,6 +143,12 @@ const schema = z
     ADMIN_REFRESH_COOKIE_NAME: z.string().min(1).default('spielkind_admin_refresh'),
     ADMIN_PASSWORD_MIN_LENGTH: z.coerce.number().int().min(12).max(128).default(14),
 
+    CLIENT_ALLOWED_ORIGIN: commaSeparatedOrigins,
+    CLIENT_ACCESS_TOKEN_SECRET: z.string().min(32).optional(),
+    CLIENT_ACCESS_TOKEN_TTL_MINUTES: z.coerce.number().int().min(5).max(60 * 24).default(15),
+    CLIENT_SESSION_TTL_DAYS: z.coerce.number().int().min(1).max(90).default(30),
+    CLIENT_PASSWORD_MIN_LENGTH: z.coerce.number().int().min(8).max(128).default(8),
+
     LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info')
   })
   .superRefine((value, ctx) => {
@@ -206,7 +212,8 @@ if (!parsed.success) {
 }
 
 export const appConfig = {
-  ...parsed.data
+  ...parsed.data,
+  CLIENT_ACCESS_TOKEN_SECRET: parsed.data.CLIENT_ACCESS_TOKEN_SECRET ?? parsed.data.ADMIN_ACCESS_TOKEN_SECRET
 } as const;
 
 export type AppConfig = typeof appConfig;
