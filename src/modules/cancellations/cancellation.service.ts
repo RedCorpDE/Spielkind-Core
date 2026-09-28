@@ -17,6 +17,7 @@ export interface CancellationQuote {
   refundableAmount: number;
   currency: string;
   reason: string;
+  deadline: string | null;
 }
 
 export function calculateCancellationQuote(input: {
@@ -31,15 +32,25 @@ export function calculateCancellationQuote(input: {
   const status = normalizeLifecycleStatus(input.status);
   if (['cancelled', 'completed', 'expired'].includes(status)) {
     return {
-      canCancel: false, bookingTotal: input.bookingTotal, cancellationFee: input.bookingTotal,
-      refundableAmount: 0, currency: input.currency, reason: `Booking is already ${status}.`
+      canCancel: false,
+      bookingTotal: input.bookingTotal,
+      cancellationFee: input.bookingTotal,
+      refundableAmount: 0,
+      currency: input.currency,
+      reason: `Booking is already ${status}.`,
+      deadline: null
     };
   }
   const hoursBeforeStart = (new Date(input.startsAt).getTime() - new Date(input.now).getTime()) / 3_600_000;
   if (hoursBeforeStart <= 0) {
     return {
-      canCancel: false, bookingTotal: input.bookingTotal, cancellationFee: input.bookingTotal,
-      refundableAmount: 0, currency: input.currency, reason: 'Booking has already started.'
+      canCancel: false,
+      bookingTotal: input.bookingTotal,
+      cancellationFee: input.bookingTotal,
+      refundableAmount: 0,
+      currency: input.currency,
+      reason: 'Booking has already started.',
+      deadline: null
     };
   }
   const matching = [...input.rules]
@@ -55,7 +66,8 @@ export function calculateCancellationQuote(input: {
     currency: input.currency,
     reason: matching?.reason ?? (input.bookingProvider === 'regiondo' && !input.rules.length
       ? 'Refund amount requires confirmation from the external provider.'
-      : input.rules.length ? 'Cancellation policy threshold applied.' : 'No restrictive cancellation policy applies.')
+      : input.rules.length ? 'Cancellation policy threshold applied.' : 'No restrictive cancellation policy applies.'),
+    deadline: input.startsAt
   };
 }
 

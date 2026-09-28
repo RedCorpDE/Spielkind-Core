@@ -21,6 +21,8 @@ import {
 import { rebuildConsumptionsForBooking } from '../../modules/resources/consumption.service.js';
 import { pool } from '../../db/client.js';
 import { resolveBookingChangeRequestByAdmin } from '../../modules/bookings/booking-change-request.repository.js';
+import { getCancellationQuote } from '../../modules/cancellations/cancellation.service.js';
+import { cancelWebBooking } from '../../modules/web/web-booking.service.js';
 
 const bookingExternalStatusSchema = z.enum(['Pending', 'Processing', 'Confirmed', 'Completed', 'Rejected', 'Canceled', 'Unknown']);
 const bookingOpsStatusSchema = z.enum(['Normal', 'Escalated']);
@@ -32,6 +34,10 @@ const sortDirectionSchema = z.enum(['asc', 'desc']);
 const applyRegiondoSyncSchema = z.object({
   expectedLinkedContextVersion: z.string().min(1),
   expectedProviderFingerprints: z.record(z.string().uuid(), z.string().length(64))
+});
+const staffCancellationSchema = z.object({
+  reason: z.string().trim().min(1).max(1000),
+  override: z.boolean().default(false)
 });
 
 const listBookingsQuerySchema = z
@@ -139,6 +145,36 @@ function sendError(error: unknown): never {
 }
 
 export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<void> {
+  app.get('/api/admin/bookings/:bookingId/cancellation-preview', async (request) => {
+    await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'view');
+    const { bookingId } = request.params as { bookingId: string };
+    return { ok: true, item: await getCancellationQuote(bookingId) };
+  });
+
+  app.post('/api/admin/bookings/:bookingId/cancel', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'delete');
+    const parsed = staffCancellationSchema.safeParse(request.body);
+    if (!parsed.success) throw new ValidationHttpError('A cancellation reason is required.');
+    if (parsed.data.override) {
+      await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'manage');
+    }
+    const { bookingId } = request.params as { bookingId: string };
+    const currentBooking = await getBooking(bookingId);
+    if (currentBooking?.regiondoBookingId) {
+      const quote = await getCancellationQuote(bookingId);
+      if (!quote.canCancel) throw new ValidationHttpError(quote.reason);
+      await cancelBookingInRegiondo(bookingId);
+    }
+    await cancelWebBooking({
+      bookingId, actorType: 'staff', actorId: auth.user.id, reason: parsed.data.reason
+    });
+    await recordAdminWriteAudit({
+      request, auth, action: 'staff.booking.cancel', entityType: 'booking', entityId: bookingId,
+      details: { reason: parsed.data.reason, override: parsed.data.override }
+    });
+    return { ok: true, item: await getBooking(bookingId) };
+  });
+
   app.get('/api/admin/bookings', async (request) => {
     await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'view');
     const parsed = listBookingsQuerySchema.safeParse(request.query);

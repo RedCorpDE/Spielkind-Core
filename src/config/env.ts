@@ -75,6 +75,7 @@ function applyTestDefaults(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   normalized.WEBHOOK_AUTH_HEADER_VALUE ??= 'test-webhook-token';
   normalized.EXTERNAL_TASK_WEBHOOK_AUTH_HEADER_VALUE ??= 'test-external-task-token';
   normalized.DASHBOARD_ALLOWED_ORIGIN ??= 'http://localhost:5173';
+  normalized.WORDPRESS_SERVICE_TOKEN ??= '0123456789abcdef0123456789abcdef';
   return normalized;
 }
 
@@ -166,6 +167,13 @@ const schema = z
     CLIENT_ACCESS_TOKEN_TTL_MINUTES: z.coerce.number().int().min(5).max(60 * 24).default(15),
     CLIENT_SESSION_TTL_DAYS: z.coerce.number().int().min(1).max(90).default(30),
     CLIENT_PASSWORD_MIN_LENGTH: z.coerce.number().int().min(8).max(128).default(8),
+
+    WORDPRESS_SERVICE_TOKEN: z.string().min(32),
+    WORDPRESS_SERVICE_SCOPES: z.string().default(
+      'locations:read,products:read,availability:read,checkout:create,booking-status:read,client-auth:proxy,booking-management'
+    ),
+    WEB_CHECKOUT_TTL_MINUTES: z.coerce.number().int().min(5).max(60).default(15),
+    WEB_MANAGEMENT_TOKEN_TTL_DAYS: z.coerce.number().int().min(1).max(3650).default(365),
 
     LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info')
   })

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { registerErrorHandler } from '../../src/http/errors.js';
+import { BookingNotCancellableError } from '../../src/modules/bookings/booking.errors.js';
 import {
   RegiondoApiError,
   RegiondoLocationValidationError,
@@ -27,6 +28,17 @@ function createRequestDouble() {
 }
 
 describe('registerErrorHandler', () => {
+  it('uses the stable nested error contract for web customer routes', async () => {
+    const handler = registerErrorHandler();
+    const reply = createReplyDouble();
+    const request = { ...createRequestDouble(), url: '/api/web/me/bookings/id/cancel' };
+    await handler(new BookingNotCancellableError('Cancellation deadline passed.'), request as never, reply as never);
+    expect(reply.status).toHaveBeenCalledWith(409);
+    expect(reply.send).toHaveBeenCalledWith({
+      error: { code: 'BOOKING_CANCELLATION_NOT_ALLOWED', message: 'Cancellation deadline passed.' }
+    });
+  });
+
   it('returns a stable validation response for invalid Regiondo locations', async () => {
     const handler = registerErrorHandler();
     const reply = createReplyDouble();

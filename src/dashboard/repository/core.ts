@@ -80,6 +80,16 @@ export interface BookingRow {
   dt_from: Date | string;
   dt_to: Date | string;
   source: string | null;
+  booking_source?: string | null;
+  payment_status?: string;
+  refund_status?: string | null;
+  cancellation_reason?: string | null;
+  cancelled_at?: Date | string | null;
+  cancelled_by_first_name?: string | null;
+  cancelled_by_last_name?: string | null;
+  cancelled_by_email?: string | null;
+  cancellation_actor_type?: string | null;
+  cancellation_actor_id?: string | null;
   updated_at: Date | string;
   booking_raw: unknown;
   first_name: string | null;
@@ -562,6 +572,14 @@ export function mapBookingRow(row: BookingRow): DashboardBooking {
   const activeChanges = isRecord(row.active_change_request_changes) ? row.active_change_request_changes : {};
   const contactChange = isRecord(activeChanges.contact) ? activeChanges.contact : null;
   const localContact = contactChange && isRecord(contactChange.to) ? contactChange.to : null;
+  const cancelledByName = [row.cancelled_by_first_name, row.cancelled_by_last_name]
+    .map((value) => value?.trim())
+    .filter(Boolean)
+    .join(' ');
+  const cancelledBy = cancelledByName || row.cancelled_by_email ||
+    (row.cancellation_actor_type
+      ? `${row.cancellation_actor_type}${row.cancellation_actor_id ? ` (${row.cancellation_actor_id})` : ''}`
+      : null);
 
   return {
     id: row.id,
@@ -586,7 +604,12 @@ export function mapBookingRow(row: BookingRow): DashboardBooking {
       (typeof localContact?.email === 'string' ? localContact.email : null) ??
       extractPurchaseContactField(row.booking_raw, 'email') ?? row.email ?? '',
     attendees: Math.max(1, row.guest_count),
-    source: extractBookingSource(row.booking_raw),
+    source: row.booking_source ?? extractBookingSource(row.booking_raw),
+    paymentStatus: row.payment_status ?? (Number(row.paid_amount) > 0 ? 'paid' : 'unpaid'),
+    refundStatus: row.refund_status ?? null,
+    cancellationReason: row.cancellation_reason ?? null,
+    cancelledBy,
+    cancelledAt: row.cancelled_at ? requireIsoString(row.cancelled_at, 'bookings.cancelled_at') : null,
     specialRequirements: extractBookingNotes(row.booking_raw),
     depositPaid: Number(row.paid_amount) > 0 || Number(row.paid_amount) >= Number(row.total_amount),
     opsNotes: row.ops_notes ?? '',

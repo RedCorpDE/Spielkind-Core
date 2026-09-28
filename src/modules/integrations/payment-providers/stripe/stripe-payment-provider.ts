@@ -21,7 +21,8 @@ const paymentIntentSchema = z.object({
   id: z.string().min(1),
   status: z.string(),
   amount: z.number().int(),
-  currency: z.string()
+  currency: z.string(),
+  client_secret: z.string().min(1).optional()
 });
 
 const refundSchema = z.object({ id: z.string().min(1), status: z.string().nullable().optional() });
@@ -120,6 +121,34 @@ export class StripePaymentProvider implements PaymentProvider {
     };
   }
 
+  async createPaymentIntent(input: {
+    bookingId: string;
+    locationId: string;
+    productId: string;
+    amountMinor: number;
+    currency: string;
+    idempotencyKey: string;
+    description: string;
+    customerEmail?: string;
+  }) {
+    const form = new URLSearchParams();
+    appendFormValue(form, 'amount', input.amountMinor);
+    appendFormValue(form, 'currency', input.currency.toLowerCase());
+    appendFormValue(form, 'description', input.description);
+    appendFormValue(form, 'receipt_email', input.customerEmail);
+    appendFormValue(form, 'automatic_payment_methods[enabled]', 'true');
+    appendFormValue(form, 'metadata[booking_id]', input.bookingId);
+    appendFormValue(form, 'metadata[location_id]', input.locationId);
+    appendFormValue(form, 'metadata[product_id]', input.productId);
+    const intent = paymentIntentSchema.parse(await this.request(
+      '/v1/payment_intents',
+      { method: 'POST', body: form },
+      input.idempotencyKey
+    ));
+    if (!intent.client_secret) throw new StripeApiError('Stripe did not return a PaymentIntent client secret.', 502, false);
+    return { externalPaymentId: intent.id, clientSecret: intent.client_secret, status: intent.status };
+  }
+
   async retrievePayment(externalPaymentId: string): Promise<{ status: string; amountMinor: number; currency: string }> {
     const intent = paymentIntentSchema.parse(await this.request(
       `/v1/payment_intents/${encodeURIComponent(externalPaymentId)}`,
@@ -133,10 +162,12 @@ export class StripePaymentProvider implements PaymentProvider {
     amountMinor: number;
     currency: string;
     idempotencyKey: string;
+    bookingId?: string;
   }): Promise<{ externalRefundId: string; status: string }> {
     const form = new URLSearchParams();
     appendFormValue(form, 'payment_intent', input.externalPaymentId);
     appendFormValue(form, 'amount', input.amountMinor);
+    appendFormValue(form, 'metadata[booking_id]', input.bookingId);
     const refund = refundSchema.parse(await this.request('/v1/refunds', { method: 'POST', body: form }, input.idempotencyKey));
     return { externalRefundId: refund.id, status: refund.status ?? 'pending' };
   }

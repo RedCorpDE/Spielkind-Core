@@ -304,6 +304,11 @@ export interface DashboardBooking {
   contactEmail: string;
   attendees: number;
   source: string;
+  paymentStatus: string;
+  refundStatus: string | null;
+  cancellationReason: string | null;
+  cancelledBy: string | null;
+  cancelledAt: string | null;
   specialRequirements: string;
   depositPaid: boolean;
   opsNotes: string;

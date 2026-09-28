@@ -19,7 +19,8 @@ import { RefundAmountExceededError } from '../modules/payments/refund.service.js
 export class HttpError extends Error {
   constructor(
     readonly statusCode: number,
-    message: string
+    message: string,
+    readonly code?: string
   ) {
     super(message);
     this.name = 'HttpError';
@@ -27,29 +28,29 @@ export class HttpError extends Error {
 }
 
 export class ValidationHttpError extends HttpError {
-  constructor(message: string) {
-    super(400, message);
+  constructor(message: string, code = 'VALIDATION_ERROR') {
+    super(400, message, code);
     this.name = 'ValidationHttpError';
   }
 }
 
 export class UnauthorizedHttpError extends HttpError {
-  constructor(message = 'Unauthorized') {
-    super(401, message);
+  constructor(message = 'Unauthorized', code = 'AUTH_REQUIRED') {
+    super(401, message, code);
     this.name = 'UnauthorizedHttpError';
   }
 }
 
 export class ForbiddenHttpError extends HttpError {
-  constructor(message = 'Forbidden') {
-    super(403, message);
+  constructor(message = 'Forbidden', code = 'AUTH_INSUFFICIENT_SCOPE') {
+    super(403, message, code);
     this.name = 'ForbiddenHttpError';
   }
 }
 
 export class ConflictHttpError extends HttpError {
-  constructor(message: string) {
-    super(409, message);
+  constructor(message: string, code?: string) {
+    super(409, message, code);
     this.name = 'ConflictHttpError';
   }
 }
@@ -152,11 +153,41 @@ export function registerErrorHandler() {
 
     if (error instanceof HttpError) {
       request.log.warn({ err: error }, 'Handled HTTP error');
+      if ((request.url ?? '').startsWith('/api/web')) {
+        reply.status(error.statusCode).send({
+          error: { code: error.code ?? (error.statusCode === 404 ? 'BOOKING_NOT_FOUND' : 'INTERNAL_ERROR'), message: error.message }
+        });
+        return;
+      }
       reply.status(error.statusCode).send({
         ok: false,
         error: error.message,
-        ...(request.url.startsWith('/api/client') ? { message: error.message } : {})
+        ...((request.url ?? '').startsWith('/api/client') ? { message: error.message } : {})
       });
+      return;
+    }
+
+    if ((request.url ?? '').startsWith('/api/web')) {
+      const domainCode = error instanceof DomainError ? error.code : null;
+      const code = domainCode === 'BOOKING_NOT_CANCELLABLE' || domainCode === 'INVALID_BOOKING_TRANSITION'
+        ? 'BOOKING_CANCELLATION_NOT_ALLOWED'
+        : domainCode === 'HOLD_EXPIRED'
+          ? 'CHECKOUT_EXPIRED'
+          : domainCode === 'INSUFFICIENT_CAPACITY' || error instanceof OverbookingError || error instanceof MissingProductResourceMappingError
+            ? 'AVAILABILITY_UNAVAILABLE'
+            : error instanceof RefundAmountExceededError
+              ? 'REFUND_FAILED'
+              : error instanceof RegiondoRateLimitError
+                ? 'RATE_LIMITED'
+                : error instanceof ProviderUnavailableError
+                  ? 'PAYMENT_INITIALIZATION_FAILED'
+                  : 'INTERNAL_ERROR';
+      const status = code === 'RATE_LIMITED' ? 429
+        : code === 'INTERNAL_ERROR' ? 500
+          : code === 'PAYMENT_INITIALIZATION_FAILED' ? 502
+            : 409;
+      if (status >= 500) request.log.error({ err: error }, 'Web API request failed');
+      reply.status(status).send({ error: { code, message: status >= 500 ? 'The request could not be completed.' : error.message } });
       return;
     }
 
@@ -166,7 +197,7 @@ export function registerErrorHandler() {
         ok: false,
         code,
         error: error.message,
-        ...(request.url.startsWith('/api/client') ? { message: error.message } : {})
+        ...((request.url ?? '').startsWith('/api/client') ? { message: error.message } : {})
       });
       return;
     }
@@ -230,6 +261,10 @@ export function registerErrorHandler() {
     }
 
     request.log.error({ err: error }, 'Unhandled request error');
+    if ((request.url ?? '').startsWith('/api/web')) {
+      reply.status(500).send({ error: { code: 'INTERNAL_ERROR', message: 'Internal Server Error' } });
+      return;
+    }
     reply.status(500).send({ ok: false, error: 'Internal Server Error' });
   };
 }

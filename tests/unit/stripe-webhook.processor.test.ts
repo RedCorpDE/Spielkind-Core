@@ -30,4 +30,15 @@ describe('Stripe webhook normalization', () => {
       data: { object: { id: 'cs_1', metadata: { booking_id: bookingId } } }
     }).normalized.action).toBe('cancelled');
   });
+
+  it('maps refund completion and failure independently from booking state', () => {
+    expect(normalizeStripeEvent({
+      id: 'evt_refund_ok', type: 'refund.updated',
+      data: { object: { id: 're_1', status: 'succeeded' } }
+    }).normalized).toEqual({ action: 'refund_succeeded', providerRefundId: 're_1' });
+    expect(normalizeStripeEvent({
+      id: 'evt_refund_failed', type: 'refund.failed',
+      data: { object: { id: 're_2', status: 'failed' } }
+    }).normalized).toEqual({ action: 'refund_failed', providerRefundId: 're_2' });
+  });
 });

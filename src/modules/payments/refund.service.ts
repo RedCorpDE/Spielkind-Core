@@ -54,6 +54,13 @@ export async function recordRefund(input: {
     );
     if (input.status === 'succeeded') {
       await client.query(
+        `UPDATE bookings SET payment_status = CASE
+           WHEN $2 >= ROUND(total_amount * 100)::bigint THEN 'refunded' ELSE 'partially_refunded' END,
+           status = 'cancelled', cancelled_at = COALESCE(cancelled_at, now()), updated_at = now()
+         WHERE booking_id = $1`,
+        [input.bookingId, newTotal]
+      );
+      await client.query(
         `UPDATE payments SET status = CASE WHEN $2 >= amount_minor THEN 'refunded' ELSE 'partially_refunded' END, updated_at = now()
          WHERE payment_id = $1`,
         [input.paymentId, newTotal]
@@ -66,5 +73,53 @@ export async function recordRefund(input: {
     }
     return { refundId: result.rows[0].refund_id, created: true };
   }, { isolationLevel: 'SERIALIZABLE' });
+}
+
+export async function updateStripeRefundState(input: {
+  providerRefundId: string;
+  status: 'succeeded' | 'failed';
+  externalEventId: string;
+}): Promise<{ bookingId: string } | null> {
+  return withTransaction(async (client) => {
+    const result = await client.query<{
+      refund_id: string; booking_id: string; payment_id: string; amount_minor: string | number;
+    }>(
+      `SELECT refund_id, booking_id, payment_id, amount_minor FROM refunds
+       WHERE provider = 'stripe' AND provider_refund_id = $1 LIMIT 1 FOR UPDATE`,
+      [input.providerRefundId]
+    );
+    const refund = result.rows[0];
+    if (!refund) return null;
+    await client.query(
+      `UPDATE refunds SET status = $2, metadata = metadata || $3::jsonb, updated_at = now() WHERE refund_id = $1`,
+      [refund.refund_id, input.status, JSON.stringify({ lastStripeEventId: input.externalEventId })]
+    );
+    if (input.status === 'failed') {
+      await client.query(`UPDATE bookings SET payment_status = 'refund_failed', updated_at = now() WHERE booking_id = $1`, [refund.booking_id]);
+    } else {
+      const totals = await client.query<{ refunded: string | number; payment_total: string | number }>(
+        `SELECT COALESCE(SUM(refund_record.amount_minor) FILTER (WHERE refund_record.status = 'succeeded'), 0) AS refunded,
+                payment.amount_minor AS payment_total
+         FROM payments payment LEFT JOIN refunds refund_record ON refund_record.payment_id = payment.payment_id
+         WHERE payment.payment_id = $1 GROUP BY payment.amount_minor`,
+        [refund.payment_id]
+      );
+      const refunded = Number(totals.rows[0]?.refunded ?? 0);
+      const paymentTotal = Number(totals.rows[0]?.payment_total ?? 0);
+      const state = refunded >= paymentTotal ? 'refunded' : 'partially_refunded';
+      await client.query(`UPDATE payments SET status = $2, updated_at = now() WHERE payment_id = $1`, [refund.payment_id, state]);
+      await client.query(
+        `UPDATE bookings SET payment_status = $2, status = 'cancelled', cancelled_at = COALESCE(cancelled_at, now()), updated_at = now()
+         WHERE booking_id = $1`,
+        [refund.booking_id, state]
+      );
+      await client.query(
+        `INSERT INTO web_audit_events (action, actor_type, booking_id, details)
+         VALUES ('stripe.refund.complete', 'stripe', $1, $2::jsonb)`,
+        [refund.booking_id, JSON.stringify({ refundId: refund.refund_id, amountMinor: Number(refund.amount_minor) })]
+      );
+    }
+    return { bookingId: refund.booking_id };
+  });
 }
 

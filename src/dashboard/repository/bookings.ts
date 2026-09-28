@@ -1391,6 +1391,16 @@ function buildBookingBaseQuery() {
        b.dt_from,
        b.dt_to,
        b.source,
+       b.booking_source,
+       b.payment_status,
+       latest_refund.status AS refund_status,
+       b.cancellation_reason,
+       b.cancelled_at,
+       cancellation_client.first_name AS cancelled_by_first_name,
+       cancellation_client.last_name AS cancelled_by_last_name,
+       cancellation_client.email::text AS cancelled_by_email,
+       cancellation_audit.actor_type AS cancellation_actor_type,
+       cancellation_audit.actor_id::text AS cancellation_actor_id,
        b.updated_at,
        b.regiondo_raw AS booking_raw,
        COALESCE(
@@ -1436,6 +1446,7 @@ function buildBookingBaseQuery() {
        request.changes AS active_change_request_changes
      FROM bookings b
      INNER JOIN clients c ON c.client_id = b.client_id
+     LEFT JOIN clients cancellation_client ON cancellation_client.client_id = b.cancelled_by_client_id
      LEFT JOIN locations location ON location.location_id = b.location_id
      LEFT JOIN booking_admin_metadata admin ON admin.booking_id = b.booking_id
      LEFT JOIN LATERAL (
@@ -1445,6 +1456,21 @@ function buildBookingBaseQuery() {
        ORDER BY requested_at DESC
        LIMIT 1
      ) AS request ON true
+     LEFT JOIN LATERAL (
+       SELECT status
+       FROM refunds
+       WHERE booking_id = b.booking_id
+       ORDER BY created_at DESC
+       LIMIT 1
+     ) AS latest_refund ON true
+     LEFT JOIN LATERAL (
+       SELECT actor_type, actor_id
+       FROM web_audit_events
+       WHERE booking_id = b.booking_id
+         AND action IN ('guest.booking.cancel', 'client.booking.cancel', 'staff.booking.cancel')
+       ORDER BY created_at DESC
+       LIMIT 1
+     ) AS cancellation_audit ON true
      LEFT JOIN LATERAL (
        SELECT
          MIN(p.title) AS primary_product_title,

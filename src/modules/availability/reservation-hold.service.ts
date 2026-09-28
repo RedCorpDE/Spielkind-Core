@@ -142,17 +142,35 @@ export async function createReservationHold(input: CreateReservationHoldInput): 
 }
 
 export async function expireReservationHolds(limit = 500): Promise<number> {
-  const result = await pool.query(
-    `WITH expired AS (
+  return withTransaction(async (client) => {
+    const result = await client.query<{ booking_id: string | null }>(
+    `WITH expiring AS (
        SELECT reservation_hold_id FROM reservation_holds
        WHERE status = 'active' AND expires_at <= now()
        ORDER BY expires_at ASC LIMIT $1 FOR UPDATE SKIP LOCKED
      )
      UPDATE reservation_holds hold SET status = 'expired', updated_at = now()
-     FROM expired WHERE hold.reservation_hold_id = expired.reservation_hold_id`,
+     FROM expiring WHERE hold.reservation_hold_id = expiring.reservation_hold_id
+     RETURNING hold.booking_id`,
     [limit]
-  );
-  return result.rowCount ?? 0;
+    );
+    const bookingIds = result.rows.flatMap((row) => row.booking_id ? [row.booking_id] : []);
+    if (bookingIds.length) {
+      await client.query(
+        `UPDATE bookings SET status = 'expired', payment_status = CASE
+           WHEN payment_status IN ('unpaid', 'processing', 'failed') THEN 'failed' ELSE payment_status END,
+           updated_at = now()
+         WHERE booking_id = ANY($1::uuid[]) AND status IN ('held', 'pending', 'payment_pending', 'payment_failed')`,
+        [bookingIds]
+      );
+      await client.query(
+        `UPDATE payments SET status = 'cancelled', updated_at = now()
+         WHERE booking_id = ANY($1::uuid[]) AND status IN ('requires_payment', 'processing')`,
+        [bookingIds]
+      );
+    }
+    return result.rowCount ?? 0;
+  });
 }
 
 export async function releaseReservationHold(holdId: string, clientId?: string): Promise<boolean> {

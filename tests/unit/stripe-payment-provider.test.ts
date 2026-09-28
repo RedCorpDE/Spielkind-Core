@@ -30,4 +30,30 @@ describe('Stripe payment provider', () => {
     expect(form.get('line_items[0][price_data][currency]')).toBe('eur');
     expect(form.get('metadata[booking_id]')).toBe('2a9d7a07-dc3b-4855-8c0e-9f94c6288df7');
   });
+
+  it('creates a PaymentIntent for the WordPress Payment Element without trusting browser totals', async () => {
+    const request = vi.fn(async () => new Response(JSON.stringify({
+      id: 'pi_test_1', client_secret: 'pi_test_1_secret_value', status: 'requires_payment_method',
+      amount: 4200, currency: 'eur'
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const provider = new StripePaymentProvider({
+      secretKey: 'sk_test_example', apiBaseUrl: 'https://api.stripe.test', requestTimeoutMs: 1000
+    }, request as typeof fetch);
+
+    const result = await provider.createPaymentIntent({
+      bookingId: '2a9d7a07-dc3b-4855-8c0e-9f94c6288df7',
+      locationId: 'af79d0f6-cb17-4f98-8a72-cf4fa217fc7f',
+      productId: '431d4598-cf62-4ff4-bf84-40eb10693bf0',
+      amountMinor: 4200, currency: 'EUR', idempotencyKey: 'web-payment-1',
+      description: 'Play session', customerEmail: 'guest@example.test'
+    });
+
+    expect(result.clientSecret).toBe('pi_test_1_secret_value');
+    const [url, init] = request.mock.calls[0];
+    expect(url).toBe('https://api.stripe.test/v1/payment_intents');
+    const form = new URLSearchParams(init?.body as string);
+    expect(form.get('amount')).toBe('4200');
+    expect(form.get('metadata[booking_id]')).toBe('2a9d7a07-dc3b-4855-8c0e-9f94c6288df7');
+    expect(form.has('price')).toBe(false);
+  });
 });

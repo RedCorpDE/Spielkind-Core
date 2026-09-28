@@ -220,6 +220,7 @@ export async function confirmStripePayment(input: ConfirmStripePaymentInput): Pr
       [hold.reservation_hold_id]
     );
     await client.query(`UPDATE bookings SET paid_amount = $2, updated_at = now() WHERE booking_id = $1`, [booking.booking_id, expectedAmount / 100]);
+    await client.query(`UPDATE bookings SET payment_status = 'paid' WHERE booking_id = $1`, [booking.booking_id]);
     await transitionBookingInTransaction(client, booking.booking_id, 'confirmed', {
       paymentId: payment.payment_id, provider: 'stripe'
     });
@@ -273,6 +274,14 @@ export async function updateStripePaymentState(input: UpdateStripePaymentStateIn
           lastStripeEventType: input.eventType,
           ...(input.failureMessage ? { failureMessage: input.failureMessage } : {})
         })]
+    );
+    await client.query(
+      `UPDATE bookings SET payment_status = CASE
+         WHEN $2 = 'processing' THEN 'processing'
+         WHEN $2 = 'failed' THEN 'failed'
+         ELSE payment_status END
+       WHERE booking_id = $1`,
+      [payment.booking_id, input.outcome]
     );
     if (input.outcome === 'processing') return { bookingId: payment.booking_id, paymentId: payment.payment_id };
 

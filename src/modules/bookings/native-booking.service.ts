@@ -9,6 +9,7 @@ export interface CreateNativeBookingInput extends PricingQuoteInput {
   endsAt: string;
   holdId: string;
   idempotencyKey: string;
+  allowProviderCatalog?: boolean;
 }
 
 export async function createNativeBooking(input: CreateNativeBookingInput): Promise<{ bookingId: string; created: boolean }> {
@@ -24,7 +25,7 @@ export async function createNativeBooking(input: CreateNativeBookingInput): Prom
       [input.productId]
     );
     if (!product.rowCount) throw new Error('Product was not found.');
-    if (product.rows[0].booking_provider !== 'core') {
+    if (product.rows[0].booking_provider !== 'core' && !input.allowProviderCatalog) {
       throw new Error('This product is managed by an external booking provider.');
     }
 

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { confirmStripePayment, updateStripePaymentState } from '../../../payments/payment-confirmation.service.js';
+import { updateStripeRefundState } from '../../../payments/refund.service.js';
 
 const stripeObjectSchema = z.record(z.unknown());
 export const stripeEventSchema = z.object({
@@ -40,13 +41,14 @@ function bookingId(object: Record<string, unknown>): string | undefined {
 }
 
 export interface NormalizedStripeEvent {
-  action: 'confirm' | 'processing' | 'failed' | 'cancelled' | 'ignore';
+  action: 'confirm' | 'processing' | 'failed' | 'cancelled' | 'refund_succeeded' | 'refund_failed' | 'ignore';
   bookingId?: string;
   providerCheckoutId?: string;
   providerPaymentId?: string;
   amountMinor?: number;
   currency?: string;
   failureMessage?: string;
+  providerRefundId?: string;
 }
 
 export function normalizeStripeEvent(eventInput: unknown): { event: z.infer<typeof stripeEventSchema>; normalized: NormalizedStripeEvent } {
@@ -90,6 +92,16 @@ export function normalizeStripeEvent(eventInput: unknown): { event: z.infer<type
       return { event, normalized: { ...common, action: 'failed', failureMessage: failureMessage ?? 'Stripe payment failed.' } };
     }
   }
+  if (event.type.startsWith('refund.')) {
+    const providerRefundId = stringValue(object, 'id');
+    const status = stringValue(object, 'status');
+    if (event.type === 'refund.failed' || status === 'failed' || status === 'canceled') {
+      return { event, normalized: { action: 'refund_failed', providerRefundId } };
+    }
+    if (event.type === 'refund.updated' && status === 'succeeded') {
+      return { event, normalized: { action: 'refund_succeeded', providerRefundId } };
+    }
+  }
   return { event, normalized: { action: 'ignore' } };
 }
 
@@ -110,6 +122,15 @@ export async function processStripeEvent(payload: unknown): Promise<{ bookingId?
       eventType: event.type
     });
     return { bookingId: result.bookingId, action: 'confirm' };
+  }
+  if (normalized.action === 'refund_succeeded' || normalized.action === 'refund_failed') {
+    if (!normalized.providerRefundId) throw new Error(`Stripe ${event.type} is missing the refund id.`);
+    const result = await updateStripeRefundState({
+      providerRefundId: normalized.providerRefundId,
+      status: normalized.action === 'refund_succeeded' ? 'succeeded' : 'failed',
+      externalEventId: event.id
+    });
+    return { bookingId: result?.bookingId, action: normalized.action };
   }
   const result = await updateStripePaymentState({
     bookingId: normalized.bookingId,
