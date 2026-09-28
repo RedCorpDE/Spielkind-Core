@@ -6,10 +6,13 @@ import { requireAdminPermission } from '../access-control.js';
 import { recordAdminWriteAudit } from '../admin-audit.js';
 import {
   deleteProductResourceMapping,
+  addProductOffering,
   getAdminProduct,
+  listLocationProducts,
   listAdminProducts,
   listRegiondoCatalogProducts,
   updateAdminProduct,
+  removeProductOffering,
   upsertProductResourceMapping
 } from '../../modules/products/product-admin.repository.js';
 import { runRegiondoCatalogSyncJob } from '../../modules/regiondo/regiondo-catalog-sync.job.js';
@@ -20,6 +23,7 @@ import {
   RegiondoTransientError
 } from '../../modules/regiondo/regiondo.client.js';
 import { RegiondoCatalogSyncError } from '../../modules/regiondo/regiondo-catalog.errors.js';
+import { getAvailabilitySummary } from '../../modules/resources/availability.service.js';
 
 const updateProductSchema = z
   .object({
@@ -38,6 +42,16 @@ const productResourceSchema = z.object({
   resourceId: z.string().uuid(),
   quantity: z.number().int().positive()
 });
+const offeringParamsSchema = z.object({
+  locationId: z.string().uuid(),
+  productId: z.string().uuid()
+});
+const availabilityQuerySchema = z.object({
+  locationId: z.string().uuid(),
+  start: z.string().datetime(),
+  end: z.string().datetime(),
+  quantity: z.coerce.number().int().positive().max(100).default(1)
+}).refine((value) => new Date(value.end) > new Date(value.start), { message: 'End must be after start.' });
 
 function getRegiondoSyncStatusCode(error: RegiondoApiError): number {
   if (error instanceof RegiondoRateLimitError) {
@@ -70,6 +84,66 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
     }
 
     return { ok: true, item: product };
+  });
+
+  app.get('/api/admin/locations/:locationId/products', async (request) => {
+    await requireAdminPermission(request as AdminFastifyRequest, 'products', 'view');
+    const parsed = z.object({ locationId: z.string().uuid() }).safeParse(request.params);
+    if (!parsed.success) throw new ValidationHttpError('Invalid location id.');
+    return { ok: true, items: await listLocationProducts(parsed.data.locationId) };
+  });
+
+  app.post('/api/admin/locations/:locationId/products/:productId', async (request, reply) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
+    const parsed = offeringParamsSchema.safeParse(request.params);
+    if (!parsed.success) throw new ValidationHttpError('Invalid product offering ids.');
+    const product = await addProductOffering(parsed.data.locationId, parsed.data.productId);
+    if (!product) throw new HttpError(404, 'Location or product not found.');
+    await recordAdminWriteAudit({
+      request, auth, action: 'admin.product_offering.created', entityType: 'product',
+      entityId: parsed.data.productId, details: { locationId: parsed.data.locationId }
+    });
+    reply.code(201);
+    return { ok: true, item: product };
+  });
+
+  app.delete('/api/admin/locations/:locationId/products/:productId', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
+    const parsed = offeringParamsSchema.safeParse(request.params);
+    if (!parsed.success) throw new ValidationHttpError('Invalid product offering ids.');
+    const removal = await removeProductOffering(parsed.data.locationId, parsed.data.productId);
+    if (removal === 'not_found') {
+      throw new HttpError(404, 'Product offering not found.');
+    }
+    if (removal === 'in_use') {
+      throw new ValidationHttpError(
+        'Remove active bookings and location resource mappings before removing this product offering.'
+      );
+    }
+    await recordAdminWriteAudit({
+      request, auth, action: 'admin.product_offering.deleted', entityType: 'product',
+      entityId: parsed.data.productId, details: { locationId: parsed.data.locationId }
+    });
+    return { ok: true };
+  });
+
+  app.get('/api/admin/products/:productId/availability', async (request) => {
+    await requireAdminPermission(request as AdminFastifyRequest, 'products', 'view');
+    const { productId } = request.params as { productId: string };
+    const parsed = availabilityQuerySchema.safeParse(request.query);
+    if (!parsed.success) throw new ValidationHttpError('Invalid availability query.');
+    const product = await getAdminProduct(productId);
+    if (!product) throw new HttpError(404, 'Product not found.');
+    if (product.bookingProvider !== 'core') {
+      throw new ValidationHttpError('Admin availability diagnostics currently support Core products only.');
+    }
+    return getAvailabilitySummary({
+      product_id: productId,
+      location_id: parsed.data.locationId,
+      dt_from: parsed.data.start,
+      dt_to: parsed.data.end,
+      guest_count: parsed.data.quantity
+    });
   });
 
   app.patch('/api/admin/products/:productId', async (request) => {
@@ -114,11 +188,14 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
       throw new HttpError(404, 'Product not found.');
     }
 
-    await upsertProductResourceMapping({
+    const mapped = await upsertProductResourceMapping({
       productId,
       resourceId: parsed.data.resourceId,
       quantity: parsed.data.quantity
     });
+    if (!mapped) {
+      throw new ValidationHttpError('The resource must belong to a location where this product is offered.');
+    }
 
     await recordAdminWriteAudit({
       request,

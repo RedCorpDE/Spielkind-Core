@@ -91,6 +91,7 @@ async function resolveLocation(
        FROM location_products lp
        INNER JOIN products p ON p.product_id = lp.product_id
        WHERE p.regiondo_product_id = ANY($1::text[])
+         AND lp.enabled = true
        LIMIT 2`,
       [input.regiondoProductIds]
     );

@@ -207,6 +207,16 @@ const locationImageArrayItemSchema = z.preprocess(
   (value) => typeof value === 'string' ? value.trim() : value,
   z.union([z.literal(''), z.string().url()])
 );
+const guestWifiSchema = z.object({
+  available: z.boolean(),
+  ssid: z.string().trim().min(1).nullable(),
+  security: z.enum(['open', 'wpa2', 'wpa3', 'wpa2_wpa3']),
+  hidden: z.boolean().default(false)
+}).superRefine((value, context) => {
+  if (value.available && !value.ssid) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Guest WiFi SSID is required when WiFi is available.' });
+  }
+});
 const locationDetailsShape = {
   title: z.string().trim().min(1).optional(),
   description: optionalLocationTextSchema,
@@ -226,6 +236,7 @@ const locationDetailsShape = {
   contactEmail: optionalLocationEmailSchema,
   contactPhone: optionalLocationTextSchema,
   supportNote: optionalLocationTextSchema,
+  guestWifi: guestWifiSchema.nullable().optional(),
   regiondoLocationId: z.string().nullable().optional()
 };
 const validateLocationCoordinates = (

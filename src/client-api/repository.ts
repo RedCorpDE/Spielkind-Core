@@ -23,6 +23,12 @@ export interface ClientLocation {
   contactEmail?: string;
   contactPhone?: string;
   supportNote?: string;
+  guestWifi?: {
+    available: boolean;
+    ssid: string | null;
+    security: 'open' | 'wpa2' | 'wpa3' | 'wpa2_wpa3';
+    hidden: boolean;
+  };
 }
 
 export interface ClientBooking {
@@ -69,13 +75,14 @@ interface LocationRow {
   contact_email: string | null;
   contact_phone: string | null;
   support_note: string | null;
+  guest_wifi: ClientLocation['guestWifi'] | null;
 }
 
 const locationColumns = `location.location_id, location.title, location.address, location.city,
   location.postal_code, location.country_code, location.latitude, location.longitude,
   location.description, location.image_url, location.image_urls, location.directions,
   location.parking, location.public_transport, location.facilities, location.house_rules,
-  location.contact_email, location.contact_phone, location.support_note`;
+  location.contact_email, location.contact_phone, location.support_note, location.guest_wifi`;
 
 function defined<T extends object>(value: T): T {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as T;
@@ -101,7 +108,8 @@ function mapLocation(row: LocationRow): ClientLocation {
     houseRules: row.house_rules ?? [],
     contactEmail: row.contact_email ?? undefined,
     contactPhone: row.contact_phone ?? undefined,
-    supportNote: row.support_note ?? undefined
+    supportNote: row.support_note ?? undefined,
+    guestWifi: row.guest_wifi ?? undefined
   });
 }
 

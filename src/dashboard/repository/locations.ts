@@ -27,6 +27,7 @@ interface LocationRow {
   contact_email: string | null;
   contact_phone: string | null;
   support_note: string | null;
+  guest_wifi: DashboardLocation['guestWifi'];
   regiondo_location_id: string | null;
   created_at: Date | string;
   updated_at: Date | string;
@@ -47,7 +48,7 @@ const SYSTEM_LOCATION_PROVIDER_IDS = new Set([
 
 const LOCATION_COLUMNS = `location_id, title, description, address, city, postal_code, country_code,
   latitude, longitude, image_url, image_urls, directions, parking, public_transport,
-  facilities, house_rules, contact_email, contact_phone, support_note,
+  facilities, house_rules, contact_email, contact_phone, support_note, guest_wifi,
   regiondo_location_id, created_at, updated_at`;
 
 function mapLocationRow(row: LocationRow): DashboardLocation {
@@ -75,6 +76,7 @@ function mapLocationRow(row: LocationRow): DashboardLocation {
     contactEmail: row.contact_email ?? null,
     contactPhone: row.contact_phone ?? null,
     supportNote: row.support_note ?? null,
+    guestWifi: row.guest_wifi ?? null,
     regiondoLocationId: isSystemPlaceholder ? null : row.regiondo_location_id,
     isSystemPlaceholder,
     providerDataStatus: isUnknownRegiondoPlaceholder ? 'unknown' : row.regiondo_location_id && !isNoLocationPlaceholder ? 'known' : 'none',
@@ -145,8 +147,8 @@ export async function mapLocationToRegiondo(
     await client.query(`UPDATE bookings SET location_id = $1, updated_at = now() WHERE location_id = $2`, [target.location_id, source.location_id]);
     await client.query(`UPDATE resources SET location_id = $1, updated_at = now() WHERE location_id = $2`, [target.location_id, source.location_id]);
     await client.query(
-      `INSERT INTO location_products (location_id, product_id)
-       SELECT $1, product_id FROM location_products WHERE location_id = $2
+      `INSERT INTO location_products (location_id, product_id, enabled)
+       SELECT $1, product_id, enabled FROM location_products WHERE location_id = $2
        ON CONFLICT (location_id, product_id) DO NOTHING`,
       [target.location_id, source.location_id]
     );
@@ -334,9 +336,10 @@ export async function createLocation(input: CreateDashboardLocationInput): Promi
          contact_email,
          contact_phone,
          support_note,
+         guest_wifi,
          regiondo_location_id
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
        RETURNING ${LOCATION_COLUMNS}`,
       [
         input.title.trim(),
@@ -357,6 +360,7 @@ export async function createLocation(input: CreateDashboardLocationInput): Promi
         normalizeOptionalText(input.contactEmail),
         normalizeOptionalText(input.contactPhone),
         normalizeOptionalText(input.supportNote),
+        input.guestWifi ?? null,
         regiondoLocationId
       ]
     );
@@ -401,6 +405,7 @@ export async function updateLocation(
   const nextContactEmail = input.contactEmail === undefined ? existing.contactEmail : normalizeOptionalText(input.contactEmail);
   const nextContactPhone = input.contactPhone === undefined ? existing.contactPhone : normalizeOptionalText(input.contactPhone);
   const nextSupportNote = input.supportNote === undefined ? existing.supportNote : normalizeOptionalText(input.supportNote);
+  const nextGuestWifi = input.guestWifi === undefined ? existing.guestWifi : input.guestWifi;
   const nextRegiondoLocationId =
     input.regiondoLocationId === undefined ? existing.regiondoLocationId : normalizeOptionalText(input.regiondoLocationId);
   assertNotSystemProviderId(nextRegiondoLocationId);
@@ -427,15 +432,16 @@ export async function updateLocation(
          contact_email = $16,
          contact_phone = $17,
          support_note = $18,
-         regiondo_location_id = $19,
+         guest_wifi = $19,
+         regiondo_location_id = $20,
          updated_at = now()
-       WHERE location_id = $20
+       WHERE location_id = $21
        RETURNING ${LOCATION_COLUMNS}`,
       [
         nextTitle, nextDescription, nextAddress, nextCity, nextPostalCode, nextCountryCode,
         nextLatitude, nextLongitude, nextImageUrls[0] ?? null, nextImageUrls, nextDirections,
         nextParking, nextPublicTransport, nextFacilities, nextHouseRules, nextContactEmail,
-        nextContactPhone, nextSupportNote, nextRegiondoLocationId, locationId
+        nextContactPhone, nextSupportNote, nextGuestWifi, nextRegiondoLocationId, locationId
       ]
     );
 

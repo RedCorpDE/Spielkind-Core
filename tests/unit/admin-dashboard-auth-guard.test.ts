@@ -9,6 +9,8 @@ const protectedReadPaths = [
   '/api/admin/locations',
   '/api/admin/regiondo/location-candidates',
   '/api/admin/locations/00000000-0000-0000-0000-000000000001',
+  '/api/admin/locations/00000000-0000-0000-0000-000000000001/products',
+  '/api/admin/products/00000000-0000-0000-0000-000000000002/availability?locationId=00000000-0000-0000-0000-000000000001&start=2026-10-10T18%3A00%3A00.000Z&end=2026-10-10T22%3A00%3A00.000Z&quantity=1',
   '/api/admin/task-booking-options',
   '/api/admin/task-columns',
   '/api/admin/task-columns/00000000-0000-0000-0000-000000000001',
@@ -29,6 +31,16 @@ const protectedWritePaths = [
     method: 'PATCH',
     path: '/api/admin/bookings/00000000-0000-0000-0000-000000000001',
     body: { opsNotes: 'Follow up with provider.' }
+  },
+  {
+    method: 'POST',
+    path: '/api/admin/locations/00000000-0000-0000-0000-000000000001/products/00000000-0000-0000-0000-000000000002',
+    body: {}
+  },
+  {
+    method: 'DELETE',
+    path: '/api/admin/locations/00000000-0000-0000-0000-000000000001/products/00000000-0000-0000-0000-000000000002',
+    body: {}
   },
   {
     method: 'POST',

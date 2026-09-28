@@ -32,6 +32,7 @@ const row = (overrides: Record<string, unknown>) => ({
   contact_email: null,
   contact_phone: null,
   support_note: null,
+  guest_wifi: null,
   regiondo_location_id: null,
   created_at: '2026-08-11T10:00:00.000Z',
   updated_at: '2026-08-11T10:00:00.000Z',
@@ -95,8 +96,19 @@ describe('Regiondo location mapping', () => {
 
     const [, values] = poolQuery.mock.calls[0];
     expect(values).toEqual([
-      'Hamburg', null, null, null, null, 'DE', null, null, null, [], null, null, null, [], [], null, null, null, null
+      'Hamburg', null, null, null, null, 'DE', null, null, null, [], null, null, null, [], [], null, null, null, null, null
     ]);
+  });
+
+  it('persists the customer app guest WiFi contract without a password field', async () => {
+    const guestWifi = { available: true, ssid: 'Spielkind Guests', security: 'wpa2_wpa3' as const, hidden: false };
+    poolQuery.mockResolvedValue({ rowCount: 1, rows: [row({ guest_wifi: guestWifi })] });
+
+    await expect(createLocation({ title: 'Hamburg', guestWifi })).resolves.toMatchObject({ guestWifi });
+
+    const [, values] = poolQuery.mock.calls[0];
+    expect(values[18]).toEqual(guestWifi);
+    expect(values).not.toContain(expect.objectContaining({ password: expect.anything() }));
   });
 
   it('normalizes full location details and treats imageUrls as authoritative', async () => {

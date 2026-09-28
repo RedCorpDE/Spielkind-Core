@@ -60,6 +60,12 @@ export interface DashboardLocation {
   contactEmail: string | null;
   contactPhone: string | null;
   supportNote: string | null;
+  guestWifi: {
+    available: boolean;
+    ssid: string | null;
+    security: 'open' | 'wpa2' | 'wpa3' | 'wpa2_wpa3';
+    hidden: boolean;
+  } | null;
   regiondoLocationId: string | null;
   isSystemPlaceholder: boolean;
   providerDataStatus: 'known' | 'unknown' | 'none';
@@ -86,6 +92,12 @@ export interface CreateDashboardLocationInput {
   contactEmail?: string | null;
   contactPhone?: string | null;
   supportNote?: string | null;
+  guestWifi?: {
+    available: boolean;
+    ssid: string | null;
+    security: 'open' | 'wpa2' | 'wpa3' | 'wpa2_wpa3';
+    hidden: boolean;
+  } | null;
   regiondoLocationId?: string | null;
 }
 
@@ -108,6 +120,12 @@ export interface UpdateDashboardLocationInput {
   contactEmail?: string | null;
   contactPhone?: string | null;
   supportNote?: string | null;
+  guestWifi?: {
+    available: boolean;
+    ssid: string | null;
+    security: 'open' | 'wpa2' | 'wpa3' | 'wpa2_wpa3';
+    hidden: boolean;
+  } | null;
   regiondoLocationId?: string | null;
 }
 

@@ -12,6 +12,16 @@ export interface AdminProductResourceMapping {
   quantity: number;
 }
 
+export interface AdminProductOffering {
+  offeringId: string;
+  productId: string;
+  locationId: string;
+  locationTitle: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AdminProduct {
   productId: string;
   title: string;
@@ -26,6 +36,7 @@ export interface AdminProduct {
   regiondoCatalog: RegiondoProductCatalogSummary;
   rawJson: unknown;
   resources: AdminProductResourceMapping[];
+  locations: AdminProductOffering[];
 }
 
 interface ProductRow {
@@ -41,6 +52,7 @@ interface ProductRow {
   regiondo_product_id: string | null;
   regiondo_raw: unknown;
   resources: AdminProductResourceMapping[] | null;
+  locations: AdminProductOffering[] | null;
 }
 
 interface ProductVariantRow {
@@ -79,7 +91,8 @@ function mapProductRow(row: ProductRow, regiondoCatalog: RegiondoProductCatalogS
     regiondoProductId: row.regiondo_product_id,
     regiondoCatalog,
     rawJson: row.regiondo_raw,
-    resources: row.resources ?? []
+    resources: row.resources ?? [],
+    locations: row.locations ?? []
   };
 }
 
@@ -95,6 +108,25 @@ const productSelect = `SELECT
    p.vat_basis_points,
    p.regiondo_product_id,
    p.regiondo_raw,
+   COALESCE(
+     (
+       SELECT jsonb_agg(
+         jsonb_build_object(
+           'offeringId', lp.product_offering_id,
+           'productId', lp.product_id,
+           'locationId', lp.location_id,
+           'locationTitle', location.title,
+           'enabled', lp.enabled,
+           'createdAt', lp.created_at,
+           'updatedAt', lp.updated_at
+         ) ORDER BY location.title ASC
+       )
+       FROM location_products lp
+       INNER JOIN locations location ON location.location_id = lp.location_id
+       WHERE lp.product_id = p.product_id
+     ),
+     '[]'::jsonb
+   ) AS locations,
    COALESCE(
      jsonb_agg(
        DISTINCT jsonb_build_object(
@@ -203,6 +235,78 @@ export async function listAdminProducts(): Promise<AdminProduct[]> {
   return mapAdminProducts(result.rows);
 }
 
+export async function listLocationProducts(locationId: string): Promise<AdminProduct[]> {
+  const result = await pool.query<ProductRow>(
+    `${productSelect}
+     WHERE EXISTS (
+       SELECT 1 FROM location_products offering
+       WHERE offering.location_id = $1
+         AND offering.product_id = p.product_id
+         AND offering.enabled = true
+     )
+     GROUP BY p.product_id
+     ORDER BY p.title ASC`,
+    [locationId]
+  );
+
+  return mapAdminProducts(result.rows);
+}
+
+export async function addProductOffering(locationId: string, productId: string): Promise<AdminProduct | null> {
+  const result = await pool.query(
+    `INSERT INTO location_products (location_id, product_id, enabled)
+     SELECT location.location_id, product.product_id, true
+     FROM locations location
+     CROSS JOIN products product
+     WHERE location.location_id = $1 AND product.product_id = $2
+     ON CONFLICT (location_id, product_id)
+     DO UPDATE SET enabled = true, updated_at = now()
+     RETURNING product_id`,
+    [locationId, productId]
+  );
+
+  return result.rowCount ? getAdminProduct(productId) : null;
+}
+
+export async function removeProductOffering(
+  locationId: string,
+  productId: string
+): Promise<'deleted' | 'not_found' | 'in_use'> {
+  const result = await pool.query<{ exists: boolean; in_use: boolean; deleted: boolean }>(
+    `WITH target AS (
+       SELECT 1 FROM location_products WHERE location_id = $1 AND product_id = $2
+     ), blockers AS (
+       SELECT 1
+       FROM bookings booking
+       INNER JOIN booking_products booking_product ON booking_product.booking_id = booking.booking_id
+       WHERE booking.location_id = $1
+         AND booking_product.product_id = $2
+         AND booking.dt_to > now()
+         AND booking.status NOT IN ('cancelled', 'canceled', 'rejected', 'refunded')
+       UNION ALL
+       SELECT 1
+       FROM product_resources mapping
+       INNER JOIN resources resource ON resource.resource_id = mapping.resource_id
+       WHERE mapping.product_id = $2 AND resource.location_id = $1
+     ), deleted AS (
+       DELETE FROM location_products
+       WHERE location_id = $1 AND product_id = $2
+         AND EXISTS (SELECT 1 FROM target)
+         AND NOT EXISTS (SELECT 1 FROM blockers)
+       RETURNING 1
+     )
+     SELECT
+       EXISTS (SELECT 1 FROM target) AS exists,
+       EXISTS (SELECT 1 FROM blockers) AS in_use,
+       EXISTS (SELECT 1 FROM deleted) AS deleted`,
+    [locationId, productId]
+  );
+  const state = result.rows[0];
+  if (!state?.exists) return 'not_found';
+  if (state.in_use) return 'in_use';
+  return state.deleted ? 'deleted' : 'not_found';
+}
+
 export async function listRegiondoCatalogProducts(): Promise<AdminProduct[]> {
   const result = await pool.query<ProductRow>(
     `${productSelect}
@@ -277,14 +381,24 @@ export async function upsertProductResourceMapping(input: {
   productId: string;
   resourceId: string;
   quantity: number;
-}): Promise<void> {
-  await pool.query(
+}): Promise<boolean> {
+  const result = await pool.query(
     `INSERT INTO product_resources (product_id, resource_id, quantity)
-     VALUES ($1, $2, $3)
+     SELECT $1, resource.resource_id, $3
+     FROM resources resource
+     WHERE resource.resource_id = $2
+       AND EXISTS (
+         SELECT 1 FROM location_products offering
+         WHERE offering.product_id = $1
+           AND offering.location_id = resource.location_id
+           AND offering.enabled = true
+       )
      ON CONFLICT (product_id, resource_id)
-     DO UPDATE SET quantity = EXCLUDED.quantity`,
+     DO UPDATE SET quantity = EXCLUDED.quantity
+     RETURNING resource_id`,
     [input.productId, input.resourceId, input.quantity]
   );
+  return Boolean(result.rowCount);
 }
 
 export async function deleteProductResourceMapping(productId: string, resourceId: string): Promise<boolean> {

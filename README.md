@@ -162,6 +162,10 @@ Admin APIs:
 - `PATCH /api/admin/products/:productId`
 - `POST /api/admin/products/:productId/resources`
 - `DELETE /api/admin/products/:productId/resources/:resourceId`
+- `GET /api/admin/locations/:locationId/products`
+- `POST /api/admin/locations/:locationId/products/:productId`
+- `DELETE /api/admin/locations/:locationId/products/:productId`
+- `GET /api/admin/products/:productId/availability`
 - `GET /api/admin/regiondo/products`
 - `POST /api/admin/regiondo/sync-products`
 - `GET /api/admin/resources`

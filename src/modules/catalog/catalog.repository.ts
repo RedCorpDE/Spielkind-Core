@@ -42,7 +42,8 @@ export async function listCatalogProducts(locationId?: string) {
   const result = await pool.query<ProductRow>(
     `${selectProducts}
      WHERE ($1::uuid IS NULL OR EXISTS (
-       SELECT 1 FROM location_products lp WHERE lp.product_id = product.product_id AND lp.location_id = $1
+       SELECT 1 FROM location_products lp
+       WHERE lp.product_id = product.product_id AND lp.location_id = $1 AND lp.enabled = true
      ))
      ORDER BY product.title`,
     [locationId ?? null]
