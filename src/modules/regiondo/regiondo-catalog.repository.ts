@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import { withTransaction } from '../../db/transaction.js';
 import { RegiondoCatalogSyncError } from './regiondo-catalog.errors.js';
+import { upsertProviderReference } from '../integrations/provider-reference.repository.js';
 import type { RegiondoCatalogProductRecord } from './regiondo-catalog-normalizer.js';
 
 interface RegiondoCatalogCleanupCandidateRow {
@@ -91,32 +92,42 @@ async function upsertRegiondoCatalogProduct(
   client: PoolClient,
   product: RegiondoCatalogProductRecord
 ): Promise<void> {
-  await client.query(
-    `INSERT INTO products (title, description, image_url, base_amount, regiondo_product_id, regiondo_raw)
-     VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+  const productResult = await client.query<{ product_id: string }>(
+    `INSERT INTO products (title, description, image_url, base_amount, regiondo_product_id, regiondo_raw, booking_provider, price_minor)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'regiondo', $7)
      ON CONFLICT (regiondo_product_id)
      DO UPDATE SET title = EXCLUDED.title,
                    description = EXCLUDED.description,
                    image_url = EXCLUDED.image_url,
                    base_amount = EXCLUDED.base_amount,
+                   price_minor = EXCLUDED.price_minor,
+                   booking_provider = 'regiondo',
                    regiondo_raw = EXCLUDED.regiondo_raw,
-                   updated_at = now()`,
+                   updated_at = now()
+     RETURNING product_id`,
     [
       product.title,
       product.description,
       product.imageUrl,
       product.baseAmount,
       product.regiondoProductId,
-      JSON.stringify(product.raw)
+      JSON.stringify(product.raw),
+      Math.round(product.baseAmount * 100)
     ]
   );
+  const productId = productResult.rows[0].product_id;
+  await upsertProviderReference(client, {
+    provider: 'regiondo', entityType: 'product', entityId: productId,
+    externalId: product.regiondoProductId
+  });
 
   await client.query(`DELETE FROM product_options WHERE regiondo_product_id = $1`, [product.regiondoProductId]);
   await client.query(`DELETE FROM product_variants WHERE regiondo_product_id = $1`, [product.regiondoProductId]);
 
   for (const variation of product.variations) {
-    await client.query(
+    const variantResult = await client.query<{ variant_id: string }>(
       `INSERT INTO product_variants (
+         product_id,
          regiondo_variant_id,
          regiondo_product_id,
          title,
@@ -124,19 +135,24 @@ async function upsertRegiondoCatalogProduct(
          appointment_type,
          date_from,
          date_to,
-         regiondo_raw
+         regiondo_raw,
+         price_minor
        )
-       VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8::jsonb)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8::date, $9::jsonb, $10)
        ON CONFLICT (regiondo_variant_id)
-       DO UPDATE SET regiondo_product_id = EXCLUDED.regiondo_product_id,
+       DO UPDATE SET product_id = EXCLUDED.product_id,
+                     regiondo_product_id = EXCLUDED.regiondo_product_id,
                      title = EXCLUDED.title,
                      price = EXCLUDED.price,
+                     price_minor = EXCLUDED.price_minor,
                      appointment_type = EXCLUDED.appointment_type,
                      date_from = EXCLUDED.date_from,
                      date_to = EXCLUDED.date_to,
                      regiondo_raw = EXCLUDED.regiondo_raw,
-                     updated_at = now()`,
+                     updated_at = now()
+       RETURNING variant_id`,
       [
+        productId,
         variation.regiondoVariantId,
         variation.regiondoProductId,
         variation.title,
@@ -144,14 +160,21 @@ async function upsertRegiondoCatalogProduct(
         variation.appointmentType,
         variation.dateFrom,
         variation.dateTo,
-        JSON.stringify(variation.raw)
+        JSON.stringify(variation.raw),
+        Math.round(variation.price * 100)
       ]
     );
+    await upsertProviderReference(client, {
+      provider: 'regiondo', entityType: 'product_variant', entityId: variantResult.rows[0].variant_id,
+      externalId: variation.regiondoVariantId, externalParentId: variation.regiondoProductId
+    });
   }
 
   for (const option of product.options) {
     await client.query(
       `INSERT INTO product_options (
+         product_id,
+         variant_id,
          regiondo_option_id,
          regiondo_product_id,
          regiondo_variant_id,
@@ -159,16 +182,19 @@ async function upsertRegiondoCatalogProduct(
          values_json,
          regiondo_raw
        )
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
+       VALUES ($1, (SELECT variant_id FROM product_variants WHERE regiondo_variant_id = $2), $3, $4, $2, $5, $6::jsonb, $7::jsonb)
        ON CONFLICT (regiondo_product_id, regiondo_variant_id, regiondo_option_id)
-       DO UPDATE SET title = EXCLUDED.title,
+       DO UPDATE SET product_id = EXCLUDED.product_id,
+                     variant_id = EXCLUDED.variant_id,
+                     title = EXCLUDED.title,
                      values_json = EXCLUDED.values_json,
                      regiondo_raw = EXCLUDED.regiondo_raw,
                      updated_at = now()`,
       [
+        productId,
+        option.regiondoVariantId,
         option.regiondoOptionId,
         option.regiondoProductId,
-        option.regiondoVariantId,
         option.title,
         JSON.stringify(option.valuesJson ?? null),
         JSON.stringify(option.raw)

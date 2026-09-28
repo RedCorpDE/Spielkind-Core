@@ -29,6 +29,7 @@ Core folders:
 - `src/db`: pool, transactions, advisory locks, migrations
 - `src/http`: Fastify route wiring, auth helpers, error handling
 - `src/modules`: Regiondo, bookings, resources, reminders, products, clients, groups
+- `src/modules/availability`, `pricing`, `payments`, and `cancellations`: provider-independent native commerce boundaries
 - `src/jobs`: reusable job wrappers and job-run tracking
 - `src/scripts`: CLI entrypoints for jobs
 - `src/scheduler`: embedded scheduler
@@ -90,6 +91,12 @@ Important operational variables:
 - `REGIONDO_CATALOG_SYNC_CRON`
 - `REGIONDO_WEBHOOK_CRON`
 - `REMINDER_DISPATCH_CRON`
+- `STRIPE_SECRET_KEY`
+- `STRIPE_WEBHOOK_SECRET`
+- `STRIPE_CHECKOUT_SUCCESS_URL`
+- `STRIPE_CHECKOUT_CANCEL_URL`
+- `STRIPE_WEBHOOK_CRON`
+- `OUTBOX_DISPATCH_CRON`
 - `DASHBOARD_ALLOWED_ORIGIN`
 - `ADMIN_ACCESS_TOKEN_SECRET`
 - `CLIENT_ALLOWED_ORIGIN`
@@ -110,6 +117,7 @@ Spielkind customer App:
 - `GET|POST|PATCH|DELETE /api/client/groups/*` for member-visible group data and invites
 - `GET /api/client/access`, `/api/client/locations/*`, `/api/client/notifications`, `/api/client/payments`, and `/api/client/connected-accounts`
 - `POST /api/client/support` creates a linked task intake event
+- Provider-independent commerce routes: products, availability, quotes, reservation holds, native bookings, and cancellation quotes (see `docs/booking-architecture.md`)
 - All non-auth endpoints require a customer bearer token. Refresh tokens are rotated and stored only as hashes.
 
 Regiondo webhook:
@@ -194,6 +202,8 @@ Business logic lives in reusable job functions and can be invoked from:
 
 Current embedded jobs:
 - Regiondo webhook inbox processing
+- verified Stripe webhook inbox processing
+- transactional outbox dispatch
 - weekly Regiondo catalog sync for products, variations, and options
 - reminder dispatch
 - periodic Regiondo reconciliation
@@ -213,14 +223,11 @@ For later external cron jobs, keep using the same internal job handler instead o
 Do not rewrite applied migrations. Add new ones.
 
 Recent architecture-specific migration:
-- `db/migrations/026_core_jobs_reminders_contact_methods.sql`
+- `db/migrations/521_core_booking_domain.sql`
+- `db/migrations/522_stripe_payment_orchestration.sql`
+- `db/migrations/523_stripe_active_payment_guard.sql`
 
-That migration adds:
-- `client_contact_methods`
-- `reminder_rules`
-- `reminder_deliveries`
-- `sync_state`
-- `job_runs`
+These migrations add the provider-independent commerce domain, Stripe payment identifiers and completion state, durable inbox/outbox processing fields, and idempotency links for access credentials and notifications.
 
 ## Deployment
 

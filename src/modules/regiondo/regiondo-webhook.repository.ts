@@ -74,6 +74,20 @@ export async function enqueueRegiondoWebhookEvents(input: {
         ]
       );
 
+      await client.query(
+        `INSERT INTO integration_events (
+           provider, external_event_id, event_type, payload, headers, received_at, status, metadata
+         ) VALUES ('regiondo', $1, $2, $3::jsonb, $4::jsonb, now(), 'pending', $5::jsonb)
+         ON CONFLICT (provider, external_event_id) DO NOTHING`,
+        [
+          dedupeKey,
+          input.actionType ?? 'booking.updated',
+          JSON.stringify(input.payload),
+          JSON.stringify(headers),
+          JSON.stringify({ bookingKey, orderNumber: input.orderNumber, channel: input.channel })
+        ]
+      );
+
       insertedCount += result.rowCount ?? 0;
     }
 
@@ -123,12 +137,21 @@ export async function claimRegiondoWebhookEvents(limit: number): Promise<Regiond
 
 export async function markRegiondoWebhookEventProcessed(eventId: string): Promise<void> {
   await pool.query(
-    `UPDATE regiondo_webhook_events
+    `WITH updated AS (
+       UPDATE regiondo_webhook_events
      SET status = 'processed',
          processed_at = now(),
          locked_at = null,
          last_error = null
-     WHERE event_id = $1`,
+       WHERE event_id = $1
+       RETURNING dedupe_key, booking_key
+     )
+     UPDATE integration_events integration
+     SET status = 'processed', processed_at = now(), locked_at = null, last_error = null,
+         related_booking_id = booking.booking_id, updated_at = now()
+     FROM updated
+     LEFT JOIN bookings booking ON booking.regiondo_booking_id = updated.booking_key
+     WHERE integration.provider = 'regiondo' AND integration.external_event_id = updated.dedupe_key`,
     [eventId]
   );
 }
@@ -142,6 +165,13 @@ export async function markRegiondoWebhookEventRetry(eventId: string, errorMessag
          last_error = $3
      WHERE event_id = $1
      RETURNING booking_key`,
+    [eventId, nextAttemptAt.toISOString(), errorMessage]
+  );
+  await pool.query(
+    `UPDATE integration_events integration SET status = 'retrying', available_at = $2, locked_at = null,
+       last_error = $3, attempt_count = integration.attempt_count + 1, updated_at = now()
+     FROM regiondo_webhook_events event
+     WHERE event.event_id = $1 AND integration.provider = 'regiondo' AND integration.external_event_id = event.dedupe_key`,
     [eventId, nextAttemptAt.toISOString(), errorMessage]
   );
   try {
@@ -166,6 +196,13 @@ export async function markRegiondoWebhookEventDeadLetter(eventId: string, errorM
          last_error = $2
      WHERE event_id = $1
      RETURNING booking_key`,
+    [eventId, errorMessage]
+  );
+  await pool.query(
+    `UPDATE integration_events integration SET status = 'dead_letter', processed_at = now(), locked_at = null,
+       last_error = $2, updated_at = now()
+     FROM regiondo_webhook_events event
+     WHERE event.event_id = $1 AND integration.provider = 'regiondo' AND integration.external_event_id = event.dedupe_key`,
     [eventId, errorMessage]
   );
   try {

@@ -13,6 +13,8 @@ import { RegiondoWebhookValidationError } from '../sync/sync-service.js';
 import { MissingProductResourceMappingError, OverbookingError } from '../modules/resources/consumption.service.js';
 import { recordAdminErrorEvent, type AdminErrorSeverity } from '../errors/admin-error-events.repository.js';
 import type { AdminFastifyRequest } from './admin.js';
+import { DomainError, ProviderUnavailableError } from '../modules/bookings/booking.errors.js';
+import { RefundAmountExceededError } from '../modules/payments/refund.service.js';
 
 export class HttpError extends Error {
   constructor(
@@ -79,6 +81,8 @@ function getStatusCode(error: Error): number {
   if (error instanceof DashboardValidationError || error instanceof RegiondoSyncValidationError || error instanceof RegiondoWebhookValidationError) return 400;
   if (error instanceof RegiondoPurchaseRecoveryRequiredError) return 502;
   if (error instanceof RegiondoApiError) return getRegiondoStatusCode(error);
+  if (error instanceof ProviderUnavailableError) return 503;
+  if (error instanceof DomainError || error instanceof RefundAmountExceededError) return 409;
   return 500;
 }
 
@@ -150,6 +154,17 @@ export function registerErrorHandler() {
       request.log.warn({ err: error }, 'Handled HTTP error');
       reply.status(error.statusCode).send({
         ok: false,
+        error: error.message,
+        ...(request.url.startsWith('/api/client') ? { message: error.message } : {})
+      });
+      return;
+    }
+
+    if (error instanceof DomainError || error instanceof RefundAmountExceededError) {
+      const code = error instanceof DomainError ? error.code : 'REFUND_AMOUNT_EXCEEDED';
+      reply.status(error instanceof ProviderUnavailableError ? 503 : 409).send({
+        ok: false,
+        code,
         error: error.message,
         ...(request.url.startsWith('/api/client') ? { message: error.message } : {})
       });

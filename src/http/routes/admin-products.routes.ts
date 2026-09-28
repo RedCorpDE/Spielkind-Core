@@ -26,7 +26,9 @@ const updateProductSchema = z
     title: z.string().min(1).optional(),
     description: z.string().nullable().optional(),
     imageUrl: z.string().nullable().optional(),
-    baseAmount: z.number().nonnegative().optional()
+    baseAmount: z.number().nonnegative().optional(),
+    bookingProvider: z.enum(['core', 'regiondo']).optional(),
+    vatBasisPoints: z.number().int().min(0).max(10_000).optional()
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: 'At least one product field must be provided.'
@@ -78,6 +80,10 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
     }
 
     const { productId } = request.params as { productId: string };
+    const currentProduct = await getAdminProduct(productId);
+    if (parsed.data.bookingProvider === 'regiondo' && !currentProduct?.regiondoProductId) {
+      throw new ValidationHttpError('A product must have a Regiondo reference before it can use the Regiondo provider.');
+    }
     const product = await updateAdminProduct(productId, parsed.data);
     if (!product) {
       throw new HttpError(404, 'Product not found.');

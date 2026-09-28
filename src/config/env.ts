@@ -59,6 +59,10 @@ function applyTestDefaults(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   normalized.REGIONDO_SECRET_KEY ??= 'test-secret-key';
   normalized.REGIONDO_PRODUCT_SUPPLIER_ID ??= 'supplier-1';
   normalized.REGIONDO_CURRENCY ??= 'EUR';
+  normalized.STRIPE_SECRET_KEY ??= 'sk_test_core';
+  normalized.STRIPE_WEBHOOK_SECRET ??= 'whsec_test_core';
+  normalized.STRIPE_CHECKOUT_SUCCESS_URL ??= 'https://example.test/bookings/{BOOKING_ID}/success';
+  normalized.STRIPE_CHECKOUT_CANCEL_URL ??= 'https://example.test/bookings/{BOOKING_ID}/cancel';
   normalized.REMINDER_PROVIDER_WEBHOOK_URL ??= 'https://provider.example/webhook';
   normalized.REMINDER_PROVIDER_SECRET ??= 'test-reminder-secret';
   normalized.MESSENGER_BASE_URL ??= 'https://messenger.example';
@@ -119,6 +123,20 @@ const schema = z
     REGIONDO_BOOKING_SYNC_CRON: z.string().default('*/5 * * * *'),
     REGIONDO_BOOKING_SYNC_INITIAL_LOOKBACK_DAYS: z.coerce.number().int().min(1).max(365).default(30),
     REGIONDO_BOOKING_SYNC_OVERLAP_DAYS: z.coerce.number().int().min(0).max(30).default(1),
+
+    STRIPE_SECRET_KEY: z.string().min(1).optional(),
+    STRIPE_WEBHOOK_SECRET: z.string().min(1).optional(),
+    STRIPE_API_BASE_URL: z.string().url().default('https://api.stripe.com'),
+    STRIPE_CHECKOUT_SUCCESS_URL: z.string().url().optional(),
+    STRIPE_CHECKOUT_CANCEL_URL: z.string().url().optional(),
+    STRIPE_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(10_000),
+    STRIPE_WEBHOOK_TOLERANCE_SECONDS: z.coerce.number().int().min(0).max(3600).default(300),
+    STRIPE_WEBHOOK_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(25).default(8),
+    STRIPE_WEBHOOK_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(25),
+    STRIPE_WEBHOOK_CRON: z.string().default('*/1 * * * *'),
+    OUTBOX_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(100),
+    OUTBOX_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(25).default(10),
+    OUTBOX_DISPATCH_CRON: z.string().default('*/1 * * * *'),
     WEBHOOK_BOOKINGS_PATH: z.string().default('/webhooks/regiondo/bookings'),
     WEBHOOK_AUTH_HEADER_NAME: z.string().optional(),
     WEBHOOK_AUTH_HEADER_VALUE: z.string().optional(),

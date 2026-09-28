@@ -83,7 +83,7 @@ export async function rebuildConsumptionsForBooking(bookingId: string): Promise<
         [bookingId]
       );
 
-      if (booking.status === 'canceled' || booking.status === 'rejected') {
+      if (booking.status === 'canceled' || booking.status === 'cancelled' || booking.status === 'rejected' || booking.status === 'expired') {
         return {
           bookingId,
           released: true,

@@ -3,6 +3,7 @@ import { DashboardValidationError } from '../../dashboard/repository/core.js';
 import { regiondoClient } from '../regiondo/regiondo.client.js';
 import { normalizeRegiondoBookingImport } from './booking-normalizer.js';
 import { importNormalizedRegiondoBooking } from './booking.repository.js';
+import { bookingProviderRegistry } from './booking-provider.js';
 
 export async function cancelBookingLocally(bookingId: string): Promise<boolean> {
   const result = await pool.query(
@@ -121,7 +122,11 @@ export async function cancelBookingInRegiondo(
     throw new DashboardValidationError('No Regiondo ticket reference IDs were found for this booking.');
   }
 
-  await regiondoClient.cancelTickets(referenceIds);
+  const provider = bookingProviderRegistry.get('regiondo');
+  if (!provider.cancelBooking) {
+    throw new DashboardValidationError('The Regiondo provider does not support cancellation.');
+  }
+  await provider.cancelBooking({ externalBookingId: booking.regiondo_booking_id, referenceIds });
 
   try {
     const snapshot = await regiondoClient.hydrateBookingOrder({

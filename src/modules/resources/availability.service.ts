@@ -14,6 +14,7 @@ export interface AvailabilityItem {
   required_quantity: number;
   capacity_available: number;
   capacity_reserved: number;
+  capacity_held: number;
   capacity_remaining: number;
   is_available: boolean;
 }
@@ -52,6 +53,7 @@ export async function getAvailability(query: AvailabilityQuery): Promise<Availab
          FROM product_resources pr
          INNER JOIN resources r ON r.resource_id = pr.resource_id
          WHERE pr.product_id = $1
+           AND r.operational_status = 'active'
            AND ($2::uuid IS NULL OR r.location_id = $2::uuid)
          ORDER BY r.title ASC`,
         [query.product_id, query.location_id ?? null]
@@ -64,6 +66,7 @@ export async function getAvailability(query: AvailabilityQuery): Promise<Availab
            1 AS mapping_quantity
          FROM resources r
          WHERE ($1::uuid IS NULL OR r.location_id = $1::uuid)
+           AND r.operational_status = 'active'
          ORDER BY r.title ASC`,
         [query.location_id ?? null]
       );
@@ -96,17 +99,53 @@ export async function getAvailability(query: AvailabilityQuery): Promise<Availab
     reservedResult.rows.map((row) => [row.resource_id, Number(row.capacity_reserved)])
   );
 
+  const heldResult = await pool.query<{ resource_id: string; capacity_held: string | number }>(
+    `SELECT allocation.resource_id, COALESCE(SUM(allocation.capacity_used), 0) AS capacity_held
+     FROM reservation_hold_allocations allocation
+     INNER JOIN reservation_holds hold ON hold.reservation_hold_id = allocation.reservation_hold_id
+     WHERE allocation.resource_id = ANY($3::uuid[])
+       AND hold.status = 'active' AND hold.expires_at > now()
+       AND tstzrange(hold.starts_at, hold.ends_at, '[)') && tstzrange($1::timestamptz, $2::timestamptz, '[)')
+     GROUP BY allocation.resource_id`,
+    [query.dt_from, query.dt_to, resourceIds]
+  );
+  const heldMap = new Map(heldResult.rows.map((row) => [row.resource_id, Number(row.capacity_held)]));
+
   return requirementResult.rows.map((row) => {
+    const capacityReserved = reservedMap.get(row.resource_id) ?? 0;
+    const capacityHeld = heldMap.get(row.resource_id) ?? 0;
     const snapshot = calculateAvailabilitySnapshot({
       requiredQuantity: Number(row.mapping_quantity) * query.guest_count,
       capacityAvailable: Number(row.capacity_available),
-      capacityReserved: reservedMap.get(row.resource_id) ?? 0
+      capacityReserved: capacityReserved + capacityHeld
     });
 
     return {
       resource_id: row.resource_id,
       resource_title: row.resource_title,
-      ...snapshot
+      ...snapshot,
+      capacity_reserved: capacityReserved,
+      capacity_held: capacityHeld
     };
   });
+}
+
+export async function getAvailabilitySummary(query: AvailabilityQuery) {
+  const resources = await getAvailability(query);
+  const remaining = resources.length ? Math.min(...resources.map((item) => item.capacity_remaining)) : 0;
+  const maxBookableQuantity = resources.length
+    ? Math.min(...resources.map((item) => {
+        const capacityPerBookingUnit = item.required_quantity / query.guest_count;
+        return capacityPerBookingUnit > 0 ? Math.floor(item.capacity_remaining / capacityPerBookingUnit) : 0;
+      }))
+    : 0;
+  return {
+    available: resources.length > 0 && resources.every((item) => item.is_available),
+    capacity: resources.length ? Math.min(...resources.map((item) => item.capacity_available)) : 0,
+    reserved: resources.reduce((total, item) => total + item.capacity_reserved, 0),
+    held: resources.reduce((total, item) => total + item.capacity_held, 0),
+    remaining,
+    maxBookableQuantity: Math.max(0, maxBookableQuantity),
+    resources
+  };
 }

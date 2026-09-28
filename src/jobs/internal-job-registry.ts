@@ -9,6 +9,9 @@ import { runRegiondoCatalogSyncJob } from '../modules/regiondo/regiondo-catalog-
 import { runProcessRegiondoWebhookInboxJob } from '../modules/regiondo/regiondo-webhook-inbox.job.js';
 import { JOB_TYPES, type JobResult, type JobType } from './job-types.js';
 import { runPruneAdminErrorEventsJob } from '../errors/prune-admin-error-events.job.js';
+import { runExpireReservationHoldsJob } from '../modules/availability/expire-reservation-holds.job.js';
+import { runProcessStripeWebhooksJob } from '../modules/integrations/payment-providers/stripe/stripe-webhook.job.js';
+import { runDispatchOutboxEventsJob } from '../modules/events/outbox-dispatcher.job.js';
 
 export const INTERNAL_JOB_ROUTE_PREFIX = '/internal/jobs';
 
@@ -35,6 +38,30 @@ function defineInternalJob<TBodySchema extends z.ZodTypeAny>(
 }
 
 export const internalJobDefinitions = [
+  defineInternalJob({
+    routePath: 'process-stripe-webhooks',
+    jobType: JOB_TYPES.PROCESS_STRIPE_WEBHOOKS,
+    description: 'Processes verified Stripe webhook events and applies payment state changes.',
+    embeddedCron: appConfig.STRIPE_WEBHOOK_CRON,
+    bodySchema: limitBodySchema,
+    run: async (body) => runProcessStripeWebhooksJob({ limit: body.limit })
+  }),
+  defineInternalJob({
+    routePath: 'dispatch-outbox-events',
+    jobType: JOB_TYPES.DISPATCH_OUTBOX_EVENTS,
+    description: 'Dispatches transactional domain events to access and notification handlers.',
+    embeddedCron: appConfig.OUTBOX_DISPATCH_CRON,
+    bodySchema: limitBodySchema,
+    run: async (body) => runDispatchOutboxEventsJob({ limit: body.limit })
+  }),
+  defineInternalJob({
+    routePath: 'expire-reservation-holds',
+    jobType: JOB_TYPES.EXPIRE_RESERVATION_HOLDS,
+    description: 'Expires checkout capacity holds whose lease has elapsed.',
+    embeddedCron: '*/1 * * * *',
+    bodySchema: limitBodySchema,
+    run: async (body) => runExpireReservationHoldsJob({ limit: body.limit })
+  }),
   defineInternalJob({
     routePath: 'process-regiondo-webhooks',
     jobType: JOB_TYPES.PROCESS_REGIONDO_WEBHOOKS,

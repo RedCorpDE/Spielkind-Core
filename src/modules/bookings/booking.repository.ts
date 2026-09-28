@@ -8,6 +8,8 @@ import {
 } from '../../sync/mappers.js';
 import type { NormalizedRegiondoBookingImport } from './booking-normalizer.js';
 import { resolveBookingChangeRequests } from './booking-change-request.repository.js';
+import { upsertProviderReference } from '../integrations/provider-reference.repository.js';
+import { netFromGross } from '../commerce/money.js';
 
 async function upsertClient(client: PoolClient, input: NormalizedRegiondoBookingImport['client']): Promise<string> {
   if (input.regiondoCustomerId) {
@@ -75,8 +77,12 @@ async function resolveLocation(
        RETURNING location_id`,
       [input.location.title?.trim() || 'Imported Regiondo Location', input.location.regiondoLocationId, JSON.stringify(input.location.raw)]
     );
-
-    return result.rows[0].location_id;
+    const locationId = result.rows[0].location_id;
+    await upsertProviderReference(client, {
+      provider: 'regiondo', entityType: 'location', entityId: locationId,
+      externalId: input.location.regiondoLocationId
+    });
+    return locationId;
   }
 
   if (input.regiondoProductIds.length > 0) {
@@ -127,8 +133,8 @@ async function ensureProductStub(
   input: NormalizedRegiondoBookingImport['items'][number]
 ): Promise<string> {
   const result = await client.query<{ product_id: string }>(
-    `INSERT INTO products (title, base_amount, regiondo_product_id, regiondo_raw)
-     VALUES ($1, $2, $3, $4::jsonb)
+    `INSERT INTO products (title, base_amount, regiondo_product_id, regiondo_raw, booking_provider)
+     VALUES ($1, $2, $3, $4::jsonb, 'regiondo')
      ON CONFLICT (regiondo_product_id)
      DO UPDATE SET title = EXCLUDED.title,
                    base_amount = CASE
@@ -141,7 +147,12 @@ async function ensureProductStub(
     [input.title, input.unitPrice, input.regiondoProductId, JSON.stringify(input.raw)]
   );
 
-  return result.rows[0].product_id;
+  const productId = result.rows[0].product_id;
+  await upsertProviderReference(client, {
+    provider: 'regiondo', entityType: 'product', entityId: productId,
+    externalId: input.regiondoProductId
+  });
+  return productId;
 }
 
 interface ExistingBookingOverrides {
@@ -192,12 +203,13 @@ export async function upsertNormalizedRegiondoBooking(
        dt_from,
        dt_to,
        source,
+       booking_provider,
        regiondo_booking_id,
        regiondo_order_number,
        regiondo_snapshot_generated_at,
        regiondo_raw
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, 'regiondo', $9, $10, $11::timestamptz, $12::jsonb)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, 'regiondo', 'regiondo', $9, $10, $11::timestamptz, $12::jsonb)
      ON CONFLICT (regiondo_booking_id)
      DO UPDATE SET client_id = CASE WHEN $13::boolean THEN bookings.client_id ELSE EXCLUDED.client_id END,
                    location_id = CASE WHEN $14::boolean THEN bookings.location_id ELSE EXCLUDED.location_id END,
@@ -235,8 +247,17 @@ export async function upsertNormalizedRegiondoBooking(
 
   const bookingId = bookingResult.rows[0].booking_id;
 
+  await upsertProviderReference(client, {
+    provider: 'regiondo',
+    entityType: 'booking',
+    entityId: bookingId,
+    externalId: input.bookingKey,
+    externalParentId: input.orderNumber
+  });
+
   if (!localOverrideFields.has('products')) {
     await client.query('DELETE FROM booking_products WHERE booking_id = $1', [bookingId]);
+    await client.query('DELETE FROM booking_items WHERE booking_id = $1', [bookingId]);
 
     for (const item of input.items) {
       const productId = await ensureProductStub(client, item);
@@ -247,6 +268,28 @@ export async function upsertNormalizedRegiondoBooking(
          DO UPDATE SET quantity = EXCLUDED.quantity, unit_price = EXCLUDED.unit_price`,
         [bookingId, productId, item.quantity, item.unitPrice]
       );
+      const productResult = await client.query<{ vat_basis_points: number; currency: string }>(
+        `SELECT vat_basis_points, currency FROM products WHERE product_id = $1`,
+        [productId]
+      );
+      const vatBasisPoints = Number(productResult.rows[0]?.vat_basis_points ?? 1900);
+      const currency = productResult.rows[0]?.currency ?? 'EUR';
+      const unitGross = Math.round(item.unitPrice * 100);
+      const subtotalGross = unitGross * item.quantity;
+      const subtotalNet = netFromGross(subtotalGross, vatBasisPoints);
+      await client.query(
+        `INSERT INTO booking_items (
+           booking_id, product_id, quantity, product_name_snapshot,
+           unit_price_net, unit_price_gross, vat_basis_points,
+           subtotal_net, tax_amount, subtotal_gross, currency, metadata
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)`,
+        [
+          bookingId, productId, item.quantity, item.title,
+          netFromGross(unitGross, vatBasisPoints), unitGross, vatBasisPoints,
+          subtotalNet, subtotalGross - subtotalNet, subtotalGross, currency,
+          JSON.stringify({ provider: 'regiondo', externalProductId: item.regiondoProductId })
+        ]
+      );
     }
   }
 
@@ -255,9 +298,11 @@ export async function upsertNormalizedRegiondoBooking(
 
     for (const payment of input.payments) {
       await client.query(
-        `INSERT INTO payments (booking_id, amount, type, provider_ref)
-         VALUES ($1, $2, $3, $4)`,
-        [bookingId, payment.amount, payment.type, payment.providerRef]
+        `INSERT INTO payments (
+           booking_id, amount, type, provider_ref, provider, status,
+           amount_minor, currency, provider_payment_id
+         ) VALUES ($1, $2, $3, $4, 'regiondo', 'succeeded', $5, 'EUR', $4)`,
+        [bookingId, payment.amount, payment.type, payment.providerRef, Math.round(payment.amount * 100)]
       );
     }
   }

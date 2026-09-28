@@ -144,19 +144,24 @@ interface BookingRow extends LocationRow {
   participants: ClientBooking['participants'] | null;
   resources: ClientBooking['resources'] | null;
   access_available_from: string | null;
+  payment_status: string | null;
 }
 
 function bookingStatus(row: BookingRow): ClientBooking['status'] {
-  if (row.status === 'cancelled') return 'cancelled';
+  if (row.status === 'cancelled' || row.status === 'canceled' || row.status === 'rejected') return 'cancelled';
   if (row.status === 'completed' || row.status === 'no_show') return 'completed';
   if (row.status === 'checked_in') return 'active';
-  if (row.status === 'draft' || row.status === 'pending') return 'pending';
+  if (['draft', 'held', 'pending', 'payment_pending', 'processing', 'payment_failed'].includes(row.status)) return 'pending';
   const now = Date.now();
   if (new Date(row.dt_from).getTime() <= now && new Date(row.dt_to).getTime() > now) return 'active';
   return 'confirmed';
 }
 
 function paymentStatus(row: BookingRow): ClientBooking['paymentStatus'] {
+  if (row.payment_status === 'refunded') return 'refunded';
+  if (row.payment_status === 'failed' || row.payment_status === 'cancelled' || row.payment_status === 'disputed') return 'failed';
+  if (row.payment_status === 'succeeded' || row.payment_status === 'partially_refunded') return 'paid';
+  if (row.payment_status === 'processing') return 'pending';
   const total = Number(row.total_amount);
   const paid = Number(row.paid_amount);
   if (total > 0 && paid >= total) return 'paid';
@@ -211,7 +216,8 @@ const bookingSelect = `SELECT
   product_record.product,
   participant_record.participants,
   resource_record.resources,
-  access_record.access_available_from
+  access_record.access_available_from,
+  payment_record.payment_status
 FROM bookings booking
 INNER JOIN clients owner ON owner.client_id = booking.client_id
 INNER JOIN locations location ON location.location_id = booking.location_id
@@ -258,7 +264,17 @@ LEFT JOIN LATERAL (
   WHERE credential.booking_id = booking.booking_id
     AND (credential.client_id = $1 OR credential_participant.client_id = $1)
     AND credential.status IN ('pending', 'active')
-) access_record ON TRUE`;
+) access_record ON TRUE
+LEFT JOIN LATERAL (
+  SELECT payment.status AS payment_status
+  FROM payments payment
+  WHERE payment.booking_id = booking.booking_id
+  ORDER BY CASE payment.status
+    WHEN 'refunded' THEN 1 WHEN 'partially_refunded' THEN 2 WHEN 'succeeded' THEN 3
+    WHEN 'processing' THEN 4 WHEN 'requires_payment' THEN 5 ELSE 6 END,
+    payment.created_at DESC
+  LIMIT 1
+) payment_record ON TRUE`;
 
 export async function listClientBookings(clientId: string): Promise<ClientBooking[]> {
   const result = await pool.query<BookingRow>(
@@ -456,8 +472,11 @@ export async function updateClientPreferences(clientId: string, input: {
 }
 
 export async function listClientPayments(clientId: string) {
-  const result = await pool.query<{ payment_id: string; booking_id: string; amount: string | number }>(
-    `SELECT payment.payment_id, payment.booking_id, payment.amount
+  const result = await pool.query<{
+    payment_id: string; booking_id: string; amount: string | number; amount_minor: string | number;
+    currency: string; status: string;
+  }>(
+    `SELECT payment.payment_id, payment.booking_id, payment.amount, payment.amount_minor, payment.currency, payment.status
      FROM payments payment
      INNER JOIN bookings booking ON booking.booking_id = payment.booking_id
      WHERE booking.client_id = $1
@@ -471,9 +490,12 @@ export async function listClientPayments(clientId: string) {
   return result.rows.map((row) => ({
     id: row.payment_id,
     bookingId: row.booking_id,
-    amount: Math.round(Number(row.amount) * 100),
-    currency: 'EUR',
-    status: 'paid' as const,
+    amount: Number(row.amount_minor ?? Math.round(Number(row.amount) * 100)),
+    currency: row.currency,
+    status: row.status === 'refunded' ? 'refunded' as const
+      : row.status === 'failed' || row.status === 'cancelled' || row.status === 'disputed' ? 'failed' as const
+      : row.status === 'succeeded' || row.status === 'partially_refunded' ? 'paid' as const
+      : 'pending' as const,
     invoiceUrl: null
   }));
 }

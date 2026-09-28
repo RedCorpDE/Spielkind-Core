@@ -22,6 +22,8 @@ import { registerClientAuthRoutes } from './http/routes/client-auth.routes.js';
 import { registerClientApiRoutes } from './http/routes/client-api.routes.js';
 import { registerClientFeedbackRoutes } from './http/routes/client-feedback.routes.js';
 import { registerAdminFeedbackRoutes } from './http/routes/admin-feedback.routes.js';
+import { registerClientCommerceRoutes } from './http/routes/client-commerce.routes.js';
+import { registerStripeWebhookRoutes } from './http/routes/stripe-webhook.routes.js';
 
 export function createApp() {
   const app = Fastify({
@@ -36,6 +38,8 @@ export function createApp() {
           'headers.x-core-signature',
           'headers.x-external-task-secret',
           'config.REGIONDO_SECRET_KEY',
+          'config.STRIPE_SECRET_KEY',
+          'config.STRIPE_WEBHOOK_SECRET',
           'config.REMINDER_PROVIDER_SECRET',
           'config.CRON_SECRET'
         ],
@@ -74,10 +78,12 @@ export function createApp() {
   void registerClientAuthRoutes(app);
   void registerClientApiRoutes(app);
   void registerClientFeedbackRoutes(app);
+  void registerClientCommerceRoutes(app);
   void registerAdminAuthRoutes(app);
   void registerAdminProductRoutes(app);
   void registerExternalTaskIntakeRoutes(app);
   void registerRegiondoWebhookRoutes(app);
+  void registerStripeWebhookRoutes(app);
   void registerInternalJobRoutes(app);
   void registerAdminBookingRoutes(app);
   void registerAdminClientRoutes(app);

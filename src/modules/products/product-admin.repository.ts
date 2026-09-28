@@ -18,6 +18,10 @@ export interface AdminProduct {
   description: string | null;
   imageUrl: string | null;
   baseAmount: number;
+  bookingProvider: 'core' | 'regiondo';
+  priceMinor: number;
+  currency: string;
+  vatBasisPoints: number;
   regiondoProductId: string | null;
   regiondoCatalog: RegiondoProductCatalogSummary;
   rawJson: unknown;
@@ -30,6 +34,10 @@ interface ProductRow {
   description: string | null;
   image_url: string | null;
   base_amount: string | number;
+  booking_provider: 'core' | 'regiondo';
+  price_minor: string | number;
+  currency: string;
+  vat_basis_points: number;
   regiondo_product_id: string | null;
   regiondo_raw: unknown;
   resources: AdminProductResourceMapping[] | null;
@@ -64,6 +72,10 @@ function mapProductRow(row: ProductRow, regiondoCatalog: RegiondoProductCatalogS
     description: row.description,
     imageUrl: row.image_url,
     baseAmount: Number(row.base_amount),
+    bookingProvider: row.booking_provider,
+    priceMinor: Number(row.price_minor),
+    currency: row.currency,
+    vatBasisPoints: row.vat_basis_points,
     regiondoProductId: row.regiondo_product_id,
     regiondoCatalog,
     rawJson: row.regiondo_raw,
@@ -77,6 +89,10 @@ const productSelect = `SELECT
    p.description,
    p.image_url,
    p.base_amount,
+   p.booking_provider,
+   p.price_minor,
+   p.currency,
+   p.vat_basis_points,
    p.regiondo_product_id,
    p.regiondo_raw,
    COALESCE(
@@ -222,6 +238,8 @@ export async function updateAdminProduct(
     description?: string | null;
     imageUrl?: string | null;
     baseAmount?: number;
+    bookingProvider?: 'core' | 'regiondo';
+    vatBasisPoints?: number;
   }
 ): Promise<AdminProduct | null> {
   const existing = await getAdminProduct(productId);
@@ -235,13 +253,19 @@ export async function updateAdminProduct(
        title = $1,
        description = $2,
        image_url = $3,
-       base_amount = $4
-     WHERE product_id = $5`,
+       base_amount = $4,
+       price_minor = $5,
+       booking_provider = $6,
+       vat_basis_points = $7
+     WHERE product_id = $8`,
     [
       input.title?.trim() || existing.title,
       input.description === undefined ? existing.description : input.description,
       input.imageUrl === undefined ? existing.imageUrl : input.imageUrl,
       input.baseAmount ?? existing.baseAmount,
+      input.baseAmount === undefined ? existing.priceMinor : Math.round(input.baseAmount * 100),
+      input.bookingProvider ?? existing.bookingProvider,
+      input.vatBasisPoints ?? existing.vatBasisPoints,
       productId
     ]
   );
