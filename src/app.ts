@@ -20,6 +20,8 @@ import { registerInternalJobRoutes } from './http/routes/internal-jobs.routes.js
 import { registerRegiondoWebhookRoutes } from './http/routes/regiondo-webhook.routes.js';
 import { registerClientAuthRoutes } from './http/routes/client-auth.routes.js';
 import { registerClientApiRoutes } from './http/routes/client-api.routes.js';
+import { registerClientFeedbackRoutes } from './http/routes/client-feedback.routes.js';
+import { registerAdminFeedbackRoutes } from './http/routes/admin-feedback.routes.js';
 
 export function createApp() {
   const app = Fastify({
@@ -71,6 +73,7 @@ export function createApp() {
   void registerHealthRoutes(app);
   void registerClientAuthRoutes(app);
   void registerClientApiRoutes(app);
+  void registerClientFeedbackRoutes(app);
   void registerAdminAuthRoutes(app);
   void registerAdminProductRoutes(app);
   void registerExternalTaskIntakeRoutes(app);
@@ -78,6 +81,7 @@ export function createApp() {
   void registerInternalJobRoutes(app);
   void registerAdminBookingRoutes(app);
   void registerAdminClientRoutes(app);
+  void registerAdminFeedbackRoutes(app);
   void registerAdminClientGroupRoutes(app);
   void registerAdminReminderRoutes(app);
   void registerAdminRegiondoRoutes(app);

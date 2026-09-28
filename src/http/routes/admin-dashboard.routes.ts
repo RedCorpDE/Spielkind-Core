@@ -192,21 +192,65 @@ const reorderTaskColumnsSchema = z.object({
   orderedColumnIds: z.array(z.string().uuid()).min(1)
 });
 
-const createLocationSchema = z.object({
-  title: z.string().trim().min(1),
-  description: z.string().default(''),
-  imageUrl: z.string().url().nullable().optional(),
-  regiondoLocationId: z.string().nullable().optional()
-});
-
-const updateLocationSchema = z.object({
+const optionalLocationTextSchema = z.string().trim().nullable().optional();
+const blankLocationStringToNull = (value: unknown) =>
+  typeof value === 'string' && !value.trim() ? null : value;
+const optionalLocationUrlSchema = z.preprocess(
+  blankLocationStringToNull,
+  z.string().trim().url().nullable().optional()
+);
+const optionalLocationEmailSchema = z.preprocess(
+  blankLocationStringToNull,
+  z.string().trim().email().nullable().optional()
+);
+const locationImageArrayItemSchema = z.preprocess(
+  (value) => typeof value === 'string' ? value.trim() : value,
+  z.union([z.literal(''), z.string().url()])
+);
+const locationDetailsShape = {
   title: z.string().trim().min(1).optional(),
-  description: z.string().nullable().optional(),
-  imageUrl: z.string().url().nullable().optional(),
+  description: optionalLocationTextSchema,
+  address: optionalLocationTextSchema,
+  city: optionalLocationTextSchema,
+  postalCode: optionalLocationTextSchema,
+  countryCode: z.preprocess(blankLocationStringToNull, z.string().trim().length(2).nullable().optional()),
+  latitude: z.number().min(-90).max(90).nullable().optional(),
+  longitude: z.number().min(-180).max(180).nullable().optional(),
+  imageUrl: optionalLocationUrlSchema,
+  imageUrls: z.array(locationImageArrayItemSchema).optional(),
+  directions: optionalLocationTextSchema,
+  parking: optionalLocationTextSchema,
+  publicTransport: optionalLocationTextSchema,
+  facilities: z.array(z.string()).optional(),
+  houseRules: z.array(z.string()).optional(),
+  contactEmail: optionalLocationEmailSchema,
+  contactPhone: optionalLocationTextSchema,
+  supportNote: optionalLocationTextSchema,
   regiondoLocationId: z.string().nullable().optional()
-}).refine((value) => Object.keys(value).length > 0, {
-  message: 'At least one field must be provided.'
-});
+};
+const validateLocationCoordinates = (
+  value: { latitude?: number | null; longitude?: number | null },
+  context: z.RefinementCtx
+) => {
+  if ((value.latitude !== undefined) !== (value.longitude !== undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Latitude and longitude must be provided together.' });
+  }
+  if ((value.latitude === null) !== (value.longitude === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Latitude and longitude must be cleared together.' });
+  }
+};
+
+const createLocationSchema = z.object({
+  ...locationDetailsShape,
+  title: z.string().trim().min(1),
+  description: optionalLocationTextSchema.default('')
+}).superRefine(validateLocationCoordinates);
+
+const updateLocationSchema = z.object(locationDetailsShape)
+  .superRefine(validateLocationCoordinates)
+  .refine((value) => Object.keys(value).length > 0, {
+    message: 'At least one field must be provided.'
+  });
 
 const mapLocationToRegiondoSchema = z
   .object({
@@ -700,9 +744,7 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
         ? await regiondoClient.validateLocation(Number(parsed.data.regiondoLocationId))
         : null;
       const location = await updateLocation(locationId, {
-        title: parsed.data.title,
-        description: parsed.data.description ?? undefined,
-        imageUrl: parsed.data.imageUrl ?? undefined,
+        ...parsed.data,
         regiondoLocationId: validatedRegiondoLocation
           ? `${validatedRegiondoLocation.id}`
           : parsed.data.regiondoLocationId

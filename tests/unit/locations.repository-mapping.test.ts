@@ -8,7 +8,7 @@ vi.mock('../../src/db/client.js', () => ({
   pool: { connect, query: poolQuery }
 }));
 
-const { listLocations, listRegiondoLocationCandidates, mapLocationToRegiondo } = await import('../../src/dashboard/repository/locations.js');
+const { createLocation, listLocations, listRegiondoLocationCandidates, mapLocationToRegiondo, updateLocation } = await import('../../src/dashboard/repository/locations.js');
 
 const targetId = '11111111-1111-1111-1111-111111111111';
 const sourceId = '22222222-2222-2222-2222-222222222222';
@@ -16,7 +16,22 @@ const row = (overrides: Record<string, unknown>) => ({
   location_id: targetId,
   title: 'Built-in Berlin',
   description: null,
+  address: null,
+  city: null,
+  postal_code: null,
+  country_code: 'DE',
+  latitude: null,
+  longitude: null,
   image_url: null,
+  image_urls: [],
+  directions: null,
+  parking: null,
+  public_transport: null,
+  facilities: [],
+  house_rules: [],
+  contact_email: null,
+  contact_phone: null,
+  support_note: null,
   regiondo_location_id: null,
   created_at: '2026-08-11T10:00:00.000Z',
   updated_at: '2026-08-11T10:00:00.000Z',
@@ -65,6 +80,64 @@ describe('Regiondo location mapping', () => {
     poolQuery.mockResolvedValue({ rowCount: 1, rows: [row({})] });
     const locations = await listLocations();
     expect(locations[0].providerDataStatus).toBe('none');
+  });
+
+  it('creates title-only locations with safe defaults', async () => {
+    poolQuery.mockResolvedValue({ rowCount: 1, rows: [row({ title: 'Hamburg' })] });
+
+    await expect(createLocation({ title: '  Hamburg  ' })).resolves.toMatchObject({
+      title: 'Hamburg',
+      countryCode: 'DE',
+      imageUrls: [],
+      facilities: [],
+      houseRules: []
+    });
+
+    const [, values] = poolQuery.mock.calls[0];
+    expect(values).toEqual([
+      'Hamburg', null, null, null, null, 'DE', null, null, null, [], null, null, null, [], [], null, null, null, null
+    ]);
+  });
+
+  it('normalizes full location details and treats imageUrls as authoritative', async () => {
+    const stored = row({
+      address: 'Kleine Burg 15', city: 'Braunschweig', postal_code: '38100',
+      latitude: '52.2647', longitude: '10.5236',
+      image_url: 'https://example.com/one.jpg', image_urls: ['https://example.com/one.jpg', 'https://example.com/two.jpg'],
+      facilities: ['Wi-Fi'], house_rules: ['No smoking'], contact_email: 'hello@example.com'
+    });
+    poolQuery.mockResolvedValue({ rowCount: 1, rows: [stored] });
+
+    const created = await createLocation({
+      title: 'Braunschweig', address: ' Kleine Burg 15 ', city: ' Braunschweig ', postalCode: ' 38100 ',
+      latitude: 52.2647, longitude: 10.5236, imageUrl: 'https://legacy.example/image.jpg',
+      imageUrls: [' https://example.com/one.jpg ', 'https://example.com/one.jpg', 'https://example.com/two.jpg'],
+      facilities: [' Wi-Fi ', '', 'Wi-Fi'], houseRules: [' No smoking '], contactEmail: ' hello@example.com '
+    });
+
+    expect(created).toMatchObject({ latitude: 52.2647, longitude: 10.5236, imageUrls: stored.image_urls });
+    expect(poolQuery.mock.calls[0][1][8]).toBe('https://example.com/one.jpg');
+    expect(poolQuery.mock.calls[0][1][9]).toEqual(['https://example.com/one.jpg', 'https://example.com/two.jpg']);
+    expect(poolQuery.mock.calls[0][1][13]).toEqual(['Wi-Fi']);
+  });
+
+  it('preserves omitted update fields while clearing explicit nullable and array values', async () => {
+    const existing = row({
+      description: 'Keep me', address: 'Old street', city: 'Berlin', image_url: 'https://example.com/old.jpg',
+      image_urls: ['https://example.com/old.jpg'], facilities: ['Wi-Fi']
+    });
+    poolQuery
+      .mockResolvedValueOnce({ rowCount: 1, rows: [existing] })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [row({ ...existing, address: null, image_url: null, image_urls: [], facilities: [] })] });
+
+    const updated = await updateLocation(targetId, { address: null, imageUrls: [], facilities: [] });
+
+    expect(updated).toMatchObject({ description: 'Keep me', city: 'Berlin', address: null, imageUrls: [], facilities: [] });
+    const [, values] = poolQuery.mock.calls[1];
+    expect(values[1]).toBe('Keep me');
+    expect(values[2]).toBeNull();
+    expect(values[9]).toEqual([]);
+    expect(values[13]).toEqual([]);
   });
 
   it('turns product city and region IDs into typed Regiondo mapping candidates', async () => {

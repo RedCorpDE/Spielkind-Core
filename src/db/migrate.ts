@@ -1,8 +1,8 @@
 import { readdir, readFile } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pool } from './client.js';
+import { compatibleMigrationChecksums, migrationChecksum } from './migration-checksum.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,11 +24,8 @@ interface MigrationFile {
   absolutePath: string;
   relativePath: string;
   checksum: string;
+  compatibleChecksums: ReadonlySet<string>;
   sql: string;
-}
-
-function hashSql(sql: string): string {
-  return createHash('sha256').update(sql).digest('hex');
 }
 
 async function runMigrations(): Promise<void> {
@@ -59,7 +56,8 @@ async function runMigrations(): Promise<void> {
       migrations.push({
         absolutePath,
         relativePath: path.relative(baseDir, absolutePath).replace(/\\/g, '/'),
-        checksum: hashSql(sql),
+        checksum: migrationChecksum(sql),
+        compatibleChecksums: compatibleMigrationChecksums(sql),
         sql
       });
     }
@@ -144,7 +142,7 @@ async function runMigrations(): Promise<void> {
       const existingChecksum = trackedMigrations.get(migration.relativePath);
 
       if (existingChecksum) {
-        if (existingChecksum !== migration.checksum) {
+        if (!migration.compatibleChecksums.has(existingChecksum)) {
           throw new Error(
             `Tracked migration checksum mismatch for ${migration.relativePath}. ` +
               'Create a new migration file instead of modifying an applied one.'

@@ -17,6 +17,9 @@ const protectedReadPaths = [
   '/api/admin/tasks/00000000-0000-0000-0000-000000000001/booking-context',
   '/api/admin/tasks/00000000-0000-0000-0000-000000000001/comments',
   '/api/admin/bookings/00000000-0000-0000-0000-000000000001/tasks',
+  '/api/admin/clients',
+  '/api/admin/clients/00000000-0000-0000-0000-000000000001',
+  '/api/admin/clients/00000000-0000-0000-0000-000000000001/bookings',
   '/api/admin/error-events',
   '/api/admin/deleted-tasks'
 ] as const;

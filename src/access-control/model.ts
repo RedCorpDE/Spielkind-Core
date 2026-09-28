@@ -18,6 +18,7 @@ export type PermissionResource =
   | 'roles'
   | 'customers'
   | 'client_groups'
+  | 'feedback'
   | 'resources'
   | 'errors'
   | 'regiondo';
@@ -168,6 +169,12 @@ export const permissionDefinitions: PermissionDefinition[] = [
     actions: ['view', 'manage']
   },
   {
+    resource: 'feedback',
+    label: 'Client Feedback',
+    description: 'View verified client feedback and aggregate experience ratings.',
+    actions: ['view']
+  },
+  {
     resource: 'errors',
     label: 'Error Log',
     description: 'View dashboard and operational errors and their sanitized diagnostics.',
@@ -214,6 +221,7 @@ const defaultRoleGrants: Record<string, PermissionGrant[]> = {
     ...grant('messages', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all' }),
     ...grant('customers', { view: 'all', update: 'all' }),
     ...grant('client_groups', { view: 'all' }),
+    ...grant('feedback', { view: 'all' }),
     ...grant('resources', { view: 'all' }),
     ...grant('regiondo', { view: 'all' })
   ],
@@ -232,6 +240,7 @@ const defaultRoleGrants: Record<string, PermissionGrant[]> = {
     ...grant('roles', { view: 'all', manage: 'all' }),
     ...grant('customers', { view: 'all', update: 'all', export: 'all' }),
     ...grant('client_groups', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all' }),
+    ...grant('feedback', { view: 'all' }),
     ...grant('resources', { view: 'all', manage: 'all' }),
     ...grant('regiondo', { view: 'all', manage: 'all' }),
     ...grant('errors', { view: 'all', manage: 'all' })
@@ -244,13 +253,15 @@ const defaultRoleGrants: Record<string, PermissionGrant[]> = {
     ...grant('products', { view: 'all' }),
     ...grant('messages', { view: 'all', create: 'all', update: 'all' }),
     ...grant('locations', { view: 'all' }),
-    ...grant('customers', { view: 'all', update: 'all' })
+    ...grant('customers', { view: 'all', update: 'all' }),
+    ...grant('feedback', { view: 'all' })
   ],
   finance_coordinator: [
     ...grant('dashboard', { view: 'all' }),
     ...grant('bookings', { view: 'all', export: 'all' }),
     ...grant('products', { view: 'all' }),
     ...grant('customers', { view: 'all', export: 'all' }),
+    ...grant('feedback', { view: 'all' }),
     ...grant('resources', { view: 'all' })
   ],
   people_operations: [

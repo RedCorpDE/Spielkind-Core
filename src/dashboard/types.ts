@@ -43,8 +43,23 @@ export interface UpdateDashboardAdminUserInput {
 export interface DashboardLocation {
   id: string;
   title: string;
-  description: string;
+  description: string | null;
+  address: string | null;
+  city: string | null;
+  postalCode: string | null;
+  countryCode: string;
+  latitude: number | null;
+  longitude: number | null;
   imageUrl: string | null;
+  imageUrls: string[];
+  directions: string | null;
+  parking: string | null;
+  publicTransport: string | null;
+  facilities: string[];
+  houseRules: string[];
+  contactEmail: string | null;
+  contactPhone: string | null;
+  supportNote: string | null;
   regiondoLocationId: string | null;
   isSystemPlaceholder: boolean;
   providerDataStatus: 'known' | 'unknown' | 'none';
@@ -54,15 +69,45 @@ export interface DashboardLocation {
 
 export interface CreateDashboardLocationInput {
   title: string;
-  description?: string;
+  description?: string | null;
+  address?: string | null;
+  city?: string | null;
+  postalCode?: string | null;
+  countryCode?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
   imageUrl?: string | null;
+  imageUrls?: string[];
+  directions?: string | null;
+  parking?: string | null;
+  publicTransport?: string | null;
+  facilities?: string[];
+  houseRules?: string[];
+  contactEmail?: string | null;
+  contactPhone?: string | null;
+  supportNote?: string | null;
   regiondoLocationId?: string | null;
 }
 
 export interface UpdateDashboardLocationInput {
   title?: string;
-  description?: string;
+  description?: string | null;
+  address?: string | null;
+  city?: string | null;
+  postalCode?: string | null;
+  countryCode?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
   imageUrl?: string | null;
+  imageUrls?: string[];
+  directions?: string | null;
+  parking?: string | null;
+  publicTransport?: string | null;
+  facilities?: string[];
+  houseRules?: string[];
+  contactEmail?: string | null;
+  contactPhone?: string | null;
+  supportNote?: string | null;
   regiondoLocationId?: string | null;
 }
 
@@ -552,6 +597,8 @@ export interface ListDashboardTasksFilters {
 }
 
 export interface ListDashboardBookingsFilters {
+  clientId?: string;
+  clientBookingCategory?: 'all' | 'upcoming' | 'past' | 'cancelled';
   status?: DashboardBookingStatus;
   externalStatus?: DashboardBookingExternalStatus;
   externalSyncStatus?: 'synced' | 'pending_update' | 'syncing' | 'conflict' | 'error';

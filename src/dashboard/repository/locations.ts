@@ -11,7 +11,22 @@ interface LocationRow {
   location_id: string;
   title: string;
   description: string | null;
+  address: string | null;
+  city: string | null;
+  postal_code: string | null;
+  country_code: string | null;
+  latitude: string | number | null;
+  longitude: string | number | null;
   image_url: string | null;
+  image_urls: string[] | null;
+  directions: string | null;
+  parking: string | null;
+  public_transport: string | null;
+  facilities: string[] | null;
+  house_rules: string[] | null;
+  contact_email: string | null;
+  contact_phone: string | null;
+  support_note: string | null;
   regiondo_location_id: string | null;
   created_at: Date | string;
   updated_at: Date | string;
@@ -30,6 +45,11 @@ const SYSTEM_LOCATION_PROVIDER_IDS = new Set([
   SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID
 ]);
 
+const LOCATION_COLUMNS = `location_id, title, description, address, city, postal_code, country_code,
+  latitude, longitude, image_url, image_urls, directions, parking, public_transport,
+  facilities, house_rules, contact_email, contact_phone, support_note,
+  regiondo_location_id, created_at, updated_at`;
+
 function mapLocationRow(row: LocationRow): DashboardLocation {
   const isNoLocationPlaceholder = row.regiondo_location_id === SHARED_NO_LOCATION_PLACEHOLDER_LOCATION_ID;
   const isUnknownRegiondoPlaceholder = row.regiondo_location_id === SHARED_REGIONDO_PLACEHOLDER_LOCATION_ID;
@@ -38,8 +58,23 @@ function mapLocationRow(row: LocationRow): DashboardLocation {
   return {
     id: row.location_id,
     title: isNoLocationPlaceholder ? 'No location' : isUnknownRegiondoPlaceholder ? 'Unknown Regiondo location' : row.title,
-    description: row.description ?? '',
-    imageUrl: row.image_url,
+    description: row.description ?? null,
+    address: row.address ?? null,
+    city: row.city ?? null,
+    postalCode: row.postal_code ?? null,
+    countryCode: row.country_code ?? 'DE',
+    latitude: row.latitude == null ? null : Number(row.latitude),
+    longitude: row.longitude == null ? null : Number(row.longitude),
+    imageUrl: row.image_urls?.[0] ?? row.image_url,
+    imageUrls: row.image_urls?.length ? row.image_urls : row.image_url ? [row.image_url] : [],
+    directions: row.directions ?? null,
+    parking: row.parking ?? null,
+    publicTransport: row.public_transport ?? null,
+    facilities: row.facilities ?? [],
+    houseRules: row.house_rules ?? [],
+    contactEmail: row.contact_email ?? null,
+    contactPhone: row.contact_phone ?? null,
+    supportNote: row.support_note ?? null,
     regiondoLocationId: isSystemPlaceholder ? null : row.regiondo_location_id,
     isSystemPlaceholder,
     providerDataStatus: isUnknownRegiondoPlaceholder ? 'unknown' : row.regiondo_location_id && !isNoLocationPlaceholder ? 'known' : 'none',
@@ -56,7 +91,7 @@ export async function mapLocationToRegiondo(
   try {
     await client.query('BEGIN');
     const targetResult = await client.query<LocationRow>(
-      `SELECT location_id, title, description, image_url, regiondo_location_id, created_at, updated_at
+      `SELECT ${LOCATION_COLUMNS}
        FROM locations WHERE location_id = $1 FOR UPDATE`,
       [targetLocationId]
     );
@@ -65,7 +100,7 @@ export async function mapLocationToRegiondo(
     assertNotSystemProviderId(target.regiondo_location_id);
 
     const sourceResult = await client.query<LocationRow & { regiondo_raw: unknown }>(
-      `SELECT location_id, title, description, image_url, regiondo_location_id, regiondo_raw, created_at, updated_at
+      `SELECT ${LOCATION_COLUMNS}, regiondo_raw
        FROM locations WHERE location_id = $1 FOR UPDATE`,
       [input.sourceLocationId]
     );
@@ -122,7 +157,7 @@ export async function mapLocationToRegiondo(
       `UPDATE locations
        SET title = $2, regiondo_location_id = $3, regiondo_raw = $4::jsonb, updated_at = now()
        WHERE location_id = $1
-       RETURNING location_id, title, description, image_url, regiondo_location_id, created_at, updated_at`,
+       RETURNING ${LOCATION_COLUMNS}`,
       [target.location_id, nextTitle, source.regiondo_location_id, JSON.stringify(source.regiondo_raw ?? {})]
     );
     await client.query(`DELETE FROM locations WHERE location_id = $1`, [source.location_id]);
@@ -143,6 +178,17 @@ function normalizeOptionalText(value: string | null | undefined): string | null 
 
   const normalized = value.trim();
   return normalized ? normalized : null;
+}
+
+function normalizeStringArray(values: string[] | null | undefined): string[] {
+  if (!values) return [];
+  const seen = new Set<string>();
+  return values.flatMap((value) => {
+    const normalized = value.trim();
+    if (!normalized || seen.has(normalized)) return [];
+    seen.add(normalized);
+    return [normalized];
+  });
 }
 
 function assertNotSystemProviderId(regiondoLocationId: string | null | undefined): void {
@@ -171,14 +217,7 @@ function throwLocationMutationError(error: unknown): never {
 
 export async function listLocations(): Promise<DashboardLocation[]> {
   const result = await pool.query<LocationRow>(
-    `SELECT
-       location_id,
-       title,
-       description,
-       image_url,
-       regiondo_location_id,
-       created_at,
-       updated_at
+    `SELECT ${LOCATION_COLUMNS}
      FROM locations
      WHERE regiondo_location_id IS NULL
        OR regiondo_location_id <> ALL($1::text[])
@@ -255,14 +294,7 @@ export async function listRegiondoLocationCandidates(): Promise<RegiondoLocation
 
 export async function getLocation(locationId: string): Promise<DashboardLocation> {
   const result = await pool.query<LocationRow>(
-    `SELECT
-       location_id,
-       title,
-       description,
-       image_url,
-       regiondo_location_id,
-       created_at,
-       updated_at
+    `SELECT ${LOCATION_COLUMNS}
      FROM locations
      WHERE location_id = $1
      LIMIT 1`,
@@ -278,6 +310,7 @@ export async function getLocation(locationId: string): Promise<DashboardLocation
 
 export async function createLocation(input: CreateDashboardLocationInput): Promise<DashboardLocation> {
   const regiondoLocationId = normalizeOptionalText(input.regiondoLocationId);
+  const imageUrls = normalizeStringArray(input.imageUrls ?? (input.imageUrl ? [input.imageUrl] : []));
   assertNotSystemProviderId(regiondoLocationId);
 
   try {
@@ -285,22 +318,45 @@ export async function createLocation(input: CreateDashboardLocationInput): Promi
       `INSERT INTO locations (
          title,
          description,
+         address,
+         city,
+         postal_code,
+         country_code,
+         latitude,
+         longitude,
          image_url,
+         image_urls,
+         directions,
+         parking,
+         public_transport,
+         facilities,
+         house_rules,
+         contact_email,
+         contact_phone,
+         support_note,
          regiondo_location_id
        )
-       VALUES ($1, $2, $3, $4)
-       RETURNING
-         location_id,
-         title,
-         description,
-         image_url,
-         regiondo_location_id,
-         created_at,
-         updated_at`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+       RETURNING ${LOCATION_COLUMNS}`,
       [
         input.title.trim(),
         normalizeOptionalText(input.description),
-        normalizeOptionalText(input.imageUrl),
+        normalizeOptionalText(input.address),
+        normalizeOptionalText(input.city),
+        normalizeOptionalText(input.postalCode),
+        normalizeOptionalText(input.countryCode)?.toUpperCase() ?? 'DE',
+        input.latitude ?? null,
+        input.longitude ?? null,
+        imageUrls[0] ?? null,
+        imageUrls,
+        normalizeOptionalText(input.directions),
+        normalizeOptionalText(input.parking),
+        normalizeOptionalText(input.publicTransport),
+        normalizeStringArray(input.facilities),
+        normalizeStringArray(input.houseRules),
+        normalizeOptionalText(input.contactEmail),
+        normalizeOptionalText(input.contactPhone),
+        normalizeOptionalText(input.supportNote),
         regiondoLocationId
       ]
     );
@@ -322,7 +378,29 @@ export async function updateLocation(
 
   const nextTitle = typeof input.title === 'string' ? input.title.trim() : existing.title;
   const nextDescription = input.description === undefined ? existing.description : normalizeOptionalText(input.description);
-  const nextImageUrl = input.imageUrl === undefined ? existing.imageUrl : normalizeOptionalText(input.imageUrl);
+  const nextAddress = input.address === undefined ? existing.address : normalizeOptionalText(input.address);
+  const nextCity = input.city === undefined ? existing.city : normalizeOptionalText(input.city);
+  const nextPostalCode = input.postalCode === undefined ? existing.postalCode : normalizeOptionalText(input.postalCode);
+  const nextCountryCode = input.countryCode === undefined
+    ? existing.countryCode
+    : normalizeOptionalText(input.countryCode)?.toUpperCase() ?? 'DE';
+  const nextLatitude = input.latitude === undefined ? existing.latitude : input.latitude;
+  const nextLongitude = input.longitude === undefined ? existing.longitude : input.longitude;
+  const nextImageUrls = input.imageUrls !== undefined
+    ? normalizeStringArray(input.imageUrls)
+    : existing.imageUrls.length
+      ? existing.imageUrls
+      : input.imageUrl !== undefined
+        ? normalizeStringArray(input.imageUrl ? [input.imageUrl] : [])
+        : [];
+  const nextDirections = input.directions === undefined ? existing.directions : normalizeOptionalText(input.directions);
+  const nextParking = input.parking === undefined ? existing.parking : normalizeOptionalText(input.parking);
+  const nextPublicTransport = input.publicTransport === undefined ? existing.publicTransport : normalizeOptionalText(input.publicTransport);
+  const nextFacilities = input.facilities === undefined ? existing.facilities : normalizeStringArray(input.facilities);
+  const nextHouseRules = input.houseRules === undefined ? existing.houseRules : normalizeStringArray(input.houseRules);
+  const nextContactEmail = input.contactEmail === undefined ? existing.contactEmail : normalizeOptionalText(input.contactEmail);
+  const nextContactPhone = input.contactPhone === undefined ? existing.contactPhone : normalizeOptionalText(input.contactPhone);
+  const nextSupportNote = input.supportNote === undefined ? existing.supportNote : normalizeOptionalText(input.supportNote);
   const nextRegiondoLocationId =
     input.regiondoLocationId === undefined ? existing.regiondoLocationId : normalizeOptionalText(input.regiondoLocationId);
   assertNotSystemProviderId(nextRegiondoLocationId);
@@ -333,18 +411,32 @@ export async function updateLocation(
        SET
          title = $1,
          description = $2,
-         image_url = $3,
-         regiondo_location_id = $4
-       WHERE location_id = $5
-       RETURNING
-         location_id,
-         title,
-         description,
-         image_url,
-         regiondo_location_id,
-         created_at,
-         updated_at`,
-      [nextTitle, nextDescription, nextImageUrl, nextRegiondoLocationId, locationId]
+         address = $3,
+         city = $4,
+         postal_code = $5,
+         country_code = $6,
+         latitude = $7,
+         longitude = $8,
+         image_url = $9,
+         image_urls = $10,
+         directions = $11,
+         parking = $12,
+         public_transport = $13,
+         facilities = $14,
+         house_rules = $15,
+         contact_email = $16,
+         contact_phone = $17,
+         support_note = $18,
+         regiondo_location_id = $19,
+         updated_at = now()
+       WHERE location_id = $20
+       RETURNING ${LOCATION_COLUMNS}`,
+      [
+        nextTitle, nextDescription, nextAddress, nextCity, nextPostalCode, nextCountryCode,
+        nextLatitude, nextLongitude, nextImageUrls[0] ?? null, nextImageUrls, nextDirections,
+        nextParking, nextPublicTransport, nextFacilities, nextHouseRules, nextContactEmail,
+        nextContactPhone, nextSupportNote, nextRegiondoLocationId, locationId
+      ]
     );
 
     if (!result.rowCount) {

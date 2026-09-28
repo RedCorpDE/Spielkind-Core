@@ -1514,6 +1514,19 @@ function buildListBookingsQuery(filters: ListDashboardBookingsFilters = {}) {
   const { sort, direction, column } = getBookingSortConfig(resolved);
   const pageSize = resolved.limit ?? DEFAULT_BOOKINGS_PAGE_SIZE;
 
+  if (resolved.clientId) {
+    values.push(resolved.clientId);
+    where.push(`b.client_id = $${values.length}::uuid`);
+  }
+
+  if (resolved.clientBookingCategory === 'upcoming') {
+    where.push(`b.dt_from >= NOW() AND LOWER(b.status) NOT IN ('cancelled', 'canceled')`);
+  } else if (resolved.clientBookingCategory === 'past') {
+    where.push(`b.dt_from < NOW() AND LOWER(b.status) NOT IN ('cancelled', 'canceled')`);
+  } else if (resolved.clientBookingCategory === 'cancelled') {
+    where.push(`LOWER(b.status) IN ('cancelled', 'canceled')`);
+  }
+
   if (resolved.externalStatus) {
     values.push(mapDashboardExternalStatusToDb(resolved.externalStatus));
     where.push(`b.status = $${values.length}`);
