@@ -96,12 +96,12 @@ async function upsertRegiondoCatalogProduct(
     `INSERT INTO products (title, description, image_url, base_amount, regiondo_product_id, regiondo_raw, booking_provider, price_minor)
      VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'regiondo', $7)
      ON CONFLICT (regiondo_product_id)
-     DO UPDATE SET title = EXCLUDED.title,
-                   description = EXCLUDED.description,
-                   image_url = EXCLUDED.image_url,
-                   base_amount = EXCLUDED.base_amount,
-                   price_minor = EXCLUDED.price_minor,
-                   booking_provider = 'regiondo',
+     DO UPDATE SET title = CASE WHEN products.booking_provider = 'regiondo' THEN EXCLUDED.title ELSE products.title END,
+                   description = CASE WHEN products.booking_provider = 'regiondo' THEN EXCLUDED.description ELSE products.description END,
+                   image_url = CASE WHEN products.booking_provider = 'regiondo' THEN EXCLUDED.image_url ELSE products.image_url END,
+                   base_amount = CASE WHEN products.booking_provider = 'regiondo' THEN EXCLUDED.base_amount ELSE products.base_amount END,
+                   price_minor = CASE WHEN products.booking_provider = 'regiondo' THEN EXCLUDED.price_minor ELSE products.price_minor END,
+                   booking_provider = products.booking_provider,
                    regiondo_raw = EXCLUDED.regiondo_raw,
                    updated_at = now()
      RETURNING product_id`,

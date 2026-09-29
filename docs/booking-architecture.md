@@ -72,6 +72,34 @@ If payment completes after the hold lease elapsed, Core rechecks all live consum
 
 `products.base_amount`, `product_variants.price`, `bookings.total_amount`, and `payments.amount` remain as decimal compatibility fields. New financial logic uses the corresponding `*_minor` columns.
 
+## Catalog ownership and authoring
+
+The catalog hierarchy remains `Product -> Product Variant -> Product Option`. Core-native authoring uses the existing `product_variants` and `product_options` tables; no parallel catalog or shared-option abstraction was introduced. A Variant owns its Options, and all prices/deltas are written in integer minor units with the Product currency.
+
+Catalog ownership is explicit:
+
+- a Product with `booking_provider = 'core'` exposes only Variant and Option rows whose legacy `regiondo_*` identifiers are null, and those rows are editable through the admin CRUD routes;
+- a Product with `booking_provider = 'regiondo'` exposes provider-identified rows to active customer pricing/catalog queries, and Core mutation routes reject local edits;
+- Dashboard permissions use `products:view` for display, `products:manage` for Variant/Option mutations and migration preparation, and `regiondo:manage` for provider sync.
+
+A Core Product may have one implicit/default Variant. It is represented by a Core-owned Variant with `title IS NULL`; a partial unique index permits at most one per Product. The customer Product API remains backwards-compatible and returns that Variant with `title: null`, allowing clients to suppress a meaningless selector when it is the only Variant.
+
+Variant deletion remains hard-delete only when foreign keys permit it. `booking_items.product_variant_id` and reservation-hold references use `ON DELETE RESTRICT`, so referenced Variants produce a clear conflict rather than cascading historical data. Option deletion is safe because `booking_item_options.product_option_id` uses `ON DELETE SET NULL`; option name, selected value, price delta, and currency remain in immutable snapshot columns.
+
+Admin catalog routes are:
+
+- `POST|PATCH|DELETE /api/admin/products/:productId/variants[/:variantId]`
+- `POST|PATCH|DELETE /api/admin/products/:productId/variants/:variantId/options[/:optionId]`
+- `POST /api/admin/products/:productId/core-migration/prepare`
+
+Every nested mutation verifies Product/Variant/Option parent ownership. Calling these mutation routes for active Regiondo catalog data returns `PROVIDER_MANAGED_CATALOG`.
+
+### Regiondo to Core preparation
+
+Preparation is a prepare-once, idempotent snapshot. In one transaction it copies active Regiondo Variants and Options to rows on the same canonical Product with null `regiondo_*` identifiers. The Product remains `booking_provider = 'regiondo'`. Active customer catalog and pricing queries filter by the Product provider, so prepared Core rows cannot affect Regiondo commerce. Regiondo sync deletes/replaces only provider-identified rows and therefore cannot overwrite the prepared snapshot. Variant provider-reference metadata records the prepared Core Variant UUID; Option lineage is retained in the copied row's migration metadata because the current provider-reference enum does not include `product_option`.
+
+Switching Regiondo to Core is a separate Product update. Core validates that a prepared native Variant catalog exists, catalog currency/pricing is valid, and enabled Location and Resource mappings exist. Regiondo sync preserves an already-switched Product's Core-owned title, description, image, price, and provider while continuing to refresh the inactive provider shadow rows.
+
 ## Availability and reservation holds
 
 `getAvailability` is the authoritative capacity query. It combines overlapping `consumptions` with active, non-expired `reservation_hold_allocations`, and excludes resources marked `out_of_service`. The summary reports consumed/reserved capacity separately from temporary held capacity.
@@ -113,4 +141,7 @@ Mutating booking, hold, and checkout creation calls require `x-idempotency-key`.
 - WordPress storefront work; WordPress should consume these Core APIs and must not become canonical storage.
 - Promotion usage redemption/locking and multi-item/multi-tax discount allocation beyond the current single-product quote endpoint.
 - Database-backed concurrency tests against a disposable PostgreSQL instance and production migration rehearsal.
+- Product publish/draft lifecycle; no existing active/published column was available, so incomplete Product visibility remains a focused follow-up.
+- Location-specific Variant restrictions and shared Product Options. Current Variants remain available at every enabled Product Offering and Options remain Variant-owned.
+- Refreshing an already-prepared migration snapshot. The implemented policy intentionally keeps the first Core copy independent for review.
 

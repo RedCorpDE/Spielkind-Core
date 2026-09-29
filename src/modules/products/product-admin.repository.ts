@@ -1,4 +1,5 @@
 import { pool } from '../../db/pool.js';
+import { withTransaction } from '../../db/transaction.js';
 import type {
   RegiondoCatalogOptionRowSummaryInput,
   RegiondoCatalogVariationRowSummaryInput,
@@ -22,6 +23,33 @@ export interface AdminProductOffering {
   updatedAt: string;
 }
 
+export interface AdminProductOption {
+  optionId: string;
+  title: string;
+  values: string[];
+  priceDeltaMinor: number;
+  currency: string;
+  providerManaged: boolean;
+}
+
+export interface AdminProductVariant {
+  variantId: string;
+  title: string | null;
+  priceMinor: number;
+  currency: string;
+  isDefault: boolean;
+  providerManaged: boolean;
+  options: AdminProductOption[];
+}
+
+export interface AdminProductCoreMigration {
+  status: 'not_prepared' | 'prepared';
+  variantCount: number;
+  optionCount: number;
+  preparedAt: string | null;
+  policy: 'prepare_once';
+}
+
 export interface AdminProduct {
   productId: string;
   title: string;
@@ -37,6 +65,37 @@ export interface AdminProduct {
   rawJson: unknown;
   resources: AdminProductResourceMapping[];
   locations: AdminProductOffering[];
+  variants: AdminProductVariant[];
+  coreMigration: AdminProductCoreMigration | null;
+}
+
+export interface CreateAdminProductInput {
+  title: string;
+  description?: string | null;
+  imageUrl?: string | null;
+  baseAmount: number;
+  currency?: string;
+  vatBasisPoints: number;
+}
+
+export interface AdminProductVariantInput {
+  title: string | null;
+  priceMinor: number;
+  currency: string;
+}
+
+export interface AdminProductOptionInput {
+  title: string;
+  values: string[];
+  priceDeltaMinor: number;
+  currency: string;
+}
+
+export type CatalogMutationFailure = 'not_found' | 'provider_managed' | 'in_use' | 'default_exists';
+
+export interface CoreProviderSwitchValidation {
+  valid: boolean;
+  issues: string[];
 }
 
 interface ProductRow {
@@ -51,8 +110,10 @@ interface ProductRow {
   vat_basis_points: number;
   regiondo_product_id: string | null;
   regiondo_raw: unknown;
+  core_migration_prepared_at: string | null;
   resources: AdminProductResourceMapping[] | null;
   locations: AdminProductOffering[] | null;
+  variants: AdminProductVariant[] | null;
 }
 
 interface ProductVariantRow {
@@ -78,6 +139,8 @@ const EMPTY_REGIONDO_PRODUCT_CATALOG_SUMMARY: RegiondoProductCatalogSummary = {
 };
 
 function mapProductRow(row: ProductRow, regiondoCatalog: RegiondoProductCatalogSummary): AdminProduct {
+  const variants = row.variants ?? [];
+  const preparedVariants = variants.filter((variant) => !variant.providerManaged);
   return {
     productId: row.product_id,
     title: row.title,
@@ -92,7 +155,17 @@ function mapProductRow(row: ProductRow, regiondoCatalog: RegiondoProductCatalogS
     regiondoCatalog,
     rawJson: row.regiondo_raw,
     resources: row.resources ?? [],
-    locations: row.locations ?? []
+    locations: row.locations ?? [],
+    variants,
+    coreMigration: row.booking_provider === 'regiondo'
+      ? {
+          status: preparedVariants.length ? 'prepared' : 'not_prepared',
+          variantCount: preparedVariants.length,
+          optionCount: preparedVariants.reduce((count, variant) => count + variant.options.length, 0),
+          preparedAt: row.core_migration_prepared_at,
+          policy: 'prepare_once'
+        }
+      : null
   };
 }
 
@@ -108,6 +181,14 @@ const productSelect = `SELECT
    p.vat_basis_points,
    p.regiondo_product_id,
    p.regiondo_raw,
+   (
+     SELECT reference.metadata->>'coreMigrationPreparedAt'
+     FROM provider_references reference
+     WHERE reference.provider = 'regiondo'
+       AND reference.entity_type = 'product'
+       AND reference.entity_id = p.product_id
+     LIMIT 1
+   ) AS core_migration_prepared_at,
    COALESCE(
      (
        SELECT jsonb_agg(
@@ -127,6 +208,40 @@ const productSelect = `SELECT
      ),
      '[]'::jsonb
    ) AS locations,
+   COALESCE(
+     (
+       SELECT jsonb_agg(
+         jsonb_build_object(
+           'variantId', variant.variant_id,
+           'title', variant.title,
+           'priceMinor', COALESCE(variant.price_minor, ROUND(variant.price * 100)::bigint, 0),
+           'currency', variant.currency,
+           'isDefault', variant.regiondo_variant_id IS NULL AND variant.title IS NULL,
+           'providerManaged', variant.regiondo_variant_id IS NOT NULL,
+           'options', COALESCE(
+             (
+               SELECT jsonb_agg(
+                 jsonb_build_object(
+                   'optionId', option_record.option_id,
+                   'title', COALESCE(option_record.title, 'Option'),
+                   'values', COALESCE(option_record.values_json, '[]'::jsonb),
+                   'priceDeltaMinor', option_record.price_delta_minor,
+                   'currency', option_record.currency,
+                   'providerManaged', option_record.regiondo_option_id IS NOT NULL
+                 ) ORDER BY option_record.created_at ASC, option_record.option_id ASC
+               )
+               FROM product_options option_record
+               WHERE option_record.variant_id = variant.variant_id
+             ),
+             '[]'::jsonb
+           )
+         ) ORDER BY variant.created_at ASC, variant.variant_id ASC
+       )
+       FROM product_variants variant
+       WHERE variant.product_id = p.product_id
+     ),
+     '[]'::jsonb
+   ) AS variants,
    COALESCE(
      jsonb_agg(
        DISTINCT jsonb_build_object(
@@ -233,6 +348,40 @@ export async function listAdminProducts(): Promise<AdminProduct[]> {
   );
 
   return mapAdminProducts(result.rows);
+}
+
+export async function createAdminProduct(input: CreateAdminProductInput): Promise<AdminProduct> {
+  const result = await pool.query<{ product_id: string }>(
+    `INSERT INTO products (
+       title,
+       description,
+       image_url,
+       base_amount,
+       booking_provider,
+       price_minor,
+       currency,
+       vat_basis_points,
+       regiondo_product_id,
+       regiondo_raw
+     ) VALUES ($1, $2, $3, $4::numeric / 100, 'core', $4, $5, $6, NULL, NULL)
+     RETURNING product_id`,
+    [
+      input.title.trim(),
+      input.description?.trim() || null,
+      input.imageUrl?.trim() || null,
+      input.baseAmount,
+      (input.currency ?? 'EUR').trim().toUpperCase(),
+      input.vatBasisPoints
+    ]
+  );
+
+  const productId = result.rows[0]?.product_id;
+  const product = productId ? await getAdminProduct(productId) : null;
+  if (!product) {
+    throw new Error('Created product could not be loaded.');
+  }
+
+  return product;
 }
 
 export async function listLocationProducts(locationId: string): Promise<AdminProduct[]> {
@@ -410,4 +559,328 @@ export async function deleteProductResourceMapping(productId: string, resourceId
   );
 
   return Boolean(result.rowCount);
+}
+
+async function getCatalogOwnership(productId: string): Promise<'core' | 'regiondo' | null> {
+  const result = await pool.query<{ booking_provider: 'core' | 'regiondo' }>(
+    `SELECT booking_provider FROM products WHERE product_id = $1`,
+    [productId]
+  );
+  return result.rows[0]?.booking_provider ?? null;
+}
+
+export async function createProductVariant(
+  productId: string,
+  input: AdminProductVariantInput
+): Promise<AdminProductVariant | CatalogMutationFailure> {
+  const ownership = await getCatalogOwnership(productId);
+  if (!ownership) return 'not_found';
+  if (ownership !== 'core') return 'provider_managed';
+
+  try {
+    const result = await pool.query<{
+      variant_id: string;
+      title: string | null;
+      price_minor: string | number;
+      currency: string;
+    }>(
+      `INSERT INTO product_variants (
+         product_id, title, price, price_minor, currency,
+         regiondo_variant_id, regiondo_product_id, regiondo_raw
+       ) VALUES ($1, $2, $3::numeric / 100, $3, $4, NULL, NULL, NULL)
+       RETURNING variant_id, title, price_minor, currency`,
+      [productId, input.title, input.priceMinor, input.currency]
+    );
+    const row = result.rows[0];
+    return {
+      variantId: row.variant_id,
+      title: row.title,
+      priceMinor: Number(row.price_minor),
+      currency: row.currency,
+      isDefault: row.title === null,
+      providerManaged: false,
+      options: []
+    };
+  } catch (error) {
+    if ((error as { code?: string }).code === '23505' && input.title === null) return 'default_exists';
+    throw error;
+  }
+}
+
+export async function updateProductVariant(
+  productId: string,
+  variantId: string,
+  input: Partial<AdminProductVariantInput>
+): Promise<AdminProductVariant | CatalogMutationFailure> {
+  const ownership = await getCatalogOwnership(productId);
+  if (!ownership) return 'not_found';
+  if (ownership !== 'core') return 'provider_managed';
+
+  try {
+    const result = await pool.query<{
+      variant_id: string;
+      title: string | null;
+      price_minor: string | number;
+      currency: string;
+    }>(
+      `UPDATE product_variants
+       SET title = CASE WHEN $3::boolean THEN $4::text ELSE title END,
+           price_minor = COALESCE($5, price_minor),
+           price = COALESCE($5::numeric / 100, price),
+           currency = COALESCE($6, currency),
+           updated_at = now()
+       WHERE product_id = $1 AND variant_id = $2 AND regiondo_variant_id IS NULL
+       RETURNING variant_id, title, price_minor, currency`,
+      [productId, variantId, input.title !== undefined, input.title ?? null, input.priceMinor ?? null, input.currency ?? null]
+    );
+    if (!result.rowCount) return 'not_found';
+    const row = result.rows[0];
+    return {
+      variantId: row.variant_id, title: row.title,
+      priceMinor: Number(row.price_minor), currency: row.currency,
+      isDefault: row.title === null, providerManaged: false, options: []
+    };
+  } catch (error) {
+    if ((error as { code?: string }).code === '23505' && input.title === null) return 'default_exists';
+    throw error;
+  }
+}
+
+export async function deleteProductVariant(
+  productId: string,
+  variantId: string
+): Promise<'deleted' | CatalogMutationFailure> {
+  const ownership = await getCatalogOwnership(productId);
+  if (!ownership) return 'not_found';
+  if (ownership !== 'core') return 'provider_managed';
+
+  try {
+    const result = await pool.query(
+      `DELETE FROM product_variants
+       WHERE product_id = $1 AND variant_id = $2 AND regiondo_variant_id IS NULL
+       RETURNING variant_id`,
+      [productId, variantId]
+    );
+    return result.rowCount ? 'deleted' : 'not_found';
+  } catch (error) {
+    if ((error as { code?: string }).code === '23503') return 'in_use';
+    throw error;
+  }
+}
+
+export async function createProductOption(
+  productId: string,
+  variantId: string,
+  input: AdminProductOptionInput
+): Promise<AdminProductOption | CatalogMutationFailure> {
+  const ownership = await getCatalogOwnership(productId);
+  if (!ownership) return 'not_found';
+  if (ownership !== 'core') return 'provider_managed';
+  const result = await pool.query<{
+    option_id: string; title: string; values_json: unknown; price_delta_minor: string | number; currency: string;
+  }>(
+    `INSERT INTO product_options (
+       product_id, variant_id, title, values_json, price_delta_minor, currency,
+       regiondo_option_id, regiondo_product_id, regiondo_variant_id, regiondo_raw
+     )
+     SELECT $1, variant.variant_id, $3, $4::jsonb, $5, $6, NULL, NULL, NULL, NULL
+     FROM product_variants variant
+     WHERE variant.product_id = $1 AND variant.variant_id = $2 AND variant.regiondo_variant_id IS NULL
+     RETURNING option_id, title, values_json, price_delta_minor, currency`,
+    [productId, variantId, input.title, JSON.stringify(input.values), input.priceDeltaMinor, input.currency]
+  );
+  if (!result.rowCount) return 'not_found';
+  const row = result.rows[0];
+  return {
+    optionId: row.option_id, title: row.title, values: input.values,
+    priceDeltaMinor: Number(row.price_delta_minor), currency: row.currency, providerManaged: false
+  };
+}
+
+export async function updateProductOption(
+  productId: string,
+  variantId: string,
+  optionId: string,
+  input: Partial<AdminProductOptionInput>
+): Promise<AdminProductOption | CatalogMutationFailure> {
+  const ownership = await getCatalogOwnership(productId);
+  if (!ownership) return 'not_found';
+  if (ownership !== 'core') return 'provider_managed';
+  const result = await pool.query<{
+    option_id: string; title: string; values_json: unknown; price_delta_minor: string | number; currency: string;
+  }>(
+    `UPDATE product_options option_record
+     SET title = COALESCE($4, option_record.title),
+         values_json = COALESCE($5::jsonb, option_record.values_json),
+         price_delta_minor = COALESCE($6, option_record.price_delta_minor),
+         currency = COALESCE($7, option_record.currency),
+         updated_at = now()
+     FROM product_variants variant
+     WHERE option_record.product_id = $1
+       AND option_record.variant_id = $2
+       AND option_record.option_id = $3
+       AND option_record.regiondo_option_id IS NULL
+       AND variant.variant_id = option_record.variant_id
+       AND variant.product_id = $1
+       AND variant.regiondo_variant_id IS NULL
+     RETURNING option_record.option_id, option_record.title, option_record.values_json,
+               option_record.price_delta_minor, option_record.currency`,
+    [
+      productId, variantId, optionId, input.title ?? null,
+      input.values === undefined ? null : JSON.stringify(input.values),
+      input.priceDeltaMinor ?? null, input.currency ?? null
+    ]
+  );
+  if (!result.rowCount) return 'not_found';
+  const row = result.rows[0];
+  return {
+    optionId: row.option_id,
+    title: row.title,
+    values: Array.isArray(row.values_json) ? row.values_json.filter((value): value is string => typeof value === 'string') : [],
+    priceDeltaMinor: Number(row.price_delta_minor), currency: row.currency, providerManaged: false
+  };
+}
+
+export async function deleteProductOption(
+  productId: string,
+  variantId: string,
+  optionId: string
+): Promise<'deleted' | CatalogMutationFailure> {
+  const ownership = await getCatalogOwnership(productId);
+  if (!ownership) return 'not_found';
+  if (ownership !== 'core') return 'provider_managed';
+  const result = await pool.query(
+    `DELETE FROM product_options option_record
+     USING product_variants variant
+     WHERE option_record.product_id = $1
+       AND option_record.variant_id = $2
+       AND option_record.option_id = $3
+       AND option_record.regiondo_option_id IS NULL
+       AND variant.variant_id = option_record.variant_id
+       AND variant.product_id = $1
+       AND variant.regiondo_variant_id IS NULL
+     RETURNING option_record.option_id`,
+    [productId, variantId, optionId]
+  );
+  return result.rowCount ? 'deleted' : 'not_found';
+}
+
+export async function prepareProductCoreMigration(productId: string): Promise<AdminProduct | CatalogMutationFailure> {
+  const result = await withTransaction(async (client) => {
+    const productResult = await client.query<{
+      booking_provider: 'core' | 'regiondo'; currency: string; regiondo_product_id: string | null;
+    }>(
+      `SELECT booking_provider, currency, regiondo_product_id FROM products WHERE product_id = $1 FOR UPDATE`,
+      [productId]
+    );
+    const product = productResult.rows[0];
+    if (!product) return 'not_found' as const;
+    if (product.booking_provider !== 'regiondo' || !product.regiondo_product_id) return 'provider_managed' as const;
+
+    const existing = await client.query(`SELECT 1 FROM product_variants WHERE product_id = $1 AND regiondo_variant_id IS NULL LIMIT 1`, [productId]);
+    if (existing.rowCount) return 'prepared' as const;
+
+    const sourceVariants = await client.query<{
+      variant_id: string; regiondo_variant_id: string; title: string | null;
+      price: string | number; price_minor: string | number | null; currency: string;
+    }>(
+      `SELECT variant_id, regiondo_variant_id, title, price, price_minor, currency
+       FROM product_variants
+       WHERE product_id = $1 AND regiondo_variant_id IS NOT NULL
+       ORDER BY created_at ASC, variant_id ASC`,
+      [productId]
+    );
+    if (!sourceVariants.rowCount) return 'not_found' as const;
+
+    for (const source of sourceVariants.rows) {
+      const preparedTitle = source.title ?? (
+        sourceVariants.rows.length === 1 ? null : `Regiondo variant ${source.regiondo_variant_id}`
+      );
+      const copied = await client.query<{ variant_id: string }>(
+        `INSERT INTO product_variants (
+           product_id, title, price, price_minor, currency,
+           regiondo_variant_id, regiondo_product_id, regiondo_raw
+         ) VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6::jsonb)
+         RETURNING variant_id`,
+        [
+          productId, preparedTitle, source.price, source.price_minor ?? Math.round(Number(source.price) * 100),
+          source.currency || product.currency,
+          JSON.stringify({ coreMigration: { provider: 'regiondo', sourceVariantId: source.variant_id, externalId: source.regiondo_variant_id } })
+        ]
+      );
+      const copiedVariantId = copied.rows[0].variant_id;
+      await client.query(
+        `INSERT INTO product_options (
+           product_id, variant_id, title, values_json, price_delta_minor, currency,
+           regiondo_option_id, regiondo_product_id, regiondo_variant_id, regiondo_raw
+         )
+         SELECT option_record.product_id, $3, option_record.title, option_record.values_json,
+                option_record.price_delta_minor, option_record.currency,
+                NULL, NULL, NULL,
+                jsonb_build_object('coreMigration', jsonb_build_object(
+                  'provider', 'regiondo',
+                  'sourceOptionId', option_record.option_id,
+                  'externalId', option_record.regiondo_option_id
+                ))
+         FROM product_options option_record
+         WHERE option_record.product_id = $1 AND option_record.variant_id = $2
+           AND option_record.regiondo_option_id IS NOT NULL`,
+        [productId, source.variant_id, copiedVariantId]
+      );
+      await client.query(
+        `UPDATE provider_references
+         SET metadata = metadata || jsonb_build_object('preparedCoreVariantId', $3::text), updated_at = now()
+         WHERE provider = 'regiondo' AND entity_type = 'product_variant'
+           AND entity_id = $2 AND external_id = $1`,
+        [source.regiondo_variant_id, source.variant_id, copiedVariantId]
+      );
+    }
+
+    await client.query(
+      `UPDATE provider_references
+       SET metadata = metadata || jsonb_build_object('coreMigrationPreparedAt', now()), updated_at = now()
+       WHERE provider = 'regiondo' AND entity_type = 'product' AND entity_id = $1`,
+      [productId]
+    );
+    return 'prepared' as const;
+  });
+
+  if (result === 'not_found' || result === 'provider_managed') return result;
+  return (await getAdminProduct(productId)) ?? 'not_found';
+}
+
+export async function validateCoreProviderSwitch(productId: string): Promise<CoreProviderSwitchValidation> {
+  const result = await pool.query<{
+    native_variant_count: string | number;
+    invalid_variant_count: string | number;
+    invalid_option_count: string | number;
+    location_count: string | number;
+    resource_count: string | number;
+  }>(
+    `SELECT
+       (SELECT COUNT(*) FROM product_variants variant
+        WHERE variant.product_id = product.product_id AND variant.regiondo_variant_id IS NULL) AS native_variant_count,
+       (SELECT COUNT(*) FROM product_variants variant
+        WHERE variant.product_id = product.product_id AND variant.regiondo_variant_id IS NULL
+          AND (variant.price_minor IS NULL OR variant.price_minor < 0 OR variant.currency <> product.currency)) AS invalid_variant_count,
+       (SELECT COUNT(*) FROM product_options option_record
+        INNER JOIN product_variants variant ON variant.variant_id = option_record.variant_id
+        WHERE option_record.product_id = product.product_id AND variant.regiondo_variant_id IS NULL
+          AND (option_record.title IS NULL OR BTRIM(option_record.title) = '' OR option_record.currency <> product.currency)) AS invalid_option_count,
+       (SELECT COUNT(*) FROM location_products offering
+        WHERE offering.product_id = product.product_id AND offering.enabled = true) AS location_count,
+       (SELECT COUNT(*) FROM product_resources mapping
+        WHERE mapping.product_id = product.product_id) AS resource_count
+     FROM products product WHERE product.product_id = $1`,
+    [productId]
+  );
+  const row = result.rows[0];
+  if (!row) return { valid: false, issues: ['Product not found.'] };
+  const issues: string[] = [];
+  if (!Number(row.native_variant_count)) issues.push('Prepare and review at least one Core variant.');
+  if (Number(row.invalid_variant_count)) issues.push('Core variant pricing and currency must be valid.');
+  if (Number(row.invalid_option_count)) issues.push('Core option names and currency must be valid.');
+  if (!Number(row.location_count)) issues.push('Assign at least one enabled location.');
+  if (!Number(row.resource_count)) issues.push('Assign at least one resource for Core availability.');
+  return { valid: issues.length === 0, issues };
 }

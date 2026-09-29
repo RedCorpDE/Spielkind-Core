@@ -96,7 +96,21 @@ export async function quoteWithClient(client: PoolClient, input: PricingQuoteInp
             product.currency, product.vat_basis_points,
             variant.variant_id, variant.title AS variant_title, variant.price_minor AS variant_price_minor
      FROM products product
-     LEFT JOIN product_variants variant ON variant.variant_id = $2 AND variant.product_id = product.product_id
+     LEFT JOIN product_variants variant
+       ON variant.product_id = product.product_id
+      AND (
+        variant.variant_id = $2::uuid
+        OR (
+          $2::uuid IS NULL
+          AND product.booking_provider = 'core'
+          AND variant.regiondo_variant_id IS NULL
+          AND variant.title IS NULL
+        )
+      )
+      AND (
+        (product.booking_provider = 'regiondo' AND variant.regiondo_variant_id IS NOT NULL)
+        OR (product.booking_provider = 'core' AND variant.regiondo_variant_id IS NULL)
+      )
      WHERE product.product_id = $1
        AND ($2::uuid IS NULL OR variant.variant_id IS NOT NULL)
      LIMIT 1`,
@@ -108,10 +122,16 @@ export async function quoteWithClient(client: PoolClient, input: PricingQuoteInp
   const optionIds = requestedOptions.map((option) => option.optionId);
   const optionResult = optionIds.length
     ? await client.query<{ option_id: string; title: string | null; price_delta_minor: string | number }>(
-        `SELECT option_id, title, price_delta_minor FROM product_options
-         WHERE option_id = ANY($1::uuid[]) AND product_id = $2
-           AND ($3::uuid IS NULL OR variant_id IS NULL OR variant_id = $3::uuid)`,
-        [optionIds, input.productId, input.variantId ?? null]
+        `SELECT option_record.option_id, option_record.title, option_record.price_delta_minor
+         FROM product_options option_record
+         INNER JOIN products product ON product.product_id = option_record.product_id
+         WHERE option_record.option_id = ANY($1::uuid[]) AND option_record.product_id = $2
+           AND ($3::uuid IS NULL OR option_record.variant_id IS NULL OR option_record.variant_id = $3::uuid)
+           AND (
+             (product.booking_provider = 'regiondo' AND option_record.regiondo_option_id IS NOT NULL)
+             OR (product.booking_provider = 'core' AND option_record.regiondo_option_id IS NULL)
+           )`,
+        [optionIds, input.productId, product.variant_id]
       )
     : { rows: [], rowCount: 0 };
   if (optionResult.rows.length !== optionIds.length) throw new Error('One or more selected options are invalid.');

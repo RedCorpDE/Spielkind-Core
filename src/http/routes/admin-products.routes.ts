@@ -1,18 +1,27 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { HttpError, ValidationHttpError } from '../errors.js';
+import { ConflictHttpError, HttpError, ValidationHttpError } from '../errors.js';
 import { type AdminFastifyRequest } from '../admin.js';
 import { requireAdminPermission } from '../access-control.js';
 import { recordAdminWriteAudit } from '../admin-audit.js';
 import {
   deleteProductResourceMapping,
   addProductOffering,
+  createAdminProduct,
+  createProductOption,
+  createProductVariant,
+  deleteProductOption,
+  deleteProductVariant,
   getAdminProduct,
   listLocationProducts,
   listAdminProducts,
   listRegiondoCatalogProducts,
   updateAdminProduct,
   removeProductOffering,
+  prepareProductCoreMigration,
+  updateProductOption,
+  updateProductVariant,
+  validateCoreProviderSwitch,
   upsertProductResourceMapping
 } from '../../modules/products/product-admin.repository.js';
 import { runRegiondoCatalogSyncJob } from '../../modules/regiondo/regiondo-catalog-sync.job.js';
@@ -38,9 +47,51 @@ const updateProductSchema = z
     message: 'At least one product field must be provided.'
   });
 
+const createProductSchema = z
+  .object({
+    title: z.string().trim().min(1),
+    description: z.string().nullable().optional(),
+    imageUrl: z.string().url().nullable().optional(),
+    baseAmount: z.number().int().nonnegative().safe(),
+    currency: z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/).default('EUR'),
+    vatBasisPoints: z.number().int().min(0).max(10_000)
+  })
+  .strict();
+
 const productResourceSchema = z.object({
   resourceId: z.string().uuid(),
   quantity: z.number().int().positive()
+});
+const catalogParamsSchema = z.object({
+  productId: z.string().uuid(),
+  variantId: z.string().uuid().optional(),
+  optionId: z.string().uuid().optional()
+});
+const currencySchema = z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/);
+const createVariantSchema = z.object({
+  title: z.string().trim().min(1).nullable().optional(),
+  isDefault: z.boolean().optional().default(false),
+  priceMinor: z.number().int().nonnegative().safe(),
+  currency: currencySchema
+}).strict().superRefine((value, context) => {
+  if (!value.isDefault && !value.title) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['title'], message: 'A named variant requires a title.' });
+  }
+});
+const updateVariantSchema = z.object({
+  title: z.string().trim().min(1).nullable().optional(),
+  isDefault: z.boolean().optional(),
+  priceMinor: z.number().int().nonnegative().safe().optional(),
+  currency: currencySchema.optional()
+}).strict().refine((value) => Object.keys(value).length > 0, { message: 'At least one variant field is required.' });
+const createOptionSchema = z.object({
+  title: z.string().trim().min(1),
+  values: z.array(z.string().trim().min(1)).max(100).default([]),
+  priceDeltaMinor: z.number().int().safe(),
+  currency: currencySchema
+}).strict();
+const updateOptionSchema = createOptionSchema.partial().refine((value) => Object.keys(value).length > 0, {
+  message: 'At least one option field is required.'
 });
 const offeringParamsSchema = z.object({
   locationId: z.string().uuid(),
@@ -69,10 +120,54 @@ function getRegiondoSyncStatusCode(error: RegiondoApiError): number {
   return 502;
 }
 
+function throwCatalogMutationFailure(result: string): never {
+  if (result === 'provider_managed') {
+    throw new ConflictHttpError(
+      'This catalog is managed by Regiondo and cannot be edited through Core catalog endpoints.',
+      'PROVIDER_MANAGED_CATALOG'
+    );
+  }
+  if (result === 'in_use') {
+    throw new ConflictHttpError(
+      'This variant is referenced by an existing booking or reservation and cannot be deleted. Historical snapshots were preserved.',
+      'CATALOG_ENTITY_IN_USE'
+    );
+  }
+  if (result === 'default_exists') {
+    throw new ConflictHttpError('This product already has an internal default variant.', 'DEFAULT_VARIANT_EXISTS');
+  }
+  throw new HttpError(404, 'Catalog entity not found.');
+}
+
 export async function registerAdminProductRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/admin/products', async (request) => {
     await requireAdminPermission(request as AdminFastifyRequest, 'products', 'view');
     return { ok: true, items: await listAdminProducts() };
+  });
+
+  app.post('/api/admin/products', async (request, reply) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
+    const parsed = createProductSchema.safeParse(request.body);
+    if (!parsed.success) {
+      throw new ValidationHttpError('Invalid product creation payload.');
+    }
+
+    const product = await createAdminProduct(parsed.data);
+    await recordAdminWriteAudit({
+      request,
+      auth,
+      action: 'admin.product.created',
+      entityType: 'product',
+      entityId: product.productId,
+      details: {
+        bookingProvider: product.bookingProvider,
+        currency: product.currency,
+        priceMinor: product.priceMinor
+      }
+    });
+
+    reply.code(201);
+    return { ok: true, item: product };
   });
 
   app.get('/api/admin/products/:productId', async (request) => {
@@ -158,6 +253,15 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
     if (parsed.data.bookingProvider === 'regiondo' && !currentProduct?.regiondoProductId) {
       throw new ValidationHttpError('A product must have a Regiondo reference before it can use the Regiondo provider.');
     }
+    if (currentProduct?.bookingProvider === 'regiondo' && parsed.data.bookingProvider === 'core') {
+      const validation = await validateCoreProviderSwitch(productId);
+      if (!validation.valid) {
+        throw new ConflictHttpError(
+          `The Core catalog is not ready: ${validation.issues.join(' ')}`,
+          'CORE_CATALOG_NOT_READY'
+        );
+      }
+    }
     const product = await updateAdminProduct(productId, parsed.data);
     if (!product) {
       throw new HttpError(404, 'Product not found.');
@@ -173,6 +277,152 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
     });
 
     return { ok: true, item: product };
+  });
+
+  app.post('/api/admin/products/:productId/variants', async (request, reply) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
+    const params = catalogParamsSchema.safeParse(request.params);
+    const body = createVariantSchema.safeParse(request.body);
+    if (!params.success || !body.success) throw new ValidationHttpError('Invalid variant creation payload.');
+    const product = await getAdminProduct(params.data.productId);
+    if (!product) throw new HttpError(404, 'Product not found.');
+    if (body.data.currency !== product.currency) {
+      throw new ValidationHttpError('Variant currency must match the Product currency.');
+    }
+    const result = await createProductVariant(params.data.productId, {
+      title: body.data.isDefault ? null : body.data.title ?? null,
+      priceMinor: body.data.priceMinor,
+      currency: body.data.currency
+    });
+    if (typeof result === 'string') throwCatalogMutationFailure(result);
+    await recordAdminWriteAudit({
+      request, auth, action: 'admin.product_variant.created', entityType: 'product_variant',
+      entityId: result.variantId, details: { productId: params.data.productId, isDefault: result.isDefault }
+    });
+    reply.code(201);
+    return { ok: true, item: await getAdminProduct(params.data.productId) };
+  });
+
+  app.patch('/api/admin/products/:productId/variants/:variantId', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
+    const params = catalogParamsSchema.safeParse(request.params);
+    const body = updateVariantSchema.safeParse(request.body);
+    if (!params.success || !params.data.variantId || !body.success) {
+      throw new ValidationHttpError('Invalid variant update payload.');
+    }
+    const product = await getAdminProduct(params.data.productId);
+    if (!product) throw new HttpError(404, 'Product not found.');
+    if (body.data.currency && body.data.currency !== product.currency) {
+      throw new ValidationHttpError('Variant currency must match the Product currency.');
+    }
+    const title = body.data.isDefault === true ? null
+      : body.data.isDefault === false && body.data.title === undefined ? undefined
+        : body.data.title;
+    const result = await updateProductVariant(params.data.productId, params.data.variantId, {
+      ...(title !== undefined ? { title } : {}),
+      ...(body.data.priceMinor !== undefined ? { priceMinor: body.data.priceMinor } : {}),
+      ...(body.data.currency !== undefined ? { currency: body.data.currency } : {})
+    });
+    if (typeof result === 'string') throwCatalogMutationFailure(result);
+    await recordAdminWriteAudit({
+      request, auth, action: 'admin.product_variant.updated', entityType: 'product_variant',
+      entityId: result.variantId, details: { productId: params.data.productId }
+    });
+    return { ok: true, item: await getAdminProduct(params.data.productId) };
+  });
+
+  app.delete('/api/admin/products/:productId/variants/:variantId', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
+    const params = catalogParamsSchema.safeParse(request.params);
+    if (!params.success || !params.data.variantId) throw new ValidationHttpError('Invalid variant ids.');
+    const result = await deleteProductVariant(params.data.productId, params.data.variantId);
+    if (result !== 'deleted') throwCatalogMutationFailure(result);
+    await recordAdminWriteAudit({
+      request, auth, action: 'admin.product_variant.deleted', entityType: 'product_variant',
+      entityId: params.data.variantId, details: { productId: params.data.productId }
+    });
+    return { ok: true };
+  });
+
+  app.post('/api/admin/products/:productId/variants/:variantId/options', async (request, reply) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
+    const params = catalogParamsSchema.safeParse(request.params);
+    const body = createOptionSchema.safeParse(request.body);
+    if (!params.success || !params.data.variantId || !body.success) {
+      throw new ValidationHttpError('Invalid option creation payload.');
+    }
+    const product = await getAdminProduct(params.data.productId);
+    if (!product) throw new HttpError(404, 'Product not found.');
+    if (body.data.currency !== product.currency) {
+      throw new ValidationHttpError('Option currency must match the Product currency.');
+    }
+    const values = [...new Set(body.data.values.map((value) => value.trim()))];
+    const result = await createProductOption(params.data.productId, params.data.variantId, { ...body.data, values });
+    if (typeof result === 'string') throwCatalogMutationFailure(result);
+    await recordAdminWriteAudit({
+      request, auth, action: 'admin.product_option.created', entityType: 'product_option',
+      entityId: result.optionId, details: { productId: params.data.productId, variantId: params.data.variantId }
+    });
+    reply.code(201);
+    return { ok: true, item: await getAdminProduct(params.data.productId) };
+  });
+
+  app.patch('/api/admin/products/:productId/variants/:variantId/options/:optionId', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
+    const params = catalogParamsSchema.safeParse(request.params);
+    const body = updateOptionSchema.safeParse(request.body);
+    if (!params.success || !params.data.variantId || !params.data.optionId || !body.success) {
+      throw new ValidationHttpError('Invalid option update payload.');
+    }
+    const product = await getAdminProduct(params.data.productId);
+    if (!product) throw new HttpError(404, 'Product not found.');
+    if (body.data.currency && body.data.currency !== product.currency) {
+      throw new ValidationHttpError('Option currency must match the Product currency.');
+    }
+    const result = await updateProductOption(params.data.productId, params.data.variantId, params.data.optionId, {
+      ...body.data,
+      ...(body.data.values ? { values: [...new Set(body.data.values.map((value) => value.trim()))] } : {})
+    });
+    if (typeof result === 'string') throwCatalogMutationFailure(result);
+    await recordAdminWriteAudit({
+      request, auth, action: 'admin.product_option.updated', entityType: 'product_option',
+      entityId: result.optionId, details: { productId: params.data.productId, variantId: params.data.variantId }
+    });
+    return { ok: true, item: await getAdminProduct(params.data.productId) };
+  });
+
+  app.delete('/api/admin/products/:productId/variants/:variantId/options/:optionId', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
+    const params = catalogParamsSchema.safeParse(request.params);
+    if (!params.success || !params.data.variantId || !params.data.optionId) {
+      throw new ValidationHttpError('Invalid option ids.');
+    }
+    const result = await deleteProductOption(params.data.productId, params.data.variantId, params.data.optionId);
+    if (result !== 'deleted') throwCatalogMutationFailure(result);
+    await recordAdminWriteAudit({
+      request, auth, action: 'admin.product_option.deleted', entityType: 'product_option',
+      entityId: params.data.optionId, details: { productId: params.data.productId, variantId: params.data.variantId }
+    });
+    return { ok: true };
+  });
+
+  app.post('/api/admin/products/:productId/core-migration/prepare', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
+    const params = catalogParamsSchema.safeParse(request.params);
+    if (!params.success) throw new ValidationHttpError('Invalid product id.');
+    const result = await prepareProductCoreMigration(params.data.productId);
+    if (typeof result === 'string') {
+      if (result === 'provider_managed') {
+        throw new ConflictHttpError('Only an active Regiondo product can prepare a Core migration snapshot.');
+      }
+      throw new HttpError(404, 'Product or Regiondo variants not found.');
+    }
+    await recordAdminWriteAudit({
+      request, auth, action: 'admin.product.core_migration_prepared', entityType: 'product',
+      entityId: params.data.productId,
+      details: { policy: 'prepare_once', variantCount: result.coreMigration?.variantCount ?? 0 }
+    });
+    return { ok: true, item: result };
   });
 
   app.post('/api/admin/products/:productId/resources', async (request) => {

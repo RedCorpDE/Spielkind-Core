@@ -34,7 +34,12 @@ const selectProducts = `SELECT
       'title', variant.title,
       'price', jsonb_build_object('amount', variant.price_minor, 'currency', variant.currency)
     ) ORDER BY variant.title NULLS LAST)
-    FROM product_variants variant WHERE variant.product_id = product.product_id
+    FROM product_variants variant
+    WHERE variant.product_id = product.product_id
+      AND (
+        (product.booking_provider = 'regiondo' AND variant.regiondo_variant_id IS NOT NULL)
+        OR (product.booking_provider = 'core' AND variant.regiondo_variant_id IS NULL)
+      )
   ), '[]'::jsonb) AS variants
 FROM products product`;
 

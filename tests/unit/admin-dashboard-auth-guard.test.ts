@@ -28,6 +28,36 @@ const protectedReadPaths = [
 
 const protectedWritePaths = [
   {
+    method: 'POST',
+    path: '/api/admin/products',
+    body: { title: 'Core product', baseAmount: 2000, vatBasisPoints: 1900 }
+  },
+  {
+    method: 'POST',
+    path: '/api/admin/products/00000000-0000-0000-0000-000000000002/variants',
+    body: { title: '4 Hours', priceMinor: 2000, currency: 'EUR' }
+  },
+  {
+    method: 'PATCH',
+    path: '/api/admin/products/00000000-0000-0000-0000-000000000002/variants/00000000-0000-0000-0000-000000000003',
+    body: { priceMinor: 2500 }
+  },
+  {
+    method: 'DELETE',
+    path: '/api/admin/products/00000000-0000-0000-0000-000000000002/variants/00000000-0000-0000-0000-000000000003',
+    body: {}
+  },
+  {
+    method: 'POST',
+    path: '/api/admin/products/00000000-0000-0000-0000-000000000002/variants/00000000-0000-0000-0000-000000000003/options',
+    body: { title: 'Headset', values: [], priceDeltaMinor: 300, currency: 'EUR' }
+  },
+  {
+    method: 'POST',
+    path: '/api/admin/products/00000000-0000-0000-0000-000000000002/core-migration/prepare',
+    body: {}
+  },
+  {
     method: 'PATCH',
     path: '/api/admin/bookings/00000000-0000-0000-0000-000000000001',
     body: { opsNotes: 'Follow up with provider.' }
