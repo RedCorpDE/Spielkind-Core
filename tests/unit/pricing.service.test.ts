@@ -60,8 +60,8 @@ describe('pricing service', () => {
       variantName: '8 Hours', unitPriceGross: 3800,
       options: [{ name: 'Headset Rental', value: 'Included', priceDelta: 300 }]
     });
-    expect(queries[0]).toContain("product.booking_provider = 'core' AND variant.regiondo_variant_id IS NULL");
-    expect(queries[1]).toContain("product.booking_provider = 'core' AND option_record.regiondo_option_id IS NULL");
+    expect(queries[0]).toContain("COALESCE(offering.booking_provider, product.booking_provider) = 'core'");
+    expect(queries[1]).toContain("$4 = 'core' AND option_record.regiondo_option_id IS NULL");
   });
 
   it('resolves the internal default Variant when variantId is omitted', async () => {
@@ -89,6 +89,40 @@ describe('pricing service', () => {
 
     expect(quote.items[0]).toMatchObject({ variantId: 'default-variant', variantName: null, unitPriceGross: 11500 });
     expect(queryParameters[1]?.[2]).toBe('default-variant');
+  });
+
+  it('rejects option values outside the authored catalog values', async () => {
+    let queryCount = 0;
+    const client = {
+      query: async () => {
+        queryCount += 1;
+        if (queryCount === 1) {
+          return {
+            rowCount: 1,
+            rows: [{
+              product_id: 'product', title: 'LAN Session', booking_provider: 'core', price_minor: 2000,
+              currency: 'EUR', vat_basis_points: 1900, variant_id: 'variant', variant_title: 'Four Hours',
+              variant_price_minor: 2000
+            }]
+          };
+        }
+        return {
+          rowCount: 1,
+          rows: [{
+            option_id: 'option', title: 'Setup', price_delta_minor: 0,
+            values_json: ['standard', { id: 'streaming', label: 'Streaming ready' }]
+          }]
+        };
+      }
+    };
+
+    await expect(quoteWithClient(client as never, {
+      productId: 'product', variantId: 'variant', quantity: 1,
+      options: [{ optionId: 'option', value: 'unsupported' }]
+    })).rejects.toMatchObject({
+      name: 'PricingValidationError',
+      message: 'One or more selected option values are invalid.'
+    });
   });
 });
 

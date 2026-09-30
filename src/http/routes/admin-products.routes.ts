@@ -21,6 +21,7 @@ import {
   prepareProductCoreMigration,
   updateProductOption,
   updateProductVariant,
+  updateProductOffering,
   validateCoreProviderSwitch,
   upsertProductResourceMapping
 } from '../../modules/products/product-admin.repository.js';
@@ -33,6 +34,13 @@ import {
 } from '../../modules/regiondo/regiondo.client.js';
 import { RegiondoCatalogSyncError } from '../../modules/regiondo/regiondo-catalog.errors.js';
 import { getAvailabilitySummary } from '../../modules/resources/availability.service.js';
+import {
+  deleteOfferingResource,
+  listOfferingResourceMigrationConflicts,
+  listOfferingResources,
+  upsertOfferingResource
+} from '../../modules/products/product-offering-resource.repository.js';
+import { getCatalogProductOffering } from '../../modules/catalog/catalog.repository.js';
 
 const updateProductSchema = z
   .object({
@@ -97,8 +105,30 @@ const offeringParamsSchema = z.object({
   locationId: z.string().uuid(),
   productId: z.string().uuid()
 });
+const updateOfferingSchema = z.object({
+  bookingProvider: z.enum(['core', 'regiondo']).optional(),
+  regiondoProductId: z.string().trim().min(1).optional(),
+  timeSelectionMode: z.enum(['date_range', 'start_end', 'start_duration', 'fixed_duration']).optional(),
+  timezone: z.string().trim().min(1).max(100).optional(),
+  minParticipants: z.number().int().positive().optional(),
+  maxParticipants: z.number().int().positive().optional(),
+  minDurationMinutes: z.number().int().positive().nullable().optional(),
+  maxDurationMinutes: z.number().int().positive().nullable().optional(),
+  durationStepMinutes: z.number().int().positive().nullable().optional(),
+  defaultDurationMinutes: z.number().int().positive().nullable().optional(),
+  allowedDurationMinutes: z.array(z.number().int().positive()).max(100).nullable().optional(),
+  minAdvanceMinutes: z.number().int().nonnegative().optional(),
+  maxAdvanceDays: z.number().int().nonnegative().nullable().optional(),
+  sameDayBookingAllowed: z.boolean().optional(),
+  enabled: z.boolean().optional()
+}).strict().refine((value) => Object.keys(value).length > 0, { message: 'At least one offering field is required.' });
+const offeringResourceParamsSchema = z.object({
+  offeringId: z.string().uuid(),
+  resourceId: z.string().uuid().optional()
+});
 const availabilityQuerySchema = z.object({
   locationId: z.string().uuid(),
+  variantId: z.string().uuid().optional(),
   start: z.string().datetime(),
   end: z.string().datetime(),
   quantity: z.coerce.number().int().positive().max(100).default(1)
@@ -145,6 +175,73 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
     return { ok: true, items: await listAdminProducts() };
   });
 
+  app.get('/api/admin/product-offerings/:offeringId/resources', async (request) => {
+    await requireAdminPermission(request as AdminFastifyRequest, 'products', 'view');
+    const params = offeringResourceParamsSchema.safeParse(request.params);
+    if (!params.success) throw new ValidationHttpError('Invalid Product Offering id.');
+    const items = await listOfferingResources(params.data.offeringId);
+    if (!items) throw new HttpError(404, 'Product Offering not found.');
+    return { ok: true, items };
+  });
+
+  app.post('/api/admin/product-offerings/:offeringId/resources', async (request, reply) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
+    const params = offeringResourceParamsSchema.safeParse(request.params);
+    const body = productResourceSchema.safeParse(request.body);
+    if (!params.success || !body.success) throw new ValidationHttpError('Invalid Offering Resource payload.');
+    const result = await upsertOfferingResource({ offeringId: params.data.offeringId, ...body.data });
+    if (result === 'offering_not_found' || result === 'resource_not_found') {
+      throw new HttpError(404, result === 'offering_not_found' ? 'Product Offering not found.' : 'Resource not found.');
+    }
+    if (result === 'wrong_location') {
+      throw new ConflictHttpError('The Resource must belong to the same Location as the Product Offering.', 'OFFERING_RESOURCE_LOCATION_MISMATCH');
+    }
+    await recordAdminWriteAudit({
+      request, auth, action: 'admin.product_offering_resource.upserted',
+      entityType: 'product_offering', entityId: params.data.offeringId,
+      details: body.data as Record<string, unknown>
+    });
+    reply.code(201);
+    return { ok: true, item: result };
+  });
+
+  app.patch('/api/admin/product-offerings/:offeringId/resources/:resourceId', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
+    const params = offeringResourceParamsSchema.safeParse(request.params);
+    const body = z.object({ quantity: z.number().int().positive() }).strict().safeParse(request.body);
+    if (!params.success || !params.data.resourceId || !body.success) {
+      throw new ValidationHttpError('Invalid Offering Resource update.');
+    }
+    const result = await upsertOfferingResource({
+      offeringId: params.data.offeringId, resourceId: params.data.resourceId, quantity: body.data.quantity
+    });
+    if (typeof result === 'string') throw new HttpError(404, 'Offering Resource requirement not found.');
+    await recordAdminWriteAudit({
+      request, auth, action: 'admin.product_offering_resource.updated', entityType: 'product_offering',
+      entityId: params.data.offeringId, details: { resourceId: params.data.resourceId, quantity: body.data.quantity }
+    });
+    return { ok: true, item: result };
+  });
+
+  app.delete('/api/admin/product-offerings/:offeringId/resources/:resourceId', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
+    const params = offeringResourceParamsSchema.safeParse(request.params);
+    if (!params.success || !params.data.resourceId) throw new ValidationHttpError('Invalid Offering Resource ids.');
+    if (!(await deleteOfferingResource(params.data.offeringId, params.data.resourceId))) {
+      throw new HttpError(404, 'Offering Resource requirement not found.');
+    }
+    await recordAdminWriteAudit({
+      request, auth, action: 'admin.product_offering_resource.deleted', entityType: 'product_offering',
+      entityId: params.data.offeringId, details: { resourceId: params.data.resourceId }
+    });
+    return { ok: true };
+  });
+
+  app.get('/api/admin/product-offering-resource-migration-conflicts', async (request) => {
+    await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
+    return { ok: true, items: await listOfferingResourceMigrationConflicts() };
+  });
+
   app.post('/api/admin/products', async (request, reply) => {
     const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
     const parsed = createProductSchema.safeParse(request.body);
@@ -188,6 +285,25 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
     return { ok: true, items: await listLocationProducts(parsed.data.locationId) };
   });
 
+  app.get('/api/admin/locations/:locationId/products/:productId/booking-configuration', async (request) => {
+    await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'create');
+    const parsed = offeringParamsSchema.safeParse(request.params);
+    if (!parsed.success) throw new ValidationHttpError('Invalid product offering ids.');
+    const product = await getCatalogProductOffering(parsed.data.productId, parsed.data.locationId);
+    if (!product) throw new HttpError(404, 'Product offering not found.');
+    return {
+      ok: true,
+      item: {
+        id: product.id,
+        title: product.title,
+        price: product.price,
+        variants: product.variants,
+        offering: product.offering,
+        bookingConfiguration: product.bookingConfiguration
+      }
+    };
+  });
+
   app.post('/api/admin/locations/:locationId/products/:productId', async (request, reply) => {
     const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
     const parsed = offeringParamsSchema.safeParse(request.params);
@@ -199,6 +315,24 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
       entityId: parsed.data.productId, details: { locationId: parsed.data.locationId }
     });
     reply.code(201);
+    return { ok: true, item: product };
+  });
+
+  app.patch('/api/admin/locations/:locationId/products/:productId', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
+    const params = offeringParamsSchema.safeParse(request.params);
+    const body = updateOfferingSchema.safeParse(request.body);
+    if (!params.success || !body.success) throw new ValidationHttpError('Invalid product offering payload.');
+    const product = await updateProductOffering(params.data.locationId, params.data.productId, body.data);
+    if (!product) throw new HttpError(404, 'Product offering not found.');
+    await recordAdminWriteAudit({
+      request,
+      auth,
+      action: 'admin.product_offering.updated',
+      entityType: 'product',
+      entityId: params.data.productId,
+      details: { locationId: params.data.locationId, ...body.data }
+    });
     return { ok: true, item: product };
   });
 
@@ -234,6 +368,7 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
     }
     return getAvailabilitySummary({
       product_id: productId,
+      product_variant_id: parsed.data.variantId,
       location_id: parsed.data.locationId,
       dt_from: parsed.data.start,
       dt_to: parsed.data.end,

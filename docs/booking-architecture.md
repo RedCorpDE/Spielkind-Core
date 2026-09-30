@@ -4,7 +4,7 @@
 
 Core remains one deployable Fastify/PostgreSQL application. This change adds provider-independent domain records beside the existing Regiondo columns and routes; it does not rewrite booking IDs, remove legacy tables, or require a coordinated frontend release.
 
-Products migrate independently through `products.booking_provider` (`regiondo` or `core`). Existing rows with a Regiondo product ID are backfilled to `regiondo`; other and newly created products default to `core`. Bookings carry the same explicit provider marker. Legacy `regiondo_*` columns and `booking_products` remain compatibility projections while new code writes normalized provider references and immutable booking items.
+Offerings migrate independently through `location_products.booking_provider` (`regiondo` or `core`). `products.booking_provider` remains a catalog compatibility default, but new routing always resolves the venue-specific offering. Existing offerings are backfilled from their Product; Bookings carry their own immutable provider marker and selected `product_offering_id`. Legacy `regiondo_*` columns and `booking_products` remain compatibility projections while new code writes normalized provider references and immutable booking items.
 
 ```mermaid
 flowchart TD
@@ -37,7 +37,7 @@ flowchart TD
 
 ## Provider abstraction
 
-`bookingProviderRegistry` is the single resolver. Its focused interface exposes only operations Core currently delegates: provider availability, booking retrieval, cancellation, change requests, provider-managed fields, and external admin URLs. The Regiondo implementation owns Regiondo payload/API mapping. Domain and client DTOs contain Core identifiers and normalized values.
+`bookingProviderRegistry` is the single resolver. Its interface covers normalized availability and booking creation in addition to booking retrieval, cancellation, change requests, provider-managed fields, and external admin URLs. The Regiondo implementation owns Regiondo payload/API mapping. Domain and client DTOs contain Core identifiers and normalized values.
 
 The registry maps legacy non-Regiondo sources to `core`, preserving the old `getBookingProvider(source)` facade used by dashboard code.
 
@@ -106,6 +106,12 @@ Switching Regiondo to Core is a separate Product update. Core validates that a p
 
 Hold creation uses a serializable transaction, locks all required resource rows in stable order, repeats the capacity check, and retries serialization failures. A product may require several resources; one hold header therefore owns multiple resource allocations. Idempotency keys prevent duplicate holds. The minute-level cleanup job changes elapsed active holds to `expired`; availability also checks `expires_at` directly, so delayed cleanup cannot reduce capacity incorrectly.
 
+## Normalized offering configuration and quote
+
+Each offering owns its provider, timezone, participant limits, advance rules, duration constraints, and one of `date_range`, `start_end`, `start_duration`, or `fixed_duration`. Variants may supply a real commercial duration override. App, WordPress, and Dashboard send the same canonical intent with `locationProductId`, `startAt`, `endAt`, participants, Variant, and Options.
+
+`BookingQuoteService` validates the offering pairing and rules, dispatches availability to the selected provider, and applies Core pricing. It returns one envelope containing the normalized configuration, availability, integer-minor-unit pricing, a quote identifier, and expiry. Provider details and raw Regiondo payloads are not exposed.
+
 ## Cancellation and refunds
 
 Cancellation policies store a deliberately small JSON array of time thresholds and refund basis points. The cancellation service produces a normalized quote. A cancellation that needs a provider refund moves to `cancel_requested`; Core does not mark it cancelled before the refund orchestration exists. A cancellation requiring no refund can complete locally, releasing consumptions/holds and revoking access credentials.
@@ -133,12 +139,13 @@ Stripe sends signed events to `POST /webhooks/stripe`. The endpoint durably acce
 
 Mutating booking, hold, and checkout creation calls require `x-idempotency-key`.
 
+Equivalent normalized routes are available at `POST /api/web/booking-quotes`, `POST /api/web/booking-holds`, `POST /api/admin/booking-quotes`, `POST /api/admin/booking-holds`, and `POST /api/admin/bookings`. Admin rule/availability/no-payment overrides are explicit and require `bookings:manage`.
+
 ## Deferred work
 
 - Final cancellation/refund orchestration after the payment provider is selected.
 - External accounting/analytics outbox publishers and reminder scheduling from booking events.
-- Moving the two remaining dashboard Regiondo purchase flows behind a normalized provider `createBooking` contract.
-- WordPress storefront work; WordPress should consume these Core APIs and must not become canonical storage.
+- Moving the legacy task-driven Regiondo purchase flow (which has task-specific payload semantics) onto the normalized intent adapter.
 - Promotion usage redemption/locking and multi-item/multi-tax discount allocation beyond the current single-product quote endpoint.
 - Database-backed concurrency tests against a disposable PostgreSQL instance and production migration rehearsal.
 - Product publish/draft lifecycle; no existing active/published column was available, so incomplete Product visibility remains a focused follow-up.

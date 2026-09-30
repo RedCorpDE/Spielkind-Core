@@ -2,6 +2,35 @@ import type { PoolClient } from 'pg';
 import { pool } from '../../db/pool.js';
 import { netFromGross, percentageOf } from '../commerce/money.js';
 
+export class PricingValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PricingValidationError';
+  }
+}
+
+function optionValueIdentifier(value: unknown): string | null {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    const text = String(value).trim();
+    return text || null;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const candidate = record.id ?? record.value ?? record.option_value_id
+    ?? record.label ?? record.title ?? record.name;
+  if (typeof candidate !== 'string' && typeof candidate !== 'number') return null;
+  const text = String(candidate).trim();
+  return text || null;
+}
+
+function allowedOptionValues(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const identifier = optionValueIdentifier(item);
+    return identifier ? [identifier] : [];
+  });
+}
+
 export interface PricingQuoteInput {
   productId: string;
   variantId?: string;
@@ -9,6 +38,7 @@ export interface PricingQuoteInput {
   quantity: number;
   clientId?: string;
   locationId?: string;
+  locationProductId?: string;
   discountCode?: string;
 }
 
@@ -92,50 +122,64 @@ export async function quoteWithClient(client: PoolClient, input: PricingQuoteInp
     currency: string; vat_basis_points: number; variant_id: string | null; variant_title: string | null;
     variant_price_minor: string | number | null;
   }>(
-    `SELECT product.product_id, product.title, product.booking_provider, product.price_minor,
+    `SELECT product.product_id, product.title,
+            COALESCE(offering.booking_provider, product.booking_provider) AS booking_provider,
+            product.price_minor,
             product.currency, product.vat_basis_points,
             variant.variant_id, variant.title AS variant_title, variant.price_minor AS variant_price_minor
      FROM products product
+     LEFT JOIN location_products offering
+       ON offering.product_offering_id = $3::uuid
+      AND offering.product_id = product.product_id
      LEFT JOIN product_variants variant
        ON variant.product_id = product.product_id
       AND (
         variant.variant_id = $2::uuid
         OR (
           $2::uuid IS NULL
-          AND product.booking_provider = 'core'
+          AND COALESCE(offering.booking_provider, product.booking_provider) = 'core'
           AND variant.regiondo_variant_id IS NULL
           AND variant.title IS NULL
         )
       )
       AND (
-        (product.booking_provider = 'regiondo' AND variant.regiondo_variant_id IS NOT NULL)
-        OR (product.booking_provider = 'core' AND variant.regiondo_variant_id IS NULL)
+        (COALESCE(offering.booking_provider, product.booking_provider) = 'regiondo' AND variant.regiondo_variant_id IS NOT NULL)
+        OR (COALESCE(offering.booking_provider, product.booking_provider) = 'core' AND variant.regiondo_variant_id IS NULL)
       )
      WHERE product.product_id = $1
        AND ($2::uuid IS NULL OR variant.variant_id IS NOT NULL)
      LIMIT 1`,
-    [input.productId, input.variantId ?? null]
+    [input.productId, input.variantId ?? null, input.locationProductId ?? null]
   );
-  if (!productResult.rowCount) throw new Error('Product or variant was not found.');
+  if (!productResult.rowCount) throw new PricingValidationError('Product or variant was not found.');
   const product = productResult.rows[0];
   const requestedOptions = input.options ?? [];
   const optionIds = requestedOptions.map((option) => option.optionId);
   const optionResult = optionIds.length
-    ? await client.query<{ option_id: string; title: string | null; price_delta_minor: string | number }>(
-        `SELECT option_record.option_id, option_record.title, option_record.price_delta_minor
+    ? await client.query<{ option_id: string; title: string | null; price_delta_minor: string | number; values_json: unknown }>(
+        `SELECT option_record.option_id, option_record.title, option_record.price_delta_minor, option_record.values_json
          FROM product_options option_record
          INNER JOIN products product ON product.product_id = option_record.product_id
          WHERE option_record.option_id = ANY($1::uuid[]) AND option_record.product_id = $2
            AND ($3::uuid IS NULL OR option_record.variant_id IS NULL OR option_record.variant_id = $3::uuid)
            AND (
-             (product.booking_provider = 'regiondo' AND option_record.regiondo_option_id IS NOT NULL)
-             OR (product.booking_provider = 'core' AND option_record.regiondo_option_id IS NULL)
+             ($4 = 'regiondo' AND option_record.regiondo_option_id IS NOT NULL)
+             OR ($4 = 'core' AND option_record.regiondo_option_id IS NULL)
            )`,
-        [optionIds, input.productId, product.variant_id]
+        [optionIds, input.productId, product.variant_id, product.booking_provider]
       )
     : { rows: [], rowCount: 0 };
-  if (optionResult.rows.length !== optionIds.length) throw new Error('One or more selected options are invalid.');
+  if (optionResult.rows.length !== optionIds.length) {
+    throw new PricingValidationError('One or more selected options are invalid.');
+  }
   const valueByOption = new Map(requestedOptions.map((option) => [option.optionId, option.value]));
+  for (const option of optionResult.rows) {
+    const allowedValues = allowedOptionValues(option.values_json);
+    const selectedValue = valueByOption.get(option.option_id);
+    if (allowedValues.length && (!selectedValue || !allowedValues.includes(selectedValue))) {
+      throw new PricingValidationError('One or more selected option values are invalid.');
+    }
+  }
 
   let discount: Parameters<typeof calculatePrice>[0]['discount'];
   if (input.discountCode) {
@@ -153,7 +197,7 @@ export async function quoteWithClient(client: PoolClient, input: PricingQuoteInp
        LIMIT 1`,
       [input.discountCode, input.productId, input.locationId ?? null]
     );
-    if (!discountResult.rowCount) throw new Error('Discount code is invalid or expired.');
+    if (!discountResult.rowCount) throw new PricingValidationError('Discount code is invalid or expired.');
     const row = discountResult.rows[0];
     discount = {
       type: row.discount_type,

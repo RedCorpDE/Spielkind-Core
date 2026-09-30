@@ -1,8 +1,11 @@
 import { pool } from '../../db/pool.js';
+import { loadResourceRequirements } from './resource-requirements.repository.js';
+import { isIntervalAllowedByAvailabilityRules, loadManualBlockCapacities } from './availability-rule.repository.js';
 
 export interface AvailabilityQuery {
   location_id?: string;
   product_id?: string;
+  product_variant_id?: string;
   dt_from: string;
   dt_to: string;
   guest_count: number;
@@ -35,35 +38,34 @@ export function calculateAvailabilitySnapshot(input: {
   };
 }
 
-interface ResourceRequirementRow {
-  resource_id: string;
-  resource_title: string;
-  capacity_available: number;
-  mapping_quantity: string | number;
-}
-
 export async function getAvailability(query: AvailabilityQuery): Promise<AvailabilityItem[]> {
+  if (query.product_id && query.location_id && !(await isIntervalAllowedByAvailabilityRules(pool, {
+    locationId: query.location_id,
+    productId: query.product_id,
+    productVariantId: query.product_variant_id,
+    startsAt: query.dt_from,
+    endsAt: query.dt_to
+  }))) {
+    return [];
+  }
   const requirementResult = query.product_id
-    ? await pool.query<ResourceRequirementRow>(
+    ? query.location_id
+      ? { rows: await loadResourceRequirements(pool, {
+          productId: query.product_id,
+          locationId: query.location_id,
+          quantity: 1
+        }) }
+      : { rows: [] }
+    : await pool.query<{
+        resource_id: string; resource_title: string; capacity_available: number;
+        required_quantity: number; source: 'offering';
+      }>(
         `SELECT
            r.resource_id,
            r.title AS resource_title,
            r.capacity_available,
-           pr.quantity AS mapping_quantity
-         FROM product_resources pr
-         INNER JOIN resources r ON r.resource_id = pr.resource_id
-         WHERE pr.product_id = $1
-           AND r.operational_status = 'active'
-           AND ($2::uuid IS NULL OR r.location_id = $2::uuid)
-         ORDER BY r.title ASC`,
-        [query.product_id, query.location_id ?? null]
-      )
-    : await pool.query<ResourceRequirementRow>(
-        `SELECT
-           r.resource_id,
-           r.title AS resource_title,
-           r.capacity_available,
-           1 AS mapping_quantity
+           1 AS required_quantity,
+           'offering'::text AS source
          FROM resources r
          WHERE ($1::uuid IS NULL OR r.location_id = $1::uuid)
            AND r.operational_status = 'active'
@@ -110,13 +112,25 @@ export async function getAvailability(query: AvailabilityQuery): Promise<Availab
     [query.dt_from, query.dt_to, resourceIds]
   );
   const heldMap = new Map(heldResult.rows.map((row) => [row.resource_id, Number(row.capacity_held)]));
+  const manualBlockCapacities = query.location_id
+    ? await loadManualBlockCapacities(pool, {
+        resourceIds,
+        locationId: query.location_id,
+        productId: query.product_id,
+        startsAt: query.dt_from,
+        endsAt: query.dt_to
+      })
+    : new Map<string, number>();
 
   return requirementResult.rows.map((row) => {
     const capacityReserved = reservedMap.get(row.resource_id) ?? 0;
     const capacityHeld = heldMap.get(row.resource_id) ?? 0;
     const snapshot = calculateAvailabilitySnapshot({
-      requiredQuantity: Number(row.mapping_quantity) * query.guest_count,
-      capacityAvailable: Number(row.capacity_available),
+      requiredQuantity: Number(row.required_quantity) * query.guest_count,
+      capacityAvailable: Math.min(
+        Number(row.capacity_available),
+        manualBlockCapacities.get(row.resource_id) ?? Number(row.capacity_available)
+      ),
       capacityReserved: capacityReserved + capacityHeld
     });
 

@@ -2,9 +2,10 @@ import { createHash } from 'node:crypto';
 import { appConfig } from '../../config/env.js';
 import { pool } from '../../db/pool.js';
 import { createReservationHold } from '../availability/reservation-hold.service.js';
-import { createNativeBooking } from '../bookings/native-booking.service.js';
+import { bookingProviderRegistry } from '../bookings/booking-provider.js';
+import { bookingQuoteService } from '../bookings/booking-quote.service.js';
+import { getBookingOffering, getCatalogProductOffering } from '../catalog/catalog.repository.js';
 import { paymentProviderRegistry } from '../payments/payment-provider.registry.js';
-import { pricingService } from '../pricing/pricing.service.js';
 import { createCheckoutToken } from './web-token.service.js';
 import type { WebAvailabilityTokenPayload } from './availability-token.js';
 
@@ -14,6 +15,7 @@ export interface WebCheckoutInput {
   productId: string;
   variantId?: string;
   quantity: number;
+  options?: Array<{ optionId: string; value?: string; quantity?: number }>;
   contact: { firstName: string; lastName: string; email: string; phone?: string };
   availability: WebAvailabilityTokenPayload;
   idempotencyKey: string;
@@ -101,22 +103,45 @@ export async function createWebCheckout(input: WebCheckoutInput): Promise<WebChe
 
   const clientId = input.clientId ?? await resolveGuestClient(input.contact);
   const expiresAt = new Date(Date.now() + appConfig.WEB_CHECKOUT_TTL_MINUTES * 60_000).toISOString();
-  const quote = await pricingService.quote({
-    productId: input.productId, variantId: input.variantId, quantity: input.quantity,
-    clientId, locationId: input.locationId
-  });
-  const hold = await createReservationHold({
-    clientId, locationId: input.locationId, productId: input.productId,
-    productVariantId: input.variantId, quantity: input.quantity,
-    startsAt: input.availability.startsAt, endsAt: input.availability.endsAt,
-    expiresAt, idempotencyKey: `web-hold:${input.idempotencyKey}`,
-    metadata: { source: 'wordpress' }
-  });
-  const booking = await createNativeBooking({
-    clientId, locationId: input.locationId, productId: input.productId, variantId: input.variantId,
-    quantity: input.quantity, options: [], startsAt: input.availability.startsAt,
-    endsAt: input.availability.endsAt, holdId: hold.id, idempotencyKey: `web-booking:${input.idempotencyKey}`,
-    allowProviderCatalog: true
+  const catalogOffering = input.availability.locationProductId
+    ? null
+    : await getCatalogProductOffering(input.productId, input.locationId);
+  const locationProductId = input.availability.locationProductId ?? catalogOffering?.offering.id;
+  if (!locationProductId) throw new Error('The availability token does not identify a bookable offering.');
+  const bookingIntent = {
+    locationId: input.locationId,
+    productId: input.productId,
+    locationProductId,
+    variantId: input.variantId,
+    startAt: input.availability.startsAt,
+    endAt: input.availability.endsAt,
+    participants: input.quantity,
+    options: input.options ?? []
+  };
+  const quote = await bookingQuoteService.quote(bookingIntent, { clientId });
+  if (!quote.available) throw new Error('The selected booking is no longer available.');
+  const offering = await getBookingOffering(locationProductId);
+  if (!offering) throw new Error('The selected offering no longer exists.');
+  const bookingProvider = bookingProviderRegistry.get(offering.bookingProvider);
+  let holdId: string | undefined;
+  if (offering.bookingProvider === 'core') {
+    const hold = await createReservationHold({
+      clientId, locationId: input.locationId, productId: input.productId,
+      productOfferingId: locationProductId,
+      productVariantId: input.variantId, quantity: input.quantity,
+      startsAt: input.availability.startsAt, endsAt: input.availability.endsAt,
+      expiresAt, idempotencyKey: `web-hold:${input.idempotencyKey}`,
+      metadata: { source: 'wordpress', quoteId: quote.quoteId }
+    });
+    holdId = hold.id;
+  }
+  if (!bookingProvider.createBooking) throw new Error(`${bookingProvider.displayName} booking creation is unavailable.`);
+  const booking = await bookingProvider.createBooking({
+    intent: bookingIntent,
+    clientId,
+    holdId,
+    idempotencyKey: `web-booking:${input.idempotencyKey}`,
+    source: 'wordpress'
   });
   await pool.query(
     `UPDATE bookings SET source = 'self-service', booking_source = 'wordpress',
@@ -130,8 +155,8 @@ export async function createWebCheckout(input: WebCheckoutInput): Promise<WebChe
     [input.idempotencyKey, booking.bookingId]
   );
 
-  const provider = paymentProviderRegistry.get('stripe');
-  if (!provider.createPaymentIntent) throw new Error('Stripe PaymentIntent checkout is unavailable.');
+  const paymentProvider = paymentProviderRegistry.get('stripe');
+  if (!paymentProvider.createPaymentIntent) throw new Error('Stripe PaymentIntent checkout is unavailable.');
   const payment = await pool.query<{ payment_id: string }>(
     `INSERT INTO payments (booking_id, amount, type, provider, status, amount_minor, currency, idempotency_key, metadata)
      VALUES ($1, $2, 'card', 'stripe', 'processing', $3, $4, $5, $6::jsonb)
@@ -139,7 +164,7 @@ export async function createWebCheckout(input: WebCheckoutInput): Promise<WebChe
     [booking.bookingId, quote.total / 100, quote.total, quote.currency, `web:${input.idempotencyKey}`,
       JSON.stringify({ source: 'wordpress' })]
   );
-  const intent = await provider.createPaymentIntent({
+  const paymentIntent = await paymentProvider.createPaymentIntent({
     bookingId: booking.bookingId, locationId: input.locationId, productId: input.productId,
     amountMinor: quote.total, currency: quote.currency, idempotencyKey: `web:${input.idempotencyKey}`,
     description: quote.items.map((item) => item.productName).join(', '), customerEmail: input.contact.email
@@ -147,7 +172,7 @@ export async function createWebCheckout(input: WebCheckoutInput): Promise<WebChe
   await pool.query(
     `UPDATE payments SET provider_payment_id = $2, metadata = metadata || $3::jsonb, updated_at = now()
      WHERE payment_id = $1`,
-    [payment.rows[0].payment_id, intent.externalPaymentId, JSON.stringify({ stripeStatus: intent.status })]
+    [payment.rows[0].payment_id, paymentIntent.externalPaymentId, JSON.stringify({ stripeStatus: paymentIntent.status })]
   );
   await pool.query(
     `INSERT INTO web_audit_events (action, actor_type, actor_id, booking_id, client_id, details)
@@ -155,5 +180,5 @@ export async function createWebCheckout(input: WebCheckoutInput): Promise<WebChe
     [booking.bookingId, clientId, JSON.stringify({ locationId: input.locationId, productId: input.productId })]
   );
   const checkoutSessionToken = await createCheckoutToken(booking.bookingId, expiresAt);
-  return { bookingId: booking.bookingId, checkoutSessionToken, clientSecret: intent.clientSecret, expiresAt };
+  return { bookingId: booking.bookingId, checkoutSessionToken, clientSecret: paymentIntent.clientSecret, expiresAt };
 }

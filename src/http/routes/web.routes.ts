@@ -12,7 +12,7 @@ import { appConfig } from '../../config/env.js';
 import { getRequestMetadata } from '../admin.js';
 import { ConflictHttpError, HttpError, UnauthorizedHttpError, ValidationHttpError } from '../errors.js';
 import { optionalWebClientAuth, requireWebClientAuth, requireWebServiceScope, type WebFastifyRequest } from '../web-auth.js';
-import { getCatalogProduct, listCatalogProducts } from '../../modules/catalog/catalog.repository.js';
+import { getBookingOffering, getCatalogProduct, getCatalogProductOffering, listCatalogProducts } from '../../modules/catalog/catalog.repository.js';
 import { verifyAvailabilityToken } from '../../modules/web/availability-token.js';
 import { listWebAvailability } from '../../modules/web/web-availability.service.js';
 import { createWebCheckout } from '../../modules/web/web-checkout.service.js';
@@ -23,6 +23,9 @@ import {
 import {
   bookingForManagementToken, ensureManagementToken, validateCheckoutToken
 } from '../../modules/web/web-token.service.js';
+import { bookingIntentSchema } from '../schemas/booking-intent.schema.js';
+import { bookingQuoteService } from '../../modules/bookings/booking-quote.service.js';
+import { createReservationHold } from '../../modules/availability/reservation-hold.service.js';
 
 const uuid = z.string().uuid();
 const email = z.string().trim().email().transform((value) => value.toLowerCase());
@@ -38,12 +41,24 @@ const productParams = z.object({ productId: uuid });
 const managementParams = z.object({ token: z.string().min(32).max(512) });
 const cancelSchema = z.object({ reason: z.string().trim().max(1000).optional() }).default({});
 const checkoutSchema = z.object({
-  locationId: uuid, productId: uuid, variantId: uuid.nullish(), availabilityId: z.string().min(20).max(4096),
+  locationId: uuid, productId: uuid, locationProductId: uuid.optional(), variantId: uuid.nullish(),
+  availabilityId: z.string().min(20).max(4096).optional(),
+  startAt: z.string().datetime().optional(), endAt: z.string().datetime().optional(),
+  participants: z.coerce.number().int().positive().max(100).optional(),
   quantity: z.coerce.number().int().positive().max(100).default(1),
+  options: z.array(z.object({
+    optionId: uuid,
+    value: z.string().trim().min(1).max(500).optional(),
+    quantity: z.coerce.number().int().positive().max(100).optional()
+  })).max(30).default([]),
   contact: z.object({
     firstName: z.string().trim().min(1).max(100), lastName: z.string().trim().min(1).max(100),
     email, phone: z.string().trim().max(50).optional()
   })
+}).superRefine((value, context) => {
+  if (!value.availabilityId && !(value.locationProductId && value.startAt && value.endAt)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['availabilityId'], message: 'availabilityId or canonical booking times are required.' });
+  }
 });
 
 const attempts = new Map<string, { count: number; resetAt: number }>();
@@ -90,6 +105,20 @@ export function safeWebProduct(product: Awaited<ReturnType<typeof getCatalogProd
   };
 }
 
+function safeWebOffering(product: Awaited<ReturnType<typeof getCatalogProductOffering>>) {
+  if (!product) return null;
+  return {
+    id: product.id,
+    title: product.title,
+    description: product.description,
+    imageUrl: product.imageUrl,
+    price: product.price,
+    variants: product.variants,
+    offering: product.offering,
+    bookingConfiguration: product.bookingConfiguration
+  };
+}
+
 export async function registerWebRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/web/locations', async (request) => {
     await service(request, 'locations:read');
@@ -114,9 +143,49 @@ export async function registerWebRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/web/products/:productId', async (request) => {
     await service(request, 'products:read');
     const { productId } = parse(productParams, request.params, 'Invalid product id.');
-    const product = safeWebProduct(await getCatalogProduct(productId));
+    const query = parse(z.object({ locationId: uuid.optional() }), request.query, 'Invalid product query.');
+    const product = query.locationId
+      ? safeWebOffering(await getCatalogProductOffering(productId, query.locationId))
+      : safeWebProduct(await getCatalogProduct(productId));
     if (!product) throw new HttpError(404, 'Product was not found.', 'PRODUCT_NOT_FOUND');
     return product;
+  });
+
+  app.post('/api/web/booking-quotes', async (request) => {
+    await service(request, 'availability:read');
+    rateLimit(request, 'web-quote', 60);
+    const body = parse(bookingIntentSchema, request.body, 'Invalid booking quote payload.');
+    const auth = await optionalWebClientAuth(request as WebFastifyRequest);
+    return bookingQuoteService.quote(body, { clientId: auth?.client.id });
+  });
+
+  app.post('/api/web/booking-holds', async (request) => {
+    await service(request, 'checkout:create');
+    rateLimit(request, 'web-hold', 20, 10 * 60_000);
+    const body = parse(bookingIntentSchema, request.body, 'Invalid booking hold payload.');
+    const offering = await getBookingOffering(body.locationProductId);
+    if (!offering || !offering.active || offering.productId !== body.productId || offering.locationId !== body.locationId) {
+      throw new HttpError(404, 'Offering was not found.', 'PRODUCT_NOT_FOUND');
+    }
+    const auth = await optionalWebClientAuth(request as WebFastifyRequest);
+    const quote = await bookingQuoteService.quote(body, { clientId: auth?.client.id });
+    if (!quote.available) throw new ConflictHttpError('The selection is no longer available.', 'AVAILABILITY_UNAVAILABLE');
+    if (offering.bookingProvider !== 'core') {
+      return { id: null, status: 'provider_managed' as const, expiresAt: quote.expiresAt };
+    }
+    return createReservationHold({
+      clientId: auth?.client.id,
+      locationId: body.locationId,
+      productId: body.productId,
+      productOfferingId: body.locationProductId,
+      productVariantId: body.variantId,
+      quantity: body.participants ?? body.quantities?.participants ?? 1,
+      startsAt: body.startAt,
+      endsAt: body.endAt,
+      expiresAt: quote.expiresAt,
+      idempotencyKey: `web:${idempotencyKey(request)}`,
+      metadata: { source: 'wordpress', quoteId: quote.quoteId }
+    });
   });
 
   app.get('/api/web/products/:productId/availability', async (request) => {
@@ -126,6 +195,7 @@ export async function registerWebRoutes(app: FastifyInstance): Promise<void> {
     const query = parse(z.object({
       locationId: uuid, variantId: uuid.optional(), date: z.string().date().optional(),
       from: z.string().datetime().optional(), to: z.string().datetime().optional(),
+      durationMinutes: z.coerce.number().int().positive().max(7 * 24 * 60).optional(),
       quantity: z.coerce.number().int().positive().max(100).default(1)
     }).refine((value) => Boolean(value.date || (value.from && value.to)), 'date or from/to are required'), request.query, 'Invalid availability query.');
     const items = await listWebAvailability({ productId, ...query, quantity: query.quantity ?? 1 });
@@ -233,7 +303,17 @@ export async function registerWebRoutes(app: FastifyInstance): Promise<void> {
     await service(request, 'checkout:create');
     rateLimit(request, 'web-checkout', 10, 10 * 60_000);
     const body = parse(checkoutSchema, request.body, 'Invalid checkout payload.');
-    const availability = verifyAvailabilityToken(body.availabilityId);
+    const availability = body.availabilityId
+      ? verifyAvailabilityToken(body.availabilityId)
+      : {
+          locationId: body.locationId,
+          productId: body.productId,
+          locationProductId: body.locationProductId,
+          variantId: body.variantId ?? null,
+          startsAt: body.startAt!,
+          endsAt: body.endAt!,
+          expiresAt: new Date(Date.now() + 15 * 60_000).toISOString()
+        };
     if (!availability) throw new ConflictHttpError('Availability is invalid or expired.', 'AVAILABILITY_UNAVAILABLE');
     if (availability.locationId !== body.locationId || availability.productId !== body.productId ||
         availability.variantId !== (body.variantId ?? null)) {
@@ -241,7 +321,7 @@ export async function registerWebRoutes(app: FastifyInstance): Promise<void> {
     }
     const auth = await optionalWebClientAuth(request as WebFastifyRequest);
     const result = await createWebCheckout({
-      ...body, quantity: body.quantity ?? 1, variantId: body.variantId ?? undefined, availability,
+      ...body, quantity: body.participants ?? body.quantity ?? 1, variantId: body.variantId ?? undefined, availability,
       clientId: auth?.client.id, idempotencyKey: idempotencyKey(request)
     });
     reply.status(201);

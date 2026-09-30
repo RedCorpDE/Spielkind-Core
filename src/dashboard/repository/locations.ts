@@ -147,8 +147,17 @@ export async function mapLocationToRegiondo(
     await client.query(`UPDATE bookings SET location_id = $1, updated_at = now() WHERE location_id = $2`, [target.location_id, source.location_id]);
     await client.query(`UPDATE resources SET location_id = $1, updated_at = now() WHERE location_id = $2`, [target.location_id, source.location_id]);
     await client.query(
-      `INSERT INTO location_products (location_id, product_id, enabled)
-       SELECT $1, product_id, enabled FROM location_products WHERE location_id = $2
+      `INSERT INTO location_products (
+         location_id, product_id, enabled, booking_provider, time_selection_mode, timezone,
+         min_participants, max_participants, min_duration_minutes, max_duration_minutes,
+         duration_step_minutes, default_duration_minutes, allowed_duration_minutes,
+         min_advance_minutes, max_advance_days, same_day_booking_allowed
+       )
+       SELECT $1, product_id, enabled, booking_provider, time_selection_mode, timezone,
+              min_participants, max_participants, min_duration_minutes, max_duration_minutes,
+              duration_step_minutes, default_duration_minutes, allowed_duration_minutes,
+              min_advance_minutes, max_advance_days, same_day_booking_allowed
+       FROM location_products WHERE location_id = $2
        ON CONFLICT (location_id, product_id) DO NOTHING`,
       [target.location_id, source.location_id]
     );

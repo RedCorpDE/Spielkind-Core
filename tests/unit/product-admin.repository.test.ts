@@ -1,16 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { poolQuery } = vi.hoisted(() => ({ poolQuery: vi.fn() }));
+const { poolQuery, transactionQuery } = vi.hoisted(() => ({
+  poolQuery: vi.fn(),
+  transactionQuery: vi.fn()
+}));
 
 vi.mock('../../src/db/pool.js', () => ({
   pool: { query: poolQuery }
+}));
+vi.mock('../../src/db/transaction.js', () => ({
+  withTransaction: (callback: (client: { query: typeof transactionQuery }) => unknown) => callback({ query: transactionQuery })
 }));
 
 const {
   addProductOffering,
   createAdminProduct,
   createProductVariant,
-  deleteProductVariant
+  deleteProductVariant,
+  updateProductOffering
 } = await import('../../src/modules/products/product-admin.repository.js');
 
 const productRow = {
@@ -32,6 +39,7 @@ const productRow = {
 describe('Core-native product creation repository', () => {
   beforeEach(() => {
     poolQuery.mockReset();
+    transactionQuery.mockReset();
     poolQuery
       .mockResolvedValueOnce({ rowCount: 1, rows: [{ product_id: productRow.product_id }] })
       .mockResolvedValueOnce({ rowCount: 1, rows: [productRow] });
@@ -111,5 +119,48 @@ describe('Core-native product creation repository', () => {
       productRow.product_id,
       '22222222-2222-2222-2222-222222222222'
     )).resolves.toBe('in_use');
+  });
+
+  it('switches one offering to Core without rewriting historical booking providers', async () => {
+    poolQuery.mockReset();
+    transactionQuery
+      .mockResolvedValueOnce({
+        rowCount: 1,
+        rows: [{
+          product_offering_id: '33333333-3333-3333-3333-333333333333',
+          booking_provider: 'regiondo'
+        }]
+      })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ variants: 1, resources: 1 }] })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] });
+    poolQuery.mockResolvedValueOnce({ rowCount: 1, rows: [productRow] });
+
+    await expect(updateProductOffering(
+      '22222222-2222-2222-2222-222222222222',
+      productRow.product_id,
+      { bookingProvider: 'core' }
+    )).resolves.toMatchObject({ productId: productRow.product_id });
+
+    const statements = transactionQuery.mock.calls.map(([sql]) => String(sql));
+    expect(statements.some((sql) => sql.includes('UPDATE location_products'))).toBe(true);
+    expect(statements.every((sql) => !/UPDATE\s+bookings\b/i.test(sql))).toBe(true);
+  });
+
+  it('rejects a Regiondo offering without an external mapping', async () => {
+    transactionQuery
+      .mockResolvedValueOnce({
+        rowCount: 1,
+        rows: [{
+          product_offering_id: '33333333-3333-3333-3333-333333333333',
+          booking_provider: 'core'
+        }]
+      })
+      .mockResolvedValueOnce({ rowCount: 0, rows: [] });
+
+    await expect(updateProductOffering(
+      '22222222-2222-2222-2222-222222222222',
+      productRow.product_id,
+      { bookingProvider: 'regiondo' }
+    )).rejects.toThrow('A Regiondo product mapping is required');
   });
 });

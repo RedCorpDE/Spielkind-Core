@@ -15,6 +15,7 @@ import { recordAdminErrorEvent, type AdminErrorSeverity } from '../errors/admin-
 import type { AdminFastifyRequest } from './admin.js';
 import { DomainError, ProviderUnavailableError } from '../modules/bookings/booking.errors.js';
 import { RefundAmountExceededError } from '../modules/payments/refund.service.js';
+import { PricingValidationError } from '../modules/pricing/pricing.service.js';
 
 export class HttpError extends Error {
   constructor(
@@ -79,7 +80,7 @@ function getStatusCode(error: Error): number {
   if (error instanceof HttpError) return error.statusCode;
   if (error instanceof DashboardNotFoundError) return 404;
   if (error instanceof DashboardConflictError || error instanceof OverbookingError || error instanceof MissingProductResourceMappingError) return 409;
-  if (error instanceof DashboardValidationError || error instanceof RegiondoSyncValidationError || error instanceof RegiondoWebhookValidationError) return 400;
+  if (error instanceof DashboardValidationError || error instanceof RegiondoSyncValidationError || error instanceof RegiondoWebhookValidationError || error instanceof PricingValidationError) return 400;
   if (error instanceof RegiondoPurchaseRecoveryRequiredError) return 502;
   if (error instanceof RegiondoApiError) return getRegiondoStatusCode(error);
   if (error instanceof ProviderUnavailableError) return 503;
@@ -214,6 +215,7 @@ export function registerErrorHandler() {
 
     if (
       error instanceof DashboardValidationError ||
+      error instanceof PricingValidationError ||
       error instanceof RegiondoSyncValidationError ||
       error instanceof RegiondoWebhookValidationError
     ) {

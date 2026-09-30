@@ -4,6 +4,7 @@ import { appConfig } from '../../config/env.js';
 export interface WebAvailabilityTokenPayload {
   locationId: string;
   productId: string;
+  locationProductId?: string;
   variantId: string | null;
   startsAt: string;
   endsAt: string;

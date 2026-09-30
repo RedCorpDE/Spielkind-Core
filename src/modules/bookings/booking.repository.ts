@@ -31,18 +31,23 @@ async function upsertClient(client: PoolClient, input: NormalizedRegiondoBooking
   }
 
   if (input.email) {
-    const result = await client.query<{ client_id: string }>(
-      `INSERT INTO clients (first_name, last_name, email, phone_number, regiondo_raw)
-       VALUES ($1, $2, $3, $4, $5::jsonb)
-       ON CONFLICT (email)
-       DO UPDATE SET first_name = EXCLUDED.first_name,
-                     last_name = EXCLUDED.last_name,
-                     phone_number = COALESCE(EXCLUDED.phone_number, clients.phone_number),
-                     regiondo_raw = EXCLUDED.regiondo_raw,
-                     updated_at = now()
-       RETURNING client_id`,
-      [input.firstName, input.lastName, input.email, input.phoneNumber, JSON.stringify(input.raw)]
+    const existing = await client.query<{ client_id: string }>(
+      `SELECT client_id FROM clients WHERE LOWER(email::text) = LOWER($1) ORDER BY created_at LIMIT 1 FOR UPDATE`,
+      [input.email]
     );
+    const result = existing.rowCount
+      ? await client.query<{ client_id: string }>(
+          `UPDATE clients
+           SET first_name = $2, last_name = $3, phone_number = COALESCE($4, phone_number),
+               regiondo_raw = $5::jsonb, updated_at = now()
+           WHERE client_id = $1 RETURNING client_id`,
+          [existing.rows[0].client_id, input.firstName, input.lastName, input.phoneNumber, JSON.stringify(input.raw)]
+        )
+      : await client.query<{ client_id: string }>(
+          `INSERT INTO clients (first_name, last_name, email, phone_number, regiondo_raw)
+           VALUES ($1, $2, $3, $4, $5::jsonb) RETURNING client_id`,
+          [input.firstName, input.lastName, input.email, input.phoneNumber, JSON.stringify(input.raw)]
+        );
 
     return result.rows[0].client_id;
   }

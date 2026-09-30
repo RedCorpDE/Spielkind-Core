@@ -19,8 +19,22 @@ export interface AdminProductOffering {
   locationId: string;
   locationTitle: string;
   enabled: boolean;
+  bookingProvider: 'core' | 'regiondo';
+  timeSelectionMode: 'date_range' | 'start_end' | 'start_duration' | 'fixed_duration';
+  timezone: string;
+  minParticipants: number;
+  maxParticipants: number;
+  minDurationMinutes: number | null;
+  maxDurationMinutes: number | null;
+  durationStepMinutes: number | null;
+  defaultDurationMinutes: number | null;
+  allowedDurationMinutes: number[];
+  minAdvanceMinutes: number;
+  maxAdvanceDays: number | null;
+  sameDayBookingAllowed: boolean;
   createdAt: string;
   updatedAt: string;
+  resources: AdminProductResourceMapping[];
 }
 
 export interface AdminProductOption {
@@ -198,8 +212,31 @@ const productSelect = `SELECT
            'locationId', lp.location_id,
            'locationTitle', location.title,
            'enabled', lp.enabled,
+           'bookingProvider', lp.booking_provider,
+           'timeSelectionMode', lp.time_selection_mode,
+           'timezone', lp.timezone,
+           'minParticipants', lp.min_participants,
+           'maxParticipants', lp.max_participants,
+           'minDurationMinutes', lp.min_duration_minutes,
+           'maxDurationMinutes', lp.max_duration_minutes,
+           'durationStepMinutes', lp.duration_step_minutes,
+           'defaultDurationMinutes', lp.default_duration_minutes,
+           'allowedDurationMinutes', COALESCE(lp.allowed_duration_minutes, ARRAY[]::integer[]),
+           'minAdvanceMinutes', lp.min_advance_minutes,
+           'maxAdvanceDays', lp.max_advance_days,
+           'sameDayBookingAllowed', lp.same_day_booking_allowed,
            'createdAt', lp.created_at,
            'updatedAt', lp.updated_at
+           , 'resources', COALESCE((
+             SELECT jsonb_agg(jsonb_build_object(
+               'resourceId', offering_resource.resource_id,
+               'resourceTitle', resource.title,
+               'quantity', offering_resource.quantity
+             ) ORDER BY resource.title ASC)
+             FROM product_offering_resources offering_resource
+             INNER JOIN resources resource ON resource.resource_id = offering_resource.resource_id
+             WHERE offering_resource.product_offering_id = lp.product_offering_id
+           ), '[]'::jsonb)
          ) ORDER BY location.title ASC
        )
        FROM location_products lp
@@ -403,8 +440,8 @@ export async function listLocationProducts(locationId: string): Promise<AdminPro
 
 export async function addProductOffering(locationId: string, productId: string): Promise<AdminProduct | null> {
   const result = await pool.query(
-    `INSERT INTO location_products (location_id, product_id, enabled)
-     SELECT location.location_id, product.product_id, true
+    `INSERT INTO location_products (location_id, product_id, enabled, booking_provider)
+     SELECT location.location_id, product.product_id, true, product.booking_provider
      FROM locations location
      CROSS JOIN products product
      WHERE location.location_id = $1 AND product.product_id = $2
@@ -417,13 +454,112 @@ export async function addProductOffering(locationId: string, productId: string):
   return result.rowCount ? getAdminProduct(productId) : null;
 }
 
+export interface UpdateProductOfferingInput {
+  bookingProvider?: 'core' | 'regiondo';
+  regiondoProductId?: string;
+  timeSelectionMode?: 'date_range' | 'start_end' | 'start_duration' | 'fixed_duration';
+  timezone?: string;
+  minParticipants?: number;
+  maxParticipants?: number;
+  minDurationMinutes?: number | null;
+  maxDurationMinutes?: number | null;
+  durationStepMinutes?: number | null;
+  defaultDurationMinutes?: number | null;
+  allowedDurationMinutes?: number[] | null;
+  minAdvanceMinutes?: number;
+  maxAdvanceDays?: number | null;
+  sameDayBookingAllowed?: boolean;
+  enabled?: boolean;
+}
+
+export async function updateProductOffering(
+  locationId: string,
+  productId: string,
+  input: UpdateProductOfferingInput
+): Promise<AdminProduct | null> {
+  const updated = await withTransaction(async (client) => {
+    const current = await client.query<{ product_offering_id: string; booking_provider: 'core' | 'regiondo' }>(
+      `SELECT product_offering_id, booking_provider
+       FROM location_products WHERE location_id = $1 AND product_id = $2 FOR UPDATE`,
+      [locationId, productId]
+    );
+    if (!current.rowCount) return false;
+    const offeringId = current.rows[0].product_offering_id;
+    const nextProvider = input.bookingProvider ?? current.rows[0].booking_provider;
+    if (nextProvider === 'core' && current.rows[0].booking_provider !== 'core') {
+      const readiness = await client.query<{ variants: string | number; resources: string | number }>(
+        `SELECT
+           (SELECT COUNT(*) FROM product_variants WHERE product_id = $1 AND regiondo_variant_id IS NULL) AS variants,
+           (SELECT COUNT(*) FROM product_offering_resources WHERE product_offering_id = $2) AS resources`,
+        [productId, offeringId]
+      );
+      if (Number(readiness.rows[0]?.resources ?? 0) < 1) {
+        throw new Error('Prepare Core resource requirements before switching this offering to Core.');
+      }
+    }
+    if (nextProvider === 'regiondo') {
+      const externalId = input.regiondoProductId?.trim();
+      const existingReference = await client.query(
+        `SELECT 1 FROM provider_references
+         WHERE provider = 'regiondo' AND entity_type = 'product_offering' AND entity_id = $1`,
+        [offeringId]
+      );
+      if (!externalId && !existingReference.rowCount) {
+        throw new Error('A Regiondo product mapping is required for a Regiondo offering.');
+      }
+      if (externalId) {
+        await client.query(
+          `INSERT INTO provider_references (provider, entity_type, entity_id, external_id)
+           VALUES ('regiondo', 'product_offering', $1, $2)
+           ON CONFLICT (provider, entity_type, entity_id)
+           DO UPDATE SET external_id = EXCLUDED.external_id, updated_at = now()`,
+          [offeringId, externalId]
+        );
+      }
+    }
+    await client.query(
+      `UPDATE location_products SET
+         booking_provider = COALESCE($3, booking_provider),
+         time_selection_mode = COALESCE($4, time_selection_mode),
+         timezone = COALESCE($5, timezone),
+         min_participants = COALESCE($6, min_participants),
+         max_participants = COALESCE($7, max_participants),
+         min_duration_minutes = CASE WHEN $8::boolean THEN $9 ELSE min_duration_minutes END,
+         max_duration_minutes = CASE WHEN $10::boolean THEN $11 ELSE max_duration_minutes END,
+         duration_step_minutes = CASE WHEN $12::boolean THEN $13 ELSE duration_step_minutes END,
+         default_duration_minutes = CASE WHEN $14::boolean THEN $15 ELSE default_duration_minutes END,
+         allowed_duration_minutes = CASE WHEN $16::boolean THEN $17::integer[] ELSE allowed_duration_minutes END,
+         min_advance_minutes = COALESCE($18, min_advance_minutes),
+         max_advance_days = CASE WHEN $19::boolean THEN $20 ELSE max_advance_days END,
+         same_day_booking_allowed = COALESCE($21, same_day_booking_allowed),
+         enabled = COALESCE($22, enabled),
+         updated_at = now()
+       WHERE product_offering_id = $1 AND product_id = $2`,
+      [
+        offeringId, productId, input.bookingProvider ?? null, input.timeSelectionMode ?? null,
+        input.timezone ?? null, input.minParticipants ?? null, input.maxParticipants ?? null,
+        'minDurationMinutes' in input, input.minDurationMinutes ?? null,
+        'maxDurationMinutes' in input, input.maxDurationMinutes ?? null,
+        'durationStepMinutes' in input, input.durationStepMinutes ?? null,
+        'defaultDurationMinutes' in input, input.defaultDurationMinutes ?? null,
+        'allowedDurationMinutes' in input, input.allowedDurationMinutes ?? null,
+        input.minAdvanceMinutes ?? null,
+        'maxAdvanceDays' in input, input.maxAdvanceDays ?? null,
+        input.sameDayBookingAllowed ?? null, input.enabled ?? null
+      ]
+    );
+    return true;
+  });
+  return updated ? getAdminProduct(productId) : null;
+}
+
 export async function removeProductOffering(
   locationId: string,
   productId: string
 ): Promise<'deleted' | 'not_found' | 'in_use'> {
   const result = await pool.query<{ exists: boolean; in_use: boolean; deleted: boolean }>(
     `WITH target AS (
-       SELECT 1 FROM location_products WHERE location_id = $1 AND product_id = $2
+       SELECT product_offering_id FROM location_products WHERE location_id = $1 AND product_id = $2
      ), blockers AS (
        SELECT 1
        FROM bookings booking
@@ -437,6 +573,10 @@ export async function removeProductOffering(
        FROM product_resources mapping
        INNER JOIN resources resource ON resource.resource_id = mapping.resource_id
        WHERE mapping.product_id = $2 AND resource.location_id = $1
+       UNION ALL
+       SELECT 1
+       FROM product_offering_resources requirement
+       WHERE requirement.product_offering_id IN (SELECT product_offering_id FROM target)
      ), deleted AS (
        DELETE FROM location_products
        WHERE location_id = $1 AND product_id = $2

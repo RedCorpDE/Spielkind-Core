@@ -255,11 +255,7 @@ LEFT JOIN LATERAL (
     'id', resource.resource_id,
     'locationId', resource.location_id,
     'name', resource.title,
-    'kind', CASE
-      WHEN resource.type IN ('pc-room', 'console-room', 'bed-room') THEN 'room'
-      WHEN resource.type = 'beverages' THEN 'equipment'
-      ELSE resource.type
-    END
+    'kind', resource.type
   )) AS resources
   FROM consumptions consumption
   INNER JOIN resources resource ON resource.resource_id = consumption.resource_id

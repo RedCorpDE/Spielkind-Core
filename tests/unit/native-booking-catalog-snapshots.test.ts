@@ -42,7 +42,9 @@ describe('native booking catalog snapshots', () => {
     });
     mocks.clientQuery.mockImplementation(async (sql: string) => {
       if (sql.includes('FROM bookings WHERE idempotency_key')) return { rowCount: 0, rows: [] };
-      if (sql.includes('SELECT booking_provider FROM products')) return { rowCount: 1, rows: [{ booking_provider: 'core' }] };
+      if (sql.includes('COALESCE(offering.booking_provider')) {
+        return { rowCount: 1, rows: [{ booking_provider: 'core', product_offering_id: null }] };
+      }
       if (sql.includes('FROM reservation_holds WHERE')) {
         return {
           rowCount: 1,
@@ -50,6 +52,7 @@ describe('native booking catalog snapshots', () => {
             client_id: '44444444-4444-4444-4444-444444444444',
             location_id: '55555555-5555-5555-5555-555555555555',
             product_id: '11111111-1111-1111-1111-111111111111',
+            product_offering_id: null,
             product_variant_id: '22222222-2222-2222-2222-222222222222',
             quantity: 1,
             starts_at: '2026-10-10T18:00:00.000Z',

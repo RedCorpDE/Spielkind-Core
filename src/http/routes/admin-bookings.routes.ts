@@ -23,6 +23,11 @@ import { pool } from '../../db/client.js';
 import { resolveBookingChangeRequestByAdmin } from '../../modules/bookings/booking-change-request.repository.js';
 import { getCancellationQuote } from '../../modules/cancellations/cancellation.service.js';
 import { cancelWebBooking } from '../../modules/web/web-booking.service.js';
+import { bookingIntentSchema } from '../schemas/booking-intent.schema.js';
+import { bookingQuoteService } from '../../modules/bookings/booking-quote.service.js';
+import { bookingProviderRegistry } from '../../modules/bookings/booking-provider.js';
+import { getBookingOffering } from '../../modules/catalog/catalog.repository.js';
+import { createReservationHold, releaseReservationHold } from '../../modules/availability/reservation-hold.service.js';
 
 const bookingExternalStatusSchema = z.enum(['Pending', 'Processing', 'Confirmed', 'Completed', 'Rejected', 'Canceled', 'Unknown']);
 const bookingOpsStatusSchema = z.enum(['Normal', 'Escalated']);
@@ -38,6 +43,24 @@ const applyRegiondoSyncSchema = z.object({
 const staffCancellationSchema = z.object({
   reason: z.string().trim().min(1).max(1000),
   override: z.boolean().default(false)
+});
+const adminOverridesSchema = z.object({
+  availability: z.boolean().default(false),
+  bookingRules: z.boolean().default(false),
+  createWithoutPayment: z.boolean().default(false)
+}).default({});
+const adminQuoteSchema = bookingIntentSchema.and(z.object({ overrides: adminOverridesSchema.optional() }));
+const adminHoldSchema = bookingIntentSchema.and(z.object({ overrides: adminOverridesSchema.optional() }));
+const adminCreateBookingSchema = bookingIntentSchema.and(z.object({
+  clientId: z.string().uuid(),
+  holdId: z.string().uuid().optional(),
+  overrides: adminOverridesSchema.optional()
+}));
+type AdminBookingOverrides = z.infer<typeof adminOverridesSchema>;
+const noAdminOverrides = (): AdminBookingOverrides => ({
+  availability: false,
+  bookingRules: false,
+  createWithoutPayment: false
 });
 
 const listBookingsQuerySchema = z
@@ -145,6 +168,125 @@ function sendError(error: unknown): never {
 }
 
 export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<void> {
+  app.post('/api/admin/booking-quotes', async (request) => {
+    await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'create');
+    const parsed = adminQuoteSchema.safeParse(request.body);
+    if (!parsed.success) throw new ValidationHttpError('Invalid booking quote payload.');
+    const overrides = parsed.data.overrides ?? noAdminOverrides();
+    if (overrides.availability || overrides.bookingRules || overrides.createWithoutPayment) {
+      await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'manage');
+    }
+    return bookingQuoteService.quote(parsed.data, {
+      clientId: undefined,
+      overrideAvailability: overrides.availability,
+      overrideBookingRules: overrides.bookingRules
+    });
+  });
+
+  app.post('/api/admin/booking-holds', async (request) => {
+    await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'create');
+    const parsed = adminHoldSchema.safeParse(request.body);
+    if (!parsed.success) throw new ValidationHttpError('Invalid booking hold payload.');
+    const overrides = parsed.data.overrides ?? noAdminOverrides();
+    if (overrides.availability || overrides.bookingRules) {
+      await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'manage');
+    }
+    const offering = await getBookingOffering(parsed.data.locationProductId);
+    if (!offering || !offering.active || offering.productId !== parsed.data.productId || offering.locationId !== parsed.data.locationId) {
+      throw new HttpError(404, 'Offering was not found.');
+    }
+    const quote = await bookingQuoteService.quote(parsed.data, {
+      overrideAvailability: overrides.availability,
+      overrideBookingRules: overrides.bookingRules
+    });
+    if (!quote.available) throw new ConflictHttpError('The selection is no longer available.');
+    if (offering.bookingProvider !== 'core') {
+      return { id: null, status: 'provider_managed' as const, expiresAt: quote.expiresAt };
+    }
+    return createReservationHold({
+      locationId: parsed.data.locationId,
+      productId: parsed.data.productId,
+      productOfferingId: parsed.data.locationProductId,
+      productVariantId: parsed.data.variantId,
+      quantity: parsed.data.participants ?? parsed.data.quantities?.participants ?? 1,
+      startsAt: parsed.data.startAt,
+      endsAt: parsed.data.endAt,
+      expiresAt: quote.expiresAt,
+      idempotencyKey: `admin:${request.id}:${parsed.data.locationProductId}`,
+      metadata: { source: 'dashboard', quoteId: quote.quoteId, overrides }
+    });
+  });
+
+  app.post('/api/admin/bookings', async (request, reply) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'create');
+    const parsed = adminCreateBookingSchema.safeParse(request.body);
+    if (!parsed.success) throw new ValidationHttpError('Invalid booking creation payload.');
+    const overrides = parsed.data.overrides ?? noAdminOverrides();
+    if (overrides.availability || overrides.bookingRules || overrides.createWithoutPayment) {
+      await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'manage');
+    }
+    const offering = await getBookingOffering(parsed.data.locationProductId);
+    if (!offering || !offering.active || offering.productId !== parsed.data.productId || offering.locationId !== parsed.data.locationId) {
+      throw new HttpError(404, 'Offering was not found.');
+    }
+    const quote = await bookingQuoteService.quote(parsed.data, {
+      clientId: parsed.data.clientId,
+      overrideAvailability: overrides.availability,
+      overrideBookingRules: overrides.bookingRules
+    });
+    if (!quote.available) throw new ConflictHttpError('The selection is no longer available.');
+    const provider = bookingProviderRegistry.get(offering.bookingProvider);
+    if (!provider.createBooking) throw new ConflictHttpError(`${provider.displayName} booking creation is unavailable.`);
+    let holdId = parsed.data.holdId;
+    if (offering.bookingProvider === 'core' && !holdId) {
+      const hold = await createReservationHold({
+        clientId: parsed.data.clientId,
+        locationId: parsed.data.locationId,
+        productId: parsed.data.productId,
+        productOfferingId: parsed.data.locationProductId,
+        productVariantId: parsed.data.variantId,
+        quantity: parsed.data.participants ?? parsed.data.quantities?.participants ?? 1,
+        startsAt: parsed.data.startAt,
+        endsAt: parsed.data.endAt,
+        expiresAt: quote.expiresAt,
+        idempotencyKey: `admin-hold:${request.id}:${parsed.data.locationProductId}`,
+        metadata: { source: 'dashboard', quoteId: quote.quoteId, overrides }
+      });
+      holdId = hold.id;
+    }
+    const result = await provider.createBooking({
+      intent: parsed.data,
+      clientId: parsed.data.clientId,
+      holdId,
+      idempotencyKey: `admin:${request.id}:${parsed.data.locationProductId}`,
+      source: 'dashboard'
+    });
+    if (offering.bookingProvider === 'core') {
+      await pool.query(
+        `UPDATE bookings SET source = 'manual', booking_source = 'dashboard', updated_at = now() WHERE booking_id = $1`,
+        [result.bookingId]
+      );
+      if (overrides.createWithoutPayment) {
+        await pool.query(
+          `UPDATE bookings SET status = 'confirmed', payment_status = 'unpaid', updated_at = now() WHERE booking_id = $1`,
+          [result.bookingId]
+        );
+        await rebuildConsumptionsForBooking(result.bookingId);
+        if (holdId) await releaseReservationHold(holdId);
+      }
+    }
+    await recordAdminWriteAudit({
+      request,
+      auth,
+      action: 'admin.booking.created',
+      entityType: 'booking',
+      entityId: result.bookingId,
+      details: { provider: offering.bookingProvider, quoteId: quote.quoteId, overrides }
+    });
+    reply.status(result.created ? 201 : 200);
+    return { ok: true, item: await getBooking(result.bookingId) };
+  });
+
   app.get('/api/admin/bookings/:bookingId/cancellation-preview', async (request) => {
     await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'view');
     const { bookingId } = request.params as { bookingId: string };

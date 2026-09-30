@@ -1,5 +1,6 @@
 import { pool } from '../../db/pool.js';
 import { withTransaction } from '../../db/transaction.js';
+import { loadResourceRequirements } from './resource-requirements.repository.js';
 
 export class OverbookingError extends Error {
   constructor(message: string) {
@@ -37,11 +38,12 @@ export async function rebuildConsumptionsForBooking(bookingId: string): Promise<
     async (client) => {
       const bookingResult = await client.query<{
         booking_id: string;
+        location_id: string;
         status: string;
         dt_from: string;
         dt_to: string;
       }>(
-        `SELECT booking_id, status, dt_from, dt_to
+        `SELECT booking_id, location_id, status, dt_from, dt_to
          FROM bookings
          WHERE booking_id = $1
          FOR UPDATE`,
@@ -54,27 +56,32 @@ export async function rebuildConsumptionsForBooking(bookingId: string): Promise<
 
       const booking = bookingResult.rows[0];
 
-      const bookingProductsResult = await client.query<{ product_count: string | number }>(
-        `SELECT COUNT(*) AS product_count
+      const bookingProductsResult = await client.query<{ product_id: string; quantity: number }>(
+        `SELECT product_id, quantity
          FROM booking_products
          WHERE booking_id = $1`,
         [bookingId]
       );
 
-      const requirementResult = await client.query<ResourceRequirementRow>(
-        `SELECT
-           r.resource_id,
-           r.title AS resource_title,
-           r.capacity_available,
-           SUM(bp.quantity * pr.quantity) AS required_quantity
-         FROM booking_products bp
-         INNER JOIN product_resources pr ON pr.product_id = bp.product_id
-         INNER JOIN resources r ON r.resource_id = pr.resource_id
-         WHERE bp.booking_id = $1
-         GROUP BY r.resource_id, r.title, r.capacity_available
-         ORDER BY r.resource_id`,
-        [bookingId]
-      );
+      const requirementsByResource = new Map<string, ResourceRequirementRow>();
+      for (const bookingProduct of bookingProductsResult.rows) {
+        const requirements = await loadResourceRequirements(client, {
+          productId: bookingProduct.product_id,
+          locationId: booking.location_id,
+          quantity: bookingProduct.quantity,
+          activeOnly: false
+        });
+        for (const requirement of requirements) {
+          const current = requirementsByResource.get(requirement.resource_id);
+          requirementsByResource.set(requirement.resource_id, {
+            resource_id: requirement.resource_id,
+            resource_title: requirement.resource_title,
+            capacity_available: requirement.capacity_available,
+            required_quantity: Number(current?.required_quantity ?? 0) + requirement.required_quantity
+          });
+        }
+      }
+      const requirementRows = [...requirementsByResource.values()].sort((a, b) => a.resource_id.localeCompare(b.resource_id));
 
       await client.query(
         `DELETE FROM consumptions
@@ -91,14 +98,14 @@ export async function rebuildConsumptionsForBooking(bookingId: string): Promise<
         };
       }
 
-      const hasProducts = Number(bookingProductsResult.rows[0]?.product_count ?? 0) > 0;
-      if (hasProducts && requirementResult.rows.length === 0) {
+      const hasProducts = bookingProductsResult.rows.length > 0;
+      if (hasProducts && requirementRows.length === 0) {
         throw new MissingProductResourceMappingError(
           `Booking ${bookingId} cannot rebuild consumptions because its products are not mapped to internal resources.`
         );
       }
 
-      const resourceIds = requirementResult.rows.map((row) => row.resource_id);
+      const resourceIds = requirementRows.map((row) => row.resource_id);
       if (!resourceIds.length) {
         return {
           bookingId,
@@ -139,7 +146,7 @@ export async function rebuildConsumptionsForBooking(bookingId: string): Promise<
         reservedResult.rows.map((row) => [row.resource_id, Number(row.capacity_reserved)])
       );
 
-      for (const requirement of requirementResult.rows) {
+      for (const requirement of requirementRows) {
         const requiredQuantity = Number(requirement.required_quantity);
         const capacityAvailable = Number(requirement.capacity_available);
         const capacityReserved = reservedMap.get(requirement.resource_id) ?? 0;
@@ -151,7 +158,7 @@ export async function rebuildConsumptionsForBooking(bookingId: string): Promise<
         }
       }
 
-      for (const requirement of requirementResult.rows) {
+      for (const requirement of requirementRows) {
         await client.query(
           `INSERT INTO consumptions (booking_id, resource_id, type, dt_from, dt_to, capacity_used)
            VALUES ($1, $2, 'reserved', $3::timestamptz, $4::timestamptz, $5)`,
@@ -162,7 +169,7 @@ export async function rebuildConsumptionsForBooking(bookingId: string): Promise<
       return {
         bookingId,
         released: false,
-        consumptionsCreated: requirementResult.rows.length
+        consumptionsCreated: requirementRows.length
       };
     },
     { isolationLevel: 'SERIALIZABLE' }

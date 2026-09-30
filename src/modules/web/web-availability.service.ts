@@ -1,20 +1,56 @@
 import { pool } from '../../db/pool.js';
 import { bookingProviderRegistry } from '../bookings/booking-provider.js';
-import { getCatalogProduct, getExternalVariantReference } from '../catalog/catalog.repository.js';
+import { getBookingOffering, getCatalogProductOffering, getExternalVariantReference, getVariantDurationMinutes } from '../catalog/catalog.repository.js';
 import { getAvailabilitySummary } from '../resources/availability.service.js';
 import { createAvailabilityToken } from './availability-token.js';
+import { parseRegiondoDateTime } from '../regiondo/regiondo-datetime.js';
 
-function endAfterTwoHours(startsAt: string): string {
-  return new Date(new Date(startsAt).getTime() + 2 * 60 * 60_000).toISOString();
+function endAfterMinutes(startsAt: string, minutes: number): string {
+  return new Date(new Date(startsAt).getTime() + minutes * 60_000).toISOString();
 }
 
 export async function listWebAvailability(input: {
-  productId: string; locationId: string; variantId?: string; date?: string; from?: string; to?: string; quantity: number;
+  productId: string; locationId: string; variantId?: string; date?: string; from?: string; to?: string;
+  durationMinutes?: number; quantity: number;
 }) {
-  const product = await getCatalogProduct(input.productId);
+  const product = await getCatalogProductOffering(input.productId, input.locationId);
   if (!product) return null;
   const queryStart = input.from ?? `${input.date}T00:00:00.000Z`;
   const queryEnd = input.to ?? `${input.date}T23:59:59.999Z`;
+  if (product.bookingConfiguration.timeSelection.mode === 'date_range' && input.from && input.to) {
+    const offering = await getBookingOffering(product.offering.id);
+    if (!offering) return null;
+    const provider = bookingProviderRegistry.get(offering.bookingProvider);
+    const result = await provider.checkAvailability?.({
+      offering,
+      intent: {
+        locationId: input.locationId,
+        productId: input.productId,
+        locationProductId: product.offering.id,
+        variantId: input.variantId,
+        startAt: input.from,
+        endAt: input.to,
+        participants: input.quantity,
+        options: []
+      }
+    });
+    if (!result?.available) return [];
+    return [{
+      availabilityId: createAvailabilityToken({
+        locationId: input.locationId,
+        productId: input.productId,
+        locationProductId: product.offering.id,
+        variantId: input.variantId ?? null,
+        startsAt: input.from,
+        endsAt: input.to,
+        expiresAt: new Date(Date.now() + 15 * 60_000).toISOString()
+      }),
+      startsAt: input.from,
+      endsAt: input.to,
+      remaining: result.maxBookableQuantity,
+      label: 'Selected stay'
+    }];
+  }
   if (product.bookingProvider === 'regiondo') {
     if (!input.variantId) return [];
     const externalVariantId = await getExternalVariantReference(input.variantId);
@@ -23,16 +59,21 @@ export async function listWebAvailability(input: {
     const slots = await provider.getAvailability?.({
       externalVariantId, start: queryStart, end: queryEnd, quantity: input.quantity
     }) ?? [];
-    return slots.filter((slot) => slot.available).map((slot) => {
-      const startsAt = new Date(slot.startsAt).toISOString();
-      const endsAt = endAfterTwoHours(startsAt);
-      return {
+    const variantDuration = await getVariantDurationMinutes(input.variantId);
+    const configuredDuration = input.durationMinutes ?? product.bookingConfiguration.timeSelection.duration?.defaultMinutes;
+    return slots.filter((slot) => slot.available).flatMap((slot) => {
+      const normalizedStart = parseRegiondoDateTime(slot.startsAt);
+      if (!normalizedStart) return [];
+      const startsAt = normalizedStart.toISOString();
+      const endsAt = endAfterMinutes(startsAt, variantDuration ?? configuredDuration ?? 120);
+      return [{
         availabilityId: createAvailabilityToken({
-          locationId: input.locationId, productId: input.productId, variantId: input.variantId ?? null,
+          locationId: input.locationId, productId: input.productId, locationProductId: product.offering.id,
+          variantId: input.variantId ?? null,
           startsAt, endsAt, expiresAt: new Date(Date.now() + 15 * 60_000).toISOString()
         }),
         startsAt, endsAt, remaining: slot.remaining
-      };
+      }];
     });
   }
 
@@ -43,7 +84,7 @@ export async function listWebAvailability(input: {
        CASE WHEN ends_at IS NOT NULL THEN ends_at
          ELSE ($3::date + local_end_time)::timestamp AT TIME ZONE timezone END AS ends_at
      FROM availability_rules
-     WHERE is_active = true AND product_id = $1
+     WHERE is_active = true AND rule_type <> 'manual_block' AND product_id = $1
        AND (location_id IS NULL OR location_id = $2)
        AND (product_variant_id IS NULL OR product_variant_id = $4)
        AND (weekdays IS NULL OR EXTRACT(ISODOW FROM $3::date)::smallint = ANY(weekdays))
@@ -56,15 +97,21 @@ export async function listWebAvailability(input: {
   const slots = [];
   for (const rule of rules.rows) {
     const startsAt = new Date(rule.starts_at).toISOString();
-    const endsAt = new Date(rule.ends_at).toISOString();
+    const ruleEndsAt = new Date(rule.ends_at).toISOString();
+    const configuredDuration = input.durationMinutes
+      ?? await getVariantDurationMinutes(input.variantId)
+      ?? product.bookingConfiguration.timeSelection.duration?.defaultMinutes;
+    const endsAt = configuredDuration ? endAfterMinutes(startsAt, configuredDuration) : ruleEndsAt;
+    if (new Date(endsAt) > new Date(ruleEndsAt)) continue;
     const summary = await getAvailabilitySummary({
-      product_id: input.productId, location_id: input.locationId,
+      product_id: input.productId, product_variant_id: input.variantId, location_id: input.locationId,
       dt_from: startsAt, dt_to: endsAt, guest_count: input.quantity
     });
     if (!summary.available) continue;
     slots.push({
       availabilityId: createAvailabilityToken({
-        locationId: input.locationId, productId: input.productId, variantId: input.variantId ?? null,
+        locationId: input.locationId, productId: input.productId, locationProductId: product.offering.id,
+        variantId: input.variantId ?? null,
         startsAt, endsAt, expiresAt: new Date(Date.now() + 15 * 60_000).toISOString()
       }),
       startsAt, endsAt, remaining: summary.maxBookableQuantity

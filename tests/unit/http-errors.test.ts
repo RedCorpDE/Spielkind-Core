@@ -7,6 +7,7 @@ import {
   RegiondoPurchaseRecoveryRequiredError,
   RegiondoTransientError
 } from '../../src/modules/regiondo/regiondo.client.js';
+import { PricingValidationError } from '../../src/modules/pricing/pricing.service.js';
 
 function createReplyDouble() {
   const reply = {
@@ -28,6 +29,24 @@ function createRequestDouble() {
 }
 
 describe('registerErrorHandler', () => {
+  it('maps invalid customer booking configuration to a validation response', async () => {
+    const handler = registerErrorHandler();
+    const reply = createReplyDouble();
+    const request = { ...createRequestDouble(), url: '/api/client/booking-quotes' };
+
+    await handler(
+      new PricingValidationError('One or more selected option values are invalid.'),
+      request as never,
+      reply as never
+    );
+
+    expect(reply.status).toHaveBeenCalledWith(400);
+    expect(reply.send).toHaveBeenCalledWith({
+      ok: false,
+      error: 'One or more selected option values are invalid.'
+    });
+  });
+
   it('uses the stable nested error contract for web customer routes', async () => {
     const handler = registerErrorHandler();
     const reply = createReplyDouble();

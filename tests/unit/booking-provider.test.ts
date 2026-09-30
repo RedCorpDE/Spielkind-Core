@@ -8,6 +8,7 @@ describe('booking provider registry', () => {
     expect(provider.getAvailability).toBeTypeOf('function');
     expect(provider.getBooking).toBeTypeOf('function');
     expect(provider.cancelBooking).toBeTypeOf('function');
+    expect(provider.createBooking).toBeTypeOf('function');
   });
 
   it('resolves non-Regiondo legacy sources as Core bookings', () => {

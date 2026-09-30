@@ -3,11 +3,14 @@ import { pool } from '../../db/pool.js';
 import { withTransaction } from '../../db/transaction.js';
 import { HoldExpiredError, InsufficientCapacityError } from '../bookings/booking.errors.js';
 import { MissingProductResourceMappingError } from '../resources/consumption.service.js';
+import { loadResourceRequirements } from '../resources/resource-requirements.repository.js';
+import { isIntervalAllowedByAvailabilityRules, loadManualBlockCapacities } from '../resources/availability-rule.repository.js';
 
 export interface CreateReservationHoldInput {
   clientId?: string;
   locationId: string;
   productId: string;
+  productOfferingId?: string;
   productVariantId?: string;
   quantity: number;
   startsAt: string;
@@ -22,13 +25,6 @@ export interface ReservationHold {
   status: 'active' | 'consumed' | 'expired' | 'released';
   expiresAt: string;
   allocations: Array<{ resourceId: string; capacityUsed: number }>;
-}
-
-interface RequirementRow {
-  resource_id: string;
-  title: string;
-  capacity_available: number;
-  required_quantity: string | number;
 }
 
 export function isReservationHoldCapacityActive(
@@ -79,26 +75,39 @@ export async function createReservationHold(input: CreateReservationHoldInput): 
     );
     if (existing.rowCount) return loadHold(client, existing.rows[0].reservation_hold_id);
 
-    const requirements = await client.query<RequirementRow>(
-      `SELECT r.resource_id, r.title, r.capacity_available,
-              (pr.quantity * $3::integer) AS required_quantity
-       FROM product_resources pr
-       INNER JOIN resources r ON r.resource_id = pr.resource_id
-       WHERE pr.product_id = $1 AND r.location_id = $2 AND r.operational_status = 'active'
-       ORDER BY r.resource_id`,
-      [input.productId, input.locationId, input.quantity]
-    );
-    if (!requirements.rowCount) {
+    if (!(await isIntervalAllowedByAvailabilityRules(client, {
+      locationId: input.locationId,
+      productId: input.productId,
+      productVariantId: input.productVariantId,
+      startsAt: input.startsAt,
+      endsAt: input.endsAt
+    }))) {
+      throw new InsufficientCapacityError('The requested time is outside the configured availability rules.');
+    }
+
+    const requirements = await loadResourceRequirements(client, {
+      productId: input.productId,
+      locationId: input.locationId,
+      quantity: input.quantity
+    });
+    if (!requirements.length) {
       throw new MissingProductResourceMappingError('Product has no active resource capacity mapping at this location.');
     }
 
-    const resourceIds = requirements.rows.map((row) => row.resource_id);
+    const resourceIds = requirements.map((row) => row.resource_id);
     await client.query(
       `SELECT resource_id FROM resources WHERE resource_id = ANY($1::uuid[]) ORDER BY resource_id FOR UPDATE`,
       [resourceIds]
     );
+    const manualBlockCapacities = await loadManualBlockCapacities(client, {
+      resourceIds,
+      locationId: input.locationId,
+      productId: input.productId,
+      startsAt: input.startsAt,
+      endsAt: input.endsAt
+    });
 
-    for (const requirement of requirements.rows) {
+    for (const requirement of requirements) {
       const usage = await client.query<{ used: string | number }>(
         `SELECT
            COALESCE((SELECT SUM(c.capacity_used) FROM consumptions c
@@ -113,25 +122,29 @@ export async function createReservationHold(input: CreateReservationHoldInput): 
         [requirement.resource_id, input.startsAt, input.endsAt]
       );
       const required = Number(requirement.required_quantity);
-      if (Number(usage.rows[0]?.used ?? 0) + required > Number(requirement.capacity_available)) {
-        throw new InsufficientCapacityError(`Resource ${requirement.title} does not have enough remaining capacity.`);
+      const effectiveCapacity = Math.min(
+        Number(requirement.capacity_available),
+        manualBlockCapacities.get(requirement.resource_id) ?? Number(requirement.capacity_available)
+      );
+      if (Number(usage.rows[0]?.used ?? 0) + required > effectiveCapacity) {
+        throw new InsufficientCapacityError(`Resource ${requirement.resource_title} does not have enough remaining capacity.`);
       }
     }
 
     const hold = await client.query<{ reservation_hold_id: string }>(
       `INSERT INTO reservation_holds (
-         client_id, location_id, product_id, product_variant_id, quantity,
+         client_id, location_id, product_id, product_offering_id, product_variant_id, quantity,
          starts_at, ends_at, expires_at, status, idempotency_key, metadata
-       ) VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz, $8::timestamptz, 'active', $9, $10::jsonb)
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9::timestamptz, 'active', $10, $11::jsonb)
        RETURNING reservation_hold_id`,
       [
-        input.clientId ?? null, input.locationId, input.productId, input.productVariantId ?? null,
-        input.quantity, input.startsAt, input.endsAt, input.expiresAt, input.idempotencyKey,
+        input.clientId ?? null, input.locationId, input.productId, input.productOfferingId ?? null,
+        input.productVariantId ?? null, input.quantity, input.startsAt, input.endsAt, input.expiresAt, input.idempotencyKey,
         JSON.stringify(input.metadata ?? {})
       ]
     );
     const holdId = hold.rows[0].reservation_hold_id;
-    for (const requirement of requirements.rows) {
+    for (const requirement of requirements) {
       await client.query(
         `INSERT INTO reservation_hold_allocations (reservation_hold_id, resource_id, capacity_used) VALUES ($1, $2, $3)`,
         [holdId, requirement.resource_id, Number(requirement.required_quantity)]

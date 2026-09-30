@@ -170,6 +170,13 @@ Admin APIs:
 - `POST /api/admin/regiondo/sync-products`
 - `GET /api/admin/resources`
 - `GET /api/admin/resources/:resourceId`
+- `POST /api/admin/resources`
+- `PATCH /api/admin/resources/:resourceId`
+- `DELETE /api/admin/resources/:resourceId` (safe deactivation)
+- `GET|POST /api/admin/product-offerings/:offeringId/resources`
+- `PATCH|DELETE /api/admin/product-offerings/:offeringId/resources/:resourceId`
+- `GET|POST /api/admin/availability-rules`
+- `PATCH|DELETE /api/admin/availability-rules/:ruleId`
 - `GET /api/admin/availability`
 - `GET /api/admin/bookings`
 - `GET /api/admin/bookings/:bookingId`
