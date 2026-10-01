@@ -4,6 +4,9 @@ import { getBookingOffering, getCatalogProductOffering, getExternalVariantRefere
 import { getAvailabilitySummary } from '../resources/availability.service.js';
 import { createAvailabilityToken } from './availability-token.js';
 import { parseRegiondoDateTime } from '../regiondo/regiondo-datetime.js';
+import { resolveCoreBookingSchedule } from '../bookings/booking-schedule.service.js';
+import type { BookingIntentOption } from '../bookings/booking-intent.js';
+import { listCoreStartSlots } from '../bookings/booking-slot.service.js';
 
 function endAfterMinutes(startsAt: string, minutes: number): string {
   return new Date(new Date(startsAt).getTime() + minutes * 60_000).toISOString();
@@ -11,57 +14,114 @@ function endAfterMinutes(startsAt: string, minutes: number): string {
 
 export async function listWebAvailability(input: {
   productId: string; locationId: string; variantId?: string; date?: string; from?: string; to?: string;
-  durationMinutes?: number; quantity: number;
+  startDate?: string; endDate?: string; startTime?: string; endTime?: string;
+  durationMinutes?: number; quantity: number; options?: BookingIntentOption[];
 }) {
   const product = await getCatalogProductOffering(input.productId, input.locationId);
   if (!product) return null;
   const queryStart = input.from ?? `${input.date}T00:00:00.000Z`;
   const queryEnd = input.to ?? `${input.date}T23:59:59.999Z`;
-  if (product.bookingConfiguration.timeSelection.mode === 'date_range' && input.from && input.to) {
+  const customerStartSlots = product.bookingProvider === 'core'
+    && product.bookingConfiguration.timeSelection.startTimeSelection === 'customer'
+    && (product.bookingConfiguration.timeSelection.mode === 'fixed_duration'
+      || product.bookingConfiguration.timeSelection.mode === 'start_duration')
+    && input.startDate && input.startTime;
+  if (customerStartSlots) {
     const offering = await getBookingOffering(product.offering.id);
     if (!offering) return null;
-    const provider = bookingProviderRegistry.get(offering.bookingProvider);
-    const result = await provider.checkAvailability?.({
+    const result = await listCoreStartSlots({
       offering,
+      requestedDate: input.startDate,
+      requestedTime: input.startTime,
       intent: {
         locationId: input.locationId,
         productId: input.productId,
         locationProductId: product.offering.id,
         variantId: input.variantId,
-        startAt: input.from,
-        endAt: input.to,
+        startAt: queryStart,
+        endAt: queryEnd,
+        startDate: input.startDate,
+        startTime: input.startTime,
+        durationMinutes: input.durationMinutes,
         participants: input.quantity,
-        options: []
+        options: input.options ?? []
       }
     });
-    if (!result?.available) return [];
-    return [{
+    return {
+      items: result.slots.map((slot) => ({
+        availabilityId: createAvailabilityToken({
+          locationId: input.locationId, productId: input.productId, locationProductId: product.offering.id,
+          variantId: input.variantId ?? null, startsAt: slot.startsAt, endsAt: slot.endsAt,
+          expiresAt: new Date(Date.now() + 15 * 60_000).toISOString()
+        }),
+        ...slot
+      })),
+      selectedDate: result.selectedDate,
+      effectiveDurationMinutes: result.effectiveDurationMinutes,
+      allowedStart: result.allowedStart,
+      variants: result.variants,
+      fixedStart: result.fixedStart
+    };
+  }
+  const directCoreSelection = product.bookingProvider === 'core' && (
+    (product.bookingConfiguration.timeSelection.mode === 'date_range' && input.from && input.to)
+    || (product.bookingConfiguration.timeSelection.mode === 'fixed_duration' && input.startDate
+      && (input.startTime || product.bookingConfiguration.timeSelection.fixedStartTime))
+  );
+  if (directCoreSelection) {
+    const offering = await getBookingOffering(product.offering.id);
+    if (!offering) return null;
+    const provider = bookingProviderRegistry.get(offering.bookingProvider);
+    const rawIntent = {
+      locationId: input.locationId,
+      productId: input.productId,
+      locationProductId: product.offering.id,
+      variantId: input.variantId,
+      startAt: queryStart,
+      endAt: queryEnd,
+      startDate: input.startDate,
+      endDate: input.endDate,
+      startTime: input.startTime,
+      endTime: input.endTime,
+      durationMinutes: input.durationMinutes,
+      participants: input.quantity,
+      options: input.options ?? []
+    };
+    const resolvedIntent = offering.bookingProvider === 'core'
+      ? (await resolveCoreBookingSchedule(rawIntent, offering)).intent
+      : rawIntent;
+    const result = await provider.checkAvailability?.({
+      offering,
+      intent: resolvedIntent
+    });
+    if (!result?.available) return { items: [] };
+    return { items: [{
       availabilityId: createAvailabilityToken({
         locationId: input.locationId,
         productId: input.productId,
         locationProductId: product.offering.id,
         variantId: input.variantId ?? null,
-        startsAt: input.from,
-        endsAt: input.to,
+        startsAt: resolvedIntent.startAt,
+        endsAt: resolvedIntent.endAt,
         expiresAt: new Date(Date.now() + 15 * 60_000).toISOString()
       }),
-      startsAt: input.from,
-      endsAt: input.to,
+      startsAt: resolvedIntent.startAt,
+      endsAt: resolvedIntent.endAt,
       remaining: result.maxBookableQuantity,
       label: 'Selected stay'
-    }];
+    }] };
   }
   if (product.bookingProvider === 'regiondo') {
-    if (!input.variantId) return [];
+    if (!input.variantId) return { items: [] };
     const externalVariantId = await getExternalVariantReference(input.variantId);
-    if (!externalVariantId) return [];
+    if (!externalVariantId) return { items: [] };
     const provider = bookingProviderRegistry.get('regiondo');
     const slots = await provider.getAvailability?.({
       externalVariantId, start: queryStart, end: queryEnd, quantity: input.quantity
     }) ?? [];
     const variantDuration = await getVariantDurationMinutes(input.variantId);
     const configuredDuration = input.durationMinutes ?? product.bookingConfiguration.timeSelection.duration?.defaultMinutes;
-    return slots.filter((slot) => slot.available).flatMap((slot) => {
+    return { items: slots.filter((slot) => slot.available).flatMap((slot) => {
       const normalizedStart = parseRegiondoDateTime(slot.startsAt);
       if (!normalizedStart) return [];
       const startsAt = normalizedStart.toISOString();
@@ -74,7 +134,7 @@ export async function listWebAvailability(input: {
         }),
         startsAt, endsAt, remaining: slot.remaining
       }];
-    });
+    }) };
   }
 
   const rules = await pool.query<{ starts_at: string; ends_at: string }>(
@@ -95,13 +155,23 @@ export async function listWebAvailability(input: {
     [input.productId, input.locationId, input.date, input.variantId ?? null, queryEnd, queryStart]
   );
   const slots = [];
+  const offering = await getBookingOffering(product.offering.id);
+  if (!offering) return null;
   for (const rule of rules.rows) {
     const startsAt = new Date(rule.starts_at).toISOString();
     const ruleEndsAt = new Date(rule.ends_at).toISOString();
-    const configuredDuration = input.durationMinutes
-      ?? await getVariantDurationMinutes(input.variantId)
-      ?? product.bookingConfiguration.timeSelection.duration?.defaultMinutes;
-    const endsAt = configuredDuration ? endAfterMinutes(startsAt, configuredDuration) : ruleEndsAt;
+    const resolution = await resolveCoreBookingSchedule({
+      locationId: input.locationId,
+      productId: input.productId,
+      locationProductId: product.offering.id,
+      variantId: input.variantId,
+      startAt: startsAt,
+      endAt: ruleEndsAt,
+      durationMinutes: input.durationMinutes,
+      participants: input.quantity,
+      options: input.options ?? []
+    }, offering);
+    const endsAt = resolution.schedule.endsAt;
     if (new Date(endsAt) > new Date(ruleEndsAt)) continue;
     const summary = await getAvailabilitySummary({
       product_id: input.productId, product_variant_id: input.variantId, location_id: input.locationId,
@@ -117,5 +187,5 @@ export async function listWebAvailability(input: {
       startsAt, endsAt, remaining: summary.maxBookableQuantity
     });
   }
-  return slots;
+  return { items: slots };
 }

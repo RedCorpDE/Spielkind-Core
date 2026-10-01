@@ -1604,6 +1604,31 @@ function buildListBookingsQuery(filters: ListDashboardBookingsFilters = {}) {
     where.push(`b.dt_from <= $${values.length}::timestamptz`);
   }
 
+  const normalizedRangeFrom = resolved.rangeFrom
+    ? toIsoStringOrThrow(resolved.rangeFrom, "rangeFrom")
+    : null;
+  const normalizedRangeTo = resolved.rangeTo
+    ? toIsoStringOrThrow(resolved.rangeTo, "rangeTo")
+    : null;
+  if (Boolean(normalizedRangeFrom) !== Boolean(normalizedRangeTo)) {
+    throw new DashboardValidationError('rangeFrom and rangeTo must be provided together.');
+  }
+  if (
+    normalizedRangeFrom &&
+    normalizedRangeTo &&
+    new Date(normalizedRangeFrom).getTime() >= new Date(normalizedRangeTo).getTime()
+  ) {
+    throw new DashboardValidationError('rangeFrom must be before rangeTo.');
+  }
+  if (normalizedRangeFrom && normalizedRangeTo) {
+    values.push(normalizedRangeTo);
+    const rangeToParam = `$${values.length}`;
+    values.push(normalizedRangeFrom);
+    const rangeFromParam = `$${values.length}`;
+    where.push(`b.dt_from < ${rangeToParam}::timestamptz`);
+    where.push(`b.dt_to > ${rangeFromParam}::timestamptz`);
+  }
+
   if (resolved.updatedSince) {
     values.push(toIsoStringOrThrow(resolved.updatedSince, "updatedSince"));
     where.push(`b.updated_at >= $${values.length}::timestamptz`);

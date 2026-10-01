@@ -6,11 +6,13 @@ import type {
   RegiondoProductCatalogSummary
 } from '../regiondo/regiondo-product-catalog.js';
 import { summarizeRegiondoProductCatalogFromRows } from '../regiondo/regiondo-product-catalog.js';
+import { BookingRuleValidationError } from '../bookings/booking-configuration.service.js';
 
 export interface AdminProductResourceMapping {
   resourceId: string;
   resourceTitle: string;
   quantity: number;
+  scalingMode: 'per_quantity' | 'per_booking';
 }
 
 export interface AdminProductOffering {
@@ -22,6 +24,8 @@ export interface AdminProductOffering {
   bookingProvider: 'core' | 'regiondo';
   timeSelectionMode: 'date_range' | 'start_end' | 'start_duration' | 'fixed_duration';
   timezone: string;
+  fixedStartTime: string | null;
+  fixedEndTime: string | null;
   minParticipants: number;
   maxParticipants: number;
   minDurationMinutes: number | null;
@@ -32,6 +36,8 @@ export interface AdminProductOffering {
   minAdvanceMinutes: number;
   maxAdvanceDays: number | null;
   sameDayBookingAllowed: boolean;
+  pricingMode: 'once' | 'per_quantity' | 'per_date_unit' | 'per_date_unit_per_quantity';
+  dateRangeBillingUnit: 'nights' | 'calendar_days';
   createdAt: string;
   updatedAt: string;
   resources: AdminProductResourceMapping[];
@@ -43,6 +49,7 @@ export interface AdminProductOption {
   values: string[];
   priceDeltaMinor: number;
   currency: string;
+  durationDeltaMinutes: number;
   providerManaged: boolean;
 }
 
@@ -53,6 +60,12 @@ export interface AdminProductVariant {
   currency: string;
   isDefault: boolean;
   providerManaged: boolean;
+  durationOverrideMinutes: number | null;
+  active: boolean;
+  scheduleRuleEnabled: boolean;
+  allowedWeekdays: number[] | null;
+  localStartTime: string | null;
+  localEndTime: string | null;
   options: AdminProductOption[];
 }
 
@@ -96,6 +109,12 @@ export interface AdminProductVariantInput {
   title: string | null;
   priceMinor: number;
   currency: string;
+  durationOverrideMinutes?: number | null;
+  active?: boolean;
+  scheduleRuleEnabled?: boolean;
+  allowedWeekdays?: number[] | null;
+  localStartTime?: string | null;
+  localEndTime?: string | null;
 }
 
 export interface AdminProductOptionInput {
@@ -103,6 +122,7 @@ export interface AdminProductOptionInput {
   values: string[];
   priceDeltaMinor: number;
   currency: string;
+  durationDeltaMinutes?: number;
 }
 
 export type CatalogMutationFailure = 'not_found' | 'provider_managed' | 'in_use' | 'default_exists';
@@ -171,15 +191,16 @@ function mapProductRow(row: ProductRow, regiondoCatalog: RegiondoProductCatalogS
     resources: row.resources ?? [],
     locations: row.locations ?? [],
     variants,
-    coreMigration: row.booking_provider === 'regiondo'
-      ? {
-          status: preparedVariants.length ? 'prepared' : 'not_prepared',
-          variantCount: preparedVariants.length,
-          optionCount: preparedVariants.reduce((count, variant) => count + variant.options.length, 0),
-          preparedAt: row.core_migration_prepared_at,
-          policy: 'prepare_once'
-        }
-      : null
+    coreMigration:
+      row.booking_provider === 'regiondo'
+        ? {
+            status: preparedVariants.length ? 'prepared' : 'not_prepared',
+            variantCount: preparedVariants.length,
+            optionCount: preparedVariants.reduce((count, variant) => count + variant.options.length, 0),
+            preparedAt: row.core_migration_prepared_at,
+            policy: 'prepare_once'
+          }
+        : null
   };
 }
 
@@ -215,6 +236,11 @@ const productSelect = `SELECT
            'bookingProvider', lp.booking_provider,
            'timeSelectionMode', lp.time_selection_mode,
            'timezone', lp.timezone,
+           'fixedStartTime', to_char(lp.fixed_start_time, 'HH24:MI'),
+           'fixedEndTime', to_char(lp.fixed_end_time, 'HH24:MI'),
+           'earliestStartTime', to_char(lp.earliest_start_time, 'HH24:MI'),
+           'latestStartTime', to_char(lp.latest_start_time, 'HH24:MI'),
+           'startIntervalMinutes', lp.start_interval_minutes,
            'minParticipants', lp.min_participants,
            'maxParticipants', lp.max_participants,
            'minDurationMinutes', lp.min_duration_minutes,
@@ -225,13 +251,16 @@ const productSelect = `SELECT
            'minAdvanceMinutes', lp.min_advance_minutes,
            'maxAdvanceDays', lp.max_advance_days,
            'sameDayBookingAllowed', lp.same_day_booking_allowed,
+           'pricingMode', lp.pricing_mode,
+           'dateRangeBillingUnit', lp.date_range_billing_unit,
            'createdAt', lp.created_at,
            'updatedAt', lp.updated_at
            , 'resources', COALESCE((
              SELECT jsonb_agg(jsonb_build_object(
                'resourceId', offering_resource.resource_id,
                'resourceTitle', resource.title,
-               'quantity', offering_resource.quantity
+               'quantity', offering_resource.quantity,
+               'scalingMode', offering_resource.scaling_mode
              ) ORDER BY resource.title ASC)
              FROM product_offering_resources offering_resource
              INNER JOIN resources resource ON resource.resource_id = offering_resource.resource_id
@@ -255,6 +284,12 @@ const productSelect = `SELECT
            'currency', variant.currency,
            'isDefault', variant.regiondo_variant_id IS NULL AND variant.title IS NULL,
            'providerManaged', variant.regiondo_variant_id IS NOT NULL,
+           'durationOverrideMinutes', variant.duration_minutes,
+           'active', variant.is_active,
+           'scheduleRuleEnabled', variant.schedule_rule_enabled,
+           'allowedWeekdays', variant.allowed_weekdays,
+           'localStartTime', to_char(variant.local_start_time, 'HH24:MI'),
+           'localEndTime', to_char(variant.local_end_time, 'HH24:MI'),
            'options', COALESCE(
              (
                SELECT jsonb_agg(
@@ -264,7 +299,8 @@ const productSelect = `SELECT
                    'values', COALESCE(option_record.values_json, '[]'::jsonb),
                    'priceDeltaMinor', option_record.price_delta_minor,
                    'currency', option_record.currency,
-                   'providerManaged', option_record.regiondo_option_id IS NOT NULL
+                   'providerManaged', option_record.regiondo_option_id IS NOT NULL,
+                   'durationDeltaMinutes', option_record.duration_delta_minutes
                  ) ORDER BY option_record.created_at ASC, option_record.option_id ASC
                )
                FROM product_options option_record
@@ -284,7 +320,8 @@ const productSelect = `SELECT
        DISTINCT jsonb_build_object(
          'resourceId', r.resource_id,
          'resourceTitle', r.title,
-         'quantity', pr.quantity
+         'quantity', pr.quantity,
+         'scalingMode', 'per_quantity'
        )
      ) FILTER (WHERE r.resource_id IS NOT NULL),
      '[]'::jsonb
@@ -371,7 +408,7 @@ async function mapAdminProducts(rows: ProductRow[]): Promise<AdminProduct[]> {
     mapProductRow(
       row,
       row.regiondo_product_id
-        ? regiondoCatalogByProductId.get(row.regiondo_product_id) ?? EMPTY_REGIONDO_PRODUCT_CATALOG_SUMMARY
+        ? (regiondoCatalogByProductId.get(row.regiondo_product_id) ?? EMPTY_REGIONDO_PRODUCT_CATALOG_SUMMARY)
         : EMPTY_REGIONDO_PRODUCT_CATALOG_SUMMARY
     )
   );
@@ -421,6 +458,327 @@ export async function createAdminProduct(input: CreateAdminProductInput): Promis
   return product;
 }
 
+export async function cloneAdminProduct(productId: string): Promise<AdminProduct | null> {
+  const clonedProductId = await withTransaction(async (client) => {
+    const sourceResult = await client.query<{
+      title: string;
+      description: string | null;
+      image_url: string | null;
+      base_amount: string | number;
+      price_minor: string | number;
+      currency: string;
+      vat_basis_points: number;
+      cancellation_policy_id: string | null;
+    }>(
+      `SELECT title, description, image_url, base_amount, price_minor, currency,
+              vat_basis_points, cancellation_policy_id
+       FROM products
+       WHERE product_id = $1
+       FOR SHARE`,
+      [productId]
+    );
+    const source = sourceResult.rows[0];
+    if (!source) return null;
+
+    const productResult = await client.query<{ product_id: string }>(
+      `INSERT INTO products (
+         title, description, image_url, base_amount, booking_provider,
+         price_minor, currency, vat_basis_points, regiondo_product_id,
+         regiondo_raw, cancellation_policy_id
+       ) VALUES ($1, $2, $3, $4, 'core', $5, $6, $7, NULL, NULL, $8)
+       RETURNING product_id`,
+      [
+        `${source.title} (Copy)`,
+        source.description,
+        source.image_url,
+        source.base_amount,
+        source.price_minor,
+        source.currency,
+        source.vat_basis_points,
+        source.cancellation_policy_id
+      ]
+    );
+    const cloneId = productResult.rows[0]?.product_id;
+    if (!cloneId) throw new Error('Cloned product could not be created.');
+
+    const variantsResult = await client.query<{
+      variant_id: string;
+      title: string | null;
+      price: string | number;
+      price_minor: string | number | null;
+      currency: string;
+      duration_minutes: number | null;
+      cancellation_policy_id: string | null;
+      is_active: boolean;
+      schedule_rule_enabled: boolean;
+      allowed_weekdays: number[] | null;
+      local_start_time: string | null;
+      local_end_time: string | null;
+    }>(
+      `SELECT variant_id, title, price, price_minor, currency, duration_minutes,
+              cancellation_policy_id, is_active, schedule_rule_enabled,
+              allowed_weekdays, local_start_time, local_end_time
+       FROM product_variants
+       WHERE product_id = $1
+       ORDER BY created_at ASC, variant_id ASC`,
+      [productId]
+    );
+    const variantIds = new Map<string, string>();
+    let hasDefaultVariant = false;
+    for (const [index, variant] of variantsResult.rows.entries()) {
+      const variantTitle = variant.title === null && hasDefaultVariant ? `Variant ${index + 1}` : variant.title;
+      if (variantTitle === null) hasDefaultVariant = true;
+      const clonedVariant = await client.query<{ variant_id: string }>(
+        `INSERT INTO product_variants (
+           product_id, title, price, price_minor, currency,
+           regiondo_variant_id, regiondo_product_id, regiondo_raw,
+           duration_minutes, cancellation_policy_id, is_active,
+           schedule_rule_enabled, allowed_weekdays, local_start_time, local_end_time
+         ) VALUES (
+           $1, $2, $3, $4, $5, NULL, NULL, NULL, $6, $7, $8, $9, $10, $11, $12
+         )
+         RETURNING variant_id`,
+        [
+          cloneId,
+          variantTitle,
+          variant.price,
+          variant.price_minor ?? Math.round(Number(variant.price) * 100),
+          variant.currency,
+          variant.duration_minutes,
+          variant.cancellation_policy_id,
+          variant.is_active,
+          variant.schedule_rule_enabled,
+          variant.allowed_weekdays,
+          variant.local_start_time,
+          variant.local_end_time
+        ]
+      );
+      const clonedVariantId = clonedVariant.rows[0]?.variant_id;
+      if (!clonedVariantId) throw new Error('Cloned product variant could not be created.');
+      variantIds.set(variant.variant_id, clonedVariantId);
+      await client.query(
+        `INSERT INTO product_options (
+           product_id, variant_id, title, values_json, price_delta_minor,
+           currency, regiondo_option_id, regiondo_product_id,
+           regiondo_variant_id, regiondo_raw, duration_delta_minutes
+         )
+         SELECT $1, $2, title, values_json, price_delta_minor, currency,
+                NULL, NULL, NULL, NULL, duration_delta_minutes
+         FROM product_options
+         WHERE product_id = $3 AND variant_id = $4`,
+        [cloneId, clonedVariantId, productId, variant.variant_id]
+      );
+    }
+
+    const standaloneOptions = await client.query<{
+      option_count: string | number;
+    }>(
+      `SELECT COUNT(*) AS option_count
+       FROM product_options
+       WHERE product_id = $1 AND variant_id IS NULL`,
+      [productId]
+    );
+    if (Number(standaloneOptions.rows[0]?.option_count ?? 0) > 0) {
+      let defaultVariantId = [...variantIds.values()][
+        variantsResult.rows.findIndex((variant) => variant.title === null)
+      ];
+      if (!defaultVariantId) {
+        const defaultVariant = await client.query<{ variant_id: string }>(
+          `INSERT INTO product_variants (
+             product_id, title, price, price_minor, currency,
+             regiondo_variant_id, regiondo_product_id, regiondo_raw
+           ) VALUES ($1, NULL, $2::numeric / 100, $2, $3, NULL, NULL, NULL)
+           RETURNING variant_id`,
+          [cloneId, source.price_minor, source.currency]
+        );
+        defaultVariantId = defaultVariant.rows[0]?.variant_id;
+      }
+      if (!defaultVariantId) throw new Error('Cloned default variant could not be created.');
+      await client.query(
+        `INSERT INTO product_options (
+           product_id, variant_id, title, values_json, price_delta_minor,
+           currency, regiondo_option_id, regiondo_product_id,
+           regiondo_variant_id, regiondo_raw, duration_delta_minutes
+         )
+         SELECT $1, $2, title, values_json, price_delta_minor, currency,
+                NULL, NULL, NULL, NULL, duration_delta_minutes
+         FROM product_options
+         WHERE product_id = $3 AND variant_id IS NULL`,
+        [cloneId, defaultVariantId, productId]
+      );
+    }
+
+    const offeringsResult = await client.query<{
+      product_offering_id: string;
+      location_id: string;
+      enabled: boolean;
+      time_selection_mode: string;
+      timezone: string;
+      fixed_start_time: string | null;
+      fixed_end_time: string | null;
+      earliest_start_time: string | null;
+      latest_start_time: string | null;
+      start_interval_minutes: number;
+      min_participants: number;
+      max_participants: number;
+      min_duration_minutes: number | null;
+      max_duration_minutes: number | null;
+      duration_step_minutes: number | null;
+      default_duration_minutes: number | null;
+      allowed_duration_minutes: number[] | null;
+      min_advance_minutes: number;
+      max_advance_days: number | null;
+      same_day_booking_allowed: boolean;
+      pricing_mode: string;
+      date_range_billing_unit: string;
+    }>(
+      `SELECT product_offering_id, location_id, enabled, time_selection_mode,
+              timezone, fixed_start_time, fixed_end_time, earliest_start_time,
+              latest_start_time, start_interval_minutes, min_participants,
+              max_participants, min_duration_minutes, max_duration_minutes,
+              duration_step_minutes, default_duration_minutes,
+              allowed_duration_minutes, min_advance_minutes, max_advance_days,
+              same_day_booking_allowed, pricing_mode, date_range_billing_unit
+       FROM location_products
+       WHERE product_id = $1
+       ORDER BY created_at ASC, product_offering_id ASC`,
+      [productId]
+    );
+    for (const offering of offeringsResult.rows) {
+      const clonedOffering = await client.query<{
+        product_offering_id: string;
+      }>(
+        `INSERT INTO location_products (
+           location_id, product_id, enabled, booking_provider,
+           time_selection_mode, timezone, fixed_start_time, fixed_end_time,
+           earliest_start_time, latest_start_time, start_interval_minutes,
+           min_participants, max_participants, min_duration_minutes,
+           max_duration_minutes, duration_step_minutes, default_duration_minutes,
+           allowed_duration_minutes, min_advance_minutes, max_advance_days,
+           same_day_booking_allowed, pricing_mode, date_range_billing_unit
+         ) VALUES (
+           $1, $2, $3, 'core', $4, $5, $6, $7, $8, $9, $10, $11, $12,
+           $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+         )
+         RETURNING product_offering_id`,
+        [
+          offering.location_id,
+          cloneId,
+          offering.enabled,
+          offering.time_selection_mode,
+          offering.timezone,
+          offering.fixed_start_time,
+          offering.fixed_end_time,
+          offering.earliest_start_time,
+          offering.latest_start_time,
+          offering.start_interval_minutes,
+          offering.min_participants,
+          offering.max_participants,
+          offering.min_duration_minutes,
+          offering.max_duration_minutes,
+          offering.duration_step_minutes,
+          offering.default_duration_minutes,
+          offering.allowed_duration_minutes,
+          offering.min_advance_minutes,
+          offering.max_advance_days,
+          offering.same_day_booking_allowed,
+          offering.pricing_mode,
+          offering.date_range_billing_unit
+        ]
+      );
+      const clonedOfferingId = clonedOffering.rows[0]?.product_offering_id;
+      if (!clonedOfferingId) throw new Error('Cloned product offering could not be created.');
+      await client.query(
+        `INSERT INTO product_offering_resources (
+           product_offering_id, resource_id, quantity, scaling_mode
+         )
+         SELECT $1, resource_id, quantity, scaling_mode
+         FROM product_offering_resources
+         WHERE product_offering_id = $2`,
+        [clonedOfferingId, offering.product_offering_id]
+      );
+    }
+
+    await client.query(
+      `INSERT INTO product_resources (product_id, resource_id, quantity)
+       SELECT $1, resource_id, quantity
+       FROM product_resources
+       WHERE product_id = $2`,
+      [cloneId, productId]
+    );
+
+    const rulesResult = await client.query<{
+      location_id: string | null;
+      product_variant_id: string | null;
+      resource_id: string | null;
+      rule_type: string;
+      starts_at: string | null;
+      ends_at: string | null;
+      weekdays: number[] | null;
+      local_start_time: string | null;
+      local_end_time: string | null;
+      timezone: string;
+      capacity_override: number | null;
+      is_active: boolean;
+      metadata: unknown;
+    }>(
+      `SELECT location_id, product_variant_id, resource_id, rule_type, starts_at,
+              ends_at, weekdays, local_start_time, local_end_time, timezone,
+              capacity_override, is_active, metadata
+       FROM availability_rules
+       WHERE product_id = $1
+       ORDER BY created_at ASC, availability_rule_id ASC`,
+      [productId]
+    );
+    for (const rule of rulesResult.rows) {
+      const clonedVariantId = rule.product_variant_id ? variantIds.get(rule.product_variant_id) : null;
+      if (rule.product_variant_id && !clonedVariantId) continue;
+      await client.query(
+        `INSERT INTO availability_rules (
+           location_id, product_id, product_variant_id, resource_id, rule_type,
+           starts_at, ends_at, weekdays, local_start_time, local_end_time,
+           timezone, capacity_override, is_active, metadata
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+        [
+          rule.location_id,
+          cloneId,
+          clonedVariantId,
+          rule.resource_id,
+          rule.rule_type,
+          rule.starts_at,
+          rule.ends_at,
+          rule.weekdays,
+          rule.local_start_time,
+          rule.local_end_time,
+          rule.timezone,
+          rule.capacity_override,
+          rule.is_active,
+          rule.metadata
+        ]
+      );
+    }
+
+    return cloneId;
+  });
+
+  return clonedProductId ? getAdminProduct(clonedProductId) : null;
+}
+
+export async function deleteAdminProduct(productId: string): Promise<'deleted' | 'not_found' | 'in_use'> {
+  try {
+    const result = await pool.query(
+      `DELETE FROM products
+       WHERE product_id = $1
+       RETURNING product_id`,
+      [productId]
+    );
+    return result.rowCount ? 'deleted' : 'not_found';
+  } catch (error) {
+    if ((error as { code?: string }).code === '23503') return 'in_use';
+    throw error;
+  }
+}
+
 export async function listLocationProducts(locationId: string): Promise<AdminProduct[]> {
   const result = await pool.query<ProductRow>(
     `${productSelect}
@@ -459,6 +817,11 @@ export interface UpdateProductOfferingInput {
   regiondoProductId?: string;
   timeSelectionMode?: 'date_range' | 'start_end' | 'start_duration' | 'fixed_duration';
   timezone?: string;
+  fixedStartTime?: string | null;
+  fixedEndTime?: string | null;
+  earliestStartTime?: string | null;
+  latestStartTime?: string | null;
+  startIntervalMinutes?: number;
   minParticipants?: number;
   maxParticipants?: number;
   minDurationMinutes?: number | null;
@@ -470,6 +833,8 @@ export interface UpdateProductOfferingInput {
   maxAdvanceDays?: number | null;
   sameDayBookingAllowed?: boolean;
   enabled?: boolean;
+  pricingMode?: 'once' | 'per_quantity' | 'per_date_unit' | 'per_date_unit_per_quantity';
+  dateRangeBillingUnit?: 'nights' | 'calendar_days';
 }
 
 export async function updateProductOffering(
@@ -478,16 +843,29 @@ export async function updateProductOffering(
   input: UpdateProductOfferingInput
 ): Promise<AdminProduct | null> {
   const updated = await withTransaction(async (client) => {
-    const current = await client.query<{ product_offering_id: string; booking_provider: 'core' | 'regiondo' }>(
-      `SELECT product_offering_id, booking_provider
+    const current = await client.query<{
+      product_offering_id: string;
+      booking_provider: 'core' | 'regiondo';
+      time_selection_mode: string;
+      pricing_mode: UpdateProductOfferingInput['pricingMode'];
+    }>(
+      `SELECT product_offering_id, booking_provider, time_selection_mode, pricing_mode
        FROM location_products WHERE location_id = $1 AND product_id = $2 FOR UPDATE`,
       [locationId, productId]
     );
     if (!current.rowCount) return false;
     const offeringId = current.rows[0].product_offering_id;
     const nextProvider = input.bookingProvider ?? current.rows[0].booking_provider;
+    const nextTimeMode = input.timeSelectionMode ?? current.rows[0].time_selection_mode;
+    const nextPricingMode = input.pricingMode ?? current.rows[0].pricing_mode;
+    if (nextPricingMode?.includes('date_unit') && nextTimeMode !== 'date_range') {
+      throw new BookingRuleValidationError('Per-date-unit pricing requires date-range time selection.');
+    }
     if (nextProvider === 'core' && current.rows[0].booking_provider !== 'core') {
-      const readiness = await client.query<{ variants: string | number; resources: string | number }>(
+      const readiness = await client.query<{
+        variants: string | number;
+        resources: string | number;
+      }>(
         `SELECT
            (SELECT COUNT(*) FROM product_variants WHERE product_id = $1 AND regiondo_variant_id IS NULL) AS variants,
            (SELECT COUNT(*) FROM product_offering_resources WHERE product_offering_id = $2) AS resources`,
@@ -522,6 +900,13 @@ export async function updateProductOffering(
          booking_provider = COALESCE($3, booking_provider),
          time_selection_mode = COALESCE($4, time_selection_mode),
          timezone = COALESCE($5, timezone),
+         fixed_start_time = CASE WHEN $23::boolean THEN $24::time ELSE fixed_start_time END,
+         fixed_end_time = CASE WHEN $25::boolean THEN $26::time ELSE fixed_end_time END,
+         pricing_mode = COALESCE($27, pricing_mode),
+         date_range_billing_unit = COALESCE($28, date_range_billing_unit),
+         earliest_start_time = CASE WHEN $29::boolean THEN $30::time ELSE earliest_start_time END,
+         latest_start_time = CASE WHEN $31::boolean THEN $32::time ELSE latest_start_time END,
+         start_interval_minutes = COALESCE($33, start_interval_minutes),
          min_participants = COALESCE($6, min_participants),
          max_participants = COALESCE($7, max_participants),
          min_duration_minutes = CASE WHEN $8::boolean THEN $9 ELSE min_duration_minutes END,
@@ -536,16 +921,39 @@ export async function updateProductOffering(
          updated_at = now()
        WHERE product_offering_id = $1 AND product_id = $2`,
       [
-        offeringId, productId, input.bookingProvider ?? null, input.timeSelectionMode ?? null,
-        input.timezone ?? null, input.minParticipants ?? null, input.maxParticipants ?? null,
-        'minDurationMinutes' in input, input.minDurationMinutes ?? null,
-        'maxDurationMinutes' in input, input.maxDurationMinutes ?? null,
-        'durationStepMinutes' in input, input.durationStepMinutes ?? null,
-        'defaultDurationMinutes' in input, input.defaultDurationMinutes ?? null,
-        'allowedDurationMinutes' in input, input.allowedDurationMinutes ?? null,
+        offeringId,
+        productId,
+        input.bookingProvider ?? null,
+        input.timeSelectionMode ?? null,
+        input.timezone ?? null,
+        input.minParticipants ?? null,
+        input.maxParticipants ?? null,
+        'minDurationMinutes' in input,
+        input.minDurationMinutes ?? null,
+        'maxDurationMinutes' in input,
+        input.maxDurationMinutes ?? null,
+        'durationStepMinutes' in input,
+        input.durationStepMinutes ?? null,
+        'defaultDurationMinutes' in input,
+        input.defaultDurationMinutes ?? null,
+        'allowedDurationMinutes' in input,
+        input.allowedDurationMinutes ?? null,
         input.minAdvanceMinutes ?? null,
-        'maxAdvanceDays' in input, input.maxAdvanceDays ?? null,
-        input.sameDayBookingAllowed ?? null, input.enabled ?? null
+        'maxAdvanceDays' in input,
+        input.maxAdvanceDays ?? null,
+        input.sameDayBookingAllowed ?? null,
+        input.enabled ?? null,
+        'fixedStartTime' in input,
+        input.fixedStartTime ?? null,
+        'fixedEndTime' in input,
+        input.fixedEndTime ?? null,
+        input.pricingMode ?? null,
+        input.dateRangeBillingUnit ?? null,
+        'earliestStartTime' in input,
+        input.earliestStartTime ?? null,
+        'latestStartTime' in input,
+        input.latestStartTime ?? null,
+        input.startIntervalMinutes ?? null
       ]
     );
     return true;
@@ -557,7 +965,11 @@ export async function removeProductOffering(
   locationId: string,
   productId: string
 ): Promise<'deleted' | 'not_found' | 'in_use'> {
-  const result = await pool.query<{ exists: boolean; in_use: boolean; deleted: boolean }>(
+  const result = await pool.query<{
+    exists: boolean;
+    in_use: boolean;
+    deleted: boolean;
+  }>(
     `WITH target AS (
        SELECT product_offering_id FROM location_products WHERE location_id = $1 AND product_id = $2
      ), blockers AS (
@@ -723,13 +1135,34 @@ export async function createProductVariant(
       title: string | null;
       price_minor: string | number;
       currency: string;
+      duration_minutes: number | null;
+      is_active: boolean;
+      schedule_rule_enabled: boolean;
+      allowed_weekdays: number[] | null;
+      local_start_time: string | null;
+      local_end_time: string | null;
     }>(
       `INSERT INTO product_variants (
          product_id, title, price, price_minor, currency,
-         regiondo_variant_id, regiondo_product_id, regiondo_raw
-       ) VALUES ($1, $2, $3::numeric / 100, $3, $4, NULL, NULL, NULL)
-       RETURNING variant_id, title, price_minor, currency`,
-      [productId, input.title, input.priceMinor, input.currency]
+         regiondo_variant_id, regiondo_product_id, regiondo_raw, duration_minutes,
+         is_active, schedule_rule_enabled, allowed_weekdays, local_start_time, local_end_time
+       ) VALUES ($1, $2, $3::numeric / 100, $3, $4, NULL, NULL, NULL, $5, $6, $7, $8, $9::time, $10::time)
+       RETURNING variant_id, title, price_minor, currency, duration_minutes,
+                 is_active, schedule_rule_enabled, allowed_weekdays,
+                 to_char(local_start_time, 'HH24:MI') AS local_start_time,
+                 to_char(local_end_time, 'HH24:MI') AS local_end_time`,
+      [
+        productId,
+        input.title,
+        input.priceMinor,
+        input.currency,
+        input.durationOverrideMinutes ?? null,
+        input.active ?? true,
+        input.scheduleRuleEnabled ?? false,
+        input.allowedWeekdays ?? null,
+        input.localStartTime ?? null,
+        input.localEndTime ?? null
+      ]
     );
     const row = result.rows[0];
     return {
@@ -739,6 +1172,12 @@ export async function createProductVariant(
       currency: row.currency,
       isDefault: row.title === null,
       providerManaged: false,
+      durationOverrideMinutes: row.duration_minutes,
+      active: row.is_active,
+      scheduleRuleEnabled: row.schedule_rule_enabled,
+      allowedWeekdays: row.allowed_weekdays,
+      localStartTime: row.local_start_time,
+      localEndTime: row.local_end_time,
       options: []
     };
   } catch (error) {
@@ -762,23 +1201,65 @@ export async function updateProductVariant(
       title: string | null;
       price_minor: string | number;
       currency: string;
+      duration_minutes: number | null;
+      is_active: boolean;
+      schedule_rule_enabled: boolean;
+      allowed_weekdays: number[] | null;
+      local_start_time: string | null;
+      local_end_time: string | null;
     }>(
       `UPDATE product_variants
        SET title = CASE WHEN $3::boolean THEN $4::text ELSE title END,
            price_minor = COALESCE($5, price_minor),
            price = COALESCE($5::numeric / 100, price),
            currency = COALESCE($6, currency),
+           duration_minutes = CASE WHEN $7::boolean THEN $8::integer ELSE duration_minutes END,
+           is_active = COALESCE($9, is_active),
+           schedule_rule_enabled = COALESCE($10, schedule_rule_enabled),
+           allowed_weekdays = CASE WHEN $11::boolean THEN $12::smallint[] ELSE allowed_weekdays END,
+           local_start_time = CASE WHEN $13::boolean THEN $14::time ELSE local_start_time END,
+           local_end_time = CASE WHEN $15::boolean THEN $16::time ELSE local_end_time END,
            updated_at = now()
        WHERE product_id = $1 AND variant_id = $2 AND regiondo_variant_id IS NULL
-       RETURNING variant_id, title, price_minor, currency`,
-      [productId, variantId, input.title !== undefined, input.title ?? null, input.priceMinor ?? null, input.currency ?? null]
+       RETURNING variant_id, title, price_minor, currency, duration_minutes,
+                 is_active, schedule_rule_enabled, allowed_weekdays,
+                 to_char(local_start_time, 'HH24:MI') AS local_start_time,
+                 to_char(local_end_time, 'HH24:MI') AS local_end_time`,
+      [
+        productId,
+        variantId,
+        input.title !== undefined,
+        input.title ?? null,
+        input.priceMinor ?? null,
+        input.currency ?? null,
+        'durationOverrideMinutes' in input,
+        input.durationOverrideMinutes ?? null,
+        input.active ?? null,
+        input.scheduleRuleEnabled ?? null,
+        'allowedWeekdays' in input,
+        input.allowedWeekdays ?? null,
+        'localStartTime' in input,
+        input.localStartTime ?? null,
+        'localEndTime' in input,
+        input.localEndTime ?? null
+      ]
     );
     if (!result.rowCount) return 'not_found';
     const row = result.rows[0];
     return {
-      variantId: row.variant_id, title: row.title,
-      priceMinor: Number(row.price_minor), currency: row.currency,
-      isDefault: row.title === null, providerManaged: false, options: []
+      variantId: row.variant_id,
+      title: row.title,
+      priceMinor: Number(row.price_minor),
+      currency: row.currency,
+      isDefault: row.title === null,
+      providerManaged: false,
+      durationOverrideMinutes: row.duration_minutes,
+      active: row.is_active,
+      scheduleRuleEnabled: row.schedule_rule_enabled,
+      allowedWeekdays: row.allowed_weekdays,
+      localStartTime: row.local_start_time,
+      localEndTime: row.local_end_time,
+      options: []
     };
   } catch (error) {
     if ((error as { code?: string }).code === '23505' && input.title === null) return 'default_exists';
@@ -817,23 +1298,41 @@ export async function createProductOption(
   if (!ownership) return 'not_found';
   if (ownership !== 'core') return 'provider_managed';
   const result = await pool.query<{
-    option_id: string; title: string; values_json: unknown; price_delta_minor: string | number; currency: string;
+    option_id: string;
+    title: string;
+    values_json: unknown;
+    price_delta_minor: string | number;
+    currency: string;
+    duration_delta_minutes: number;
   }>(
     `INSERT INTO product_options (
        product_id, variant_id, title, values_json, price_delta_minor, currency,
-       regiondo_option_id, regiondo_product_id, regiondo_variant_id, regiondo_raw
+       regiondo_option_id, regiondo_product_id, regiondo_variant_id, regiondo_raw, duration_delta_minutes
      )
-     SELECT $1, variant.variant_id, $3, $4::jsonb, $5, $6, NULL, NULL, NULL, NULL
+     SELECT $1, variant.variant_id, $3, $4::jsonb, $5, $6, NULL, NULL, NULL, NULL, $7
      FROM product_variants variant
      WHERE variant.product_id = $1 AND variant.variant_id = $2 AND variant.regiondo_variant_id IS NULL
-     RETURNING option_id, title, values_json, price_delta_minor, currency`,
-    [productId, variantId, input.title, JSON.stringify(input.values), input.priceDeltaMinor, input.currency]
+     RETURNING option_id, title, values_json, price_delta_minor, currency, duration_delta_minutes`,
+    [
+      productId,
+      variantId,
+      input.title,
+      JSON.stringify(input.values),
+      input.priceDeltaMinor,
+      input.currency,
+      input.durationDeltaMinutes ?? 0
+    ]
   );
   if (!result.rowCount) return 'not_found';
   const row = result.rows[0];
   return {
-    optionId: row.option_id, title: row.title, values: input.values,
-    priceDeltaMinor: Number(row.price_delta_minor), currency: row.currency, providerManaged: false
+    optionId: row.option_id,
+    title: row.title,
+    values: input.values,
+    priceDeltaMinor: Number(row.price_delta_minor),
+    currency: row.currency,
+    providerManaged: false,
+    durationDeltaMinutes: row.duration_delta_minutes
   };
 }
 
@@ -847,13 +1346,19 @@ export async function updateProductOption(
   if (!ownership) return 'not_found';
   if (ownership !== 'core') return 'provider_managed';
   const result = await pool.query<{
-    option_id: string; title: string; values_json: unknown; price_delta_minor: string | number; currency: string;
+    option_id: string;
+    title: string;
+    values_json: unknown;
+    price_delta_minor: string | number;
+    currency: string;
+    duration_delta_minutes: number;
   }>(
     `UPDATE product_options option_record
      SET title = COALESCE($4, option_record.title),
          values_json = COALESCE($5::jsonb, option_record.values_json),
          price_delta_minor = COALESCE($6, option_record.price_delta_minor),
          currency = COALESCE($7, option_record.currency),
+         duration_delta_minutes = COALESCE($8, option_record.duration_delta_minutes),
          updated_at = now()
      FROM product_variants variant
      WHERE option_record.product_id = $1
@@ -864,11 +1369,16 @@ export async function updateProductOption(
        AND variant.product_id = $1
        AND variant.regiondo_variant_id IS NULL
      RETURNING option_record.option_id, option_record.title, option_record.values_json,
-               option_record.price_delta_minor, option_record.currency`,
+               option_record.price_delta_minor, option_record.currency, option_record.duration_delta_minutes`,
     [
-      productId, variantId, optionId, input.title ?? null,
+      productId,
+      variantId,
+      optionId,
+      input.title ?? null,
       input.values === undefined ? null : JSON.stringify(input.values),
-      input.priceDeltaMinor ?? null, input.currency ?? null
+      input.priceDeltaMinor ?? null,
+      input.currency ?? null,
+      input.durationDeltaMinutes ?? null
     ]
   );
   if (!result.rowCount) return 'not_found';
@@ -876,8 +1386,13 @@ export async function updateProductOption(
   return {
     optionId: row.option_id,
     title: row.title,
-    values: Array.isArray(row.values_json) ? row.values_json.filter((value): value is string => typeof value === 'string') : [],
-    priceDeltaMinor: Number(row.price_delta_minor), currency: row.currency, providerManaged: false
+    values: Array.isArray(row.values_json)
+      ? row.values_json.filter((value): value is string => typeof value === 'string')
+      : [],
+    priceDeltaMinor: Number(row.price_delta_minor),
+    currency: row.currency,
+    providerManaged: false,
+    durationDeltaMinutes: row.duration_delta_minutes
   };
 }
 
@@ -908,21 +1423,29 @@ export async function deleteProductOption(
 export async function prepareProductCoreMigration(productId: string): Promise<AdminProduct | CatalogMutationFailure> {
   const result = await withTransaction(async (client) => {
     const productResult = await client.query<{
-      booking_provider: 'core' | 'regiondo'; currency: string; regiondo_product_id: string | null;
-    }>(
-      `SELECT booking_provider, currency, regiondo_product_id FROM products WHERE product_id = $1 FOR UPDATE`,
-      [productId]
-    );
+      booking_provider: 'core' | 'regiondo';
+      currency: string;
+      regiondo_product_id: string | null;
+    }>(`SELECT booking_provider, currency, regiondo_product_id FROM products WHERE product_id = $1 FOR UPDATE`, [
+      productId
+    ]);
     const product = productResult.rows[0];
     if (!product) return 'not_found' as const;
     if (product.booking_provider !== 'regiondo' || !product.regiondo_product_id) return 'provider_managed' as const;
 
-    const existing = await client.query(`SELECT 1 FROM product_variants WHERE product_id = $1 AND regiondo_variant_id IS NULL LIMIT 1`, [productId]);
+    const existing = await client.query(
+      `SELECT 1 FROM product_variants WHERE product_id = $1 AND regiondo_variant_id IS NULL LIMIT 1`,
+      [productId]
+    );
     if (existing.rowCount) return 'prepared' as const;
 
     const sourceVariants = await client.query<{
-      variant_id: string; regiondo_variant_id: string; title: string | null;
-      price: string | number; price_minor: string | number | null; currency: string;
+      variant_id: string;
+      regiondo_variant_id: string;
+      title: string | null;
+      price: string | number;
+      price_minor: string | number | null;
+      currency: string;
     }>(
       `SELECT variant_id, regiondo_variant_id, title, price, price_minor, currency
        FROM product_variants
@@ -933,9 +1456,8 @@ export async function prepareProductCoreMigration(productId: string): Promise<Ad
     if (!sourceVariants.rowCount) return 'not_found' as const;
 
     for (const source of sourceVariants.rows) {
-      const preparedTitle = source.title ?? (
-        sourceVariants.rows.length === 1 ? null : `Regiondo variant ${source.regiondo_variant_id}`
-      );
+      const preparedTitle =
+        source.title ?? (sourceVariants.rows.length === 1 ? null : `Regiondo variant ${source.regiondo_variant_id}`);
       const copied = await client.query<{ variant_id: string }>(
         `INSERT INTO product_variants (
            product_id, title, price, price_minor, currency,
@@ -943,9 +1465,18 @@ export async function prepareProductCoreMigration(productId: string): Promise<Ad
          ) VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6::jsonb)
          RETURNING variant_id`,
         [
-          productId, preparedTitle, source.price, source.price_minor ?? Math.round(Number(source.price) * 100),
+          productId,
+          preparedTitle,
+          source.price,
+          source.price_minor ?? Math.round(Number(source.price) * 100),
           source.currency || product.currency,
-          JSON.stringify({ coreMigration: { provider: 'regiondo', sourceVariantId: source.variant_id, externalId: source.regiondo_variant_id } })
+          JSON.stringify({
+            coreMigration: {
+              provider: 'regiondo',
+              sourceVariantId: source.variant_id,
+              externalId: source.regiondo_variant_id
+            }
+          })
         ]
       );
       const copiedVariantId = copied.rows[0].variant_id;

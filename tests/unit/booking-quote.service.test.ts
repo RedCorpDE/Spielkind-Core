@@ -4,8 +4,11 @@ const mocks = vi.hoisted(() => ({
   getBookingOffering: vi.fn(),
   getVariantDurationMinutes: vi.fn(),
   providerGet: vi.fn(),
-  quote: vi.fn()
+  quote: vi.fn(),
+  poolQuery: vi.fn()
 }));
+
+vi.mock('../../src/db/pool.js', () => ({ pool: { query: mocks.poolQuery } }));
 
 vi.mock('../../src/modules/catalog/catalog.repository.js', () => ({
   getBookingOffering: mocks.getBookingOffering,
@@ -37,12 +40,23 @@ const rules = {
   minDurationMinutes: 60, maxDurationMinutes: 480, durationStepMinutes: 30,
   defaultDurationMinutes: 120, allowedDurationMinutes: [], minAdvanceMinutes: 0,
   maxAdvanceDays: 365, sameDayBookingAllowed: true
+  , pricingMode: 'per_quantity' as const, dateRangeBillingUnit: 'nights' as const
 };
 
 describe('shared booking quote service', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getVariantDurationMinutes.mockResolvedValue(null);
+    mocks.poolQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('SELECT variant_id')) return { rows: [{
+        variant_id: intent.variantId, title: 'Standard', is_active: true,
+        schedule_rule_enabled: false, allowed_weekdays: null,
+        local_start_time: null, local_end_time: null
+      }], rowCount: 1 };
+      return sql.includes('FROM product_variants')
+        ? { rows: [{ duration_minutes: null }], rowCount: 1 }
+        : { rows: [{ option_id: intent.options[0].optionId, duration_delta_minutes: 0 }], rowCount: 1 };
+    });
     mocks.quote.mockResolvedValue({
       items: [], subtotalNet: 10000, tax: 1900, subtotalGross: 11900,
       discount: 0, total: 11900, currency: 'EUR'
@@ -64,7 +78,7 @@ describe('shared booking quote service', () => {
     expect(mocks.providerGet).toHaveBeenCalledWith(bookingProvider);
     expect(quote.available).toBe(true);
     expect(quote.configuration).toMatchObject({ startAt: intent.startAt, endAt: intent.endAt, participants: 4 });
-    expect(quote.pricing).toEqual({ subtotal: 11900, fees: 0, taxes: 1900, discount: 0, total: 11900, currency: 'EUR' });
+    expect(quote.pricing).toMatchObject({ subtotal: 11900, fees: 0, taxes: 1900, discount: 0, total: 11900, currency: 'EUR' });
   });
 
   it('rejects inactive and mismatched offerings before provider access', async () => {
@@ -78,6 +92,70 @@ describe('shared booking quote service', () => {
       active: true, bookingProvider: 'core', rules
     });
     await expect(quoteBookingIntent(intent)).rejects.toMatchObject({ code: 'INVALID_OFFERING_PAIRING' });
+    expect(mocks.providerGet).not.toHaveBeenCalled();
+  });
+
+  it('checks Core availability with the resolved variant and option duration', async () => {
+    const checkAvailability = vi.fn().mockResolvedValue({
+      available: true, capacity: 10, reserved: 0, held: 0, remaining: 10, maxBookableQuantity: 10
+    });
+    mocks.getBookingOffering.mockResolvedValue({
+      id: intent.locationProductId, locationId: intent.locationId, productId: intent.productId,
+      active: true, bookingProvider: 'core', rules: { ...rules, timeSelectionMode: 'fixed_duration', defaultDurationMinutes: 240 }
+    });
+    mocks.providerGet.mockReturnValue({ checkAvailability });
+    mocks.poolQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('SELECT variant_id')) return { rows: [{
+        variant_id: intent.variantId, title: 'Extended', is_active: true,
+        schedule_rule_enabled: false, allowed_weekdays: null,
+        local_start_time: null, local_end_time: null
+      }], rowCount: 1 };
+      return sql.includes('FROM product_variants')
+        ? { rows: [{ duration_minutes: 360 }], rowCount: 1 }
+        : { rows: [{ option_id: intent.options[0].optionId, duration_delta_minutes: 60 }], rowCount: 1 };
+    });
+
+    const quote = await quoteBookingIntent(intent, { now: new Date('2026-10-01T00:00:00Z') });
+
+    expect(quote.effectiveDurationMinutes).toBe(420);
+    expect(quote.configuration.endAt).toBe('2026-10-16T23:00:00.000Z');
+    expect(checkAvailability).toHaveBeenCalledWith(expect.objectContaining({
+      intent: expect.objectContaining({ startAt: intent.startAt, endAt: '2026-10-16T23:00:00.000Z' })
+    }));
+  });
+
+  it('rejects a schedule-ineligible Variant before shared client/web provider access', async () => {
+    mocks.getBookingOffering.mockResolvedValue({
+      id: intent.locationProductId,
+      locationId: intent.locationId,
+      productId: intent.productId,
+      active: true,
+      bookingProvider: 'core',
+      rules
+    });
+    mocks.poolQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('SELECT variant_id')) {
+        return {
+          rows: [{
+            variant_id: intent.variantId,
+            title: 'Weekend',
+            is_active: true,
+            schedule_rule_enabled: true,
+            allowed_weekdays: [6, 7],
+            local_start_time: null,
+            local_end_time: null
+          }],
+          rowCount: 1
+        };
+      }
+      return sql.includes('FROM product_variants')
+        ? { rows: [{ duration_minutes: null }], rowCount: 1 }
+        : { rows: [{ option_id: intent.options[0].optionId, duration_delta_minutes: 0 }], rowCount: 1 };
+    });
+
+    await expect(
+      quoteBookingIntent(intent, { now: new Date('2026-10-01T00:00:00Z') })
+    ).rejects.toMatchObject({ code: 'VARIANT_NOT_AVAILABLE_FOR_SCHEDULE' });
     expect(mocks.providerGet).not.toHaveBeenCalled();
   });
 });

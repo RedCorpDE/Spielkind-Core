@@ -97,7 +97,15 @@ export async function createNativeBooking(input: CreateNativeBookingInput): Prom
           bookingId, item.productId, input.locationProductId ?? null, item.variantId, item.quantity, item.productName, item.variantName,
           item.unitPriceNet, item.unitPriceGross, item.vatBasisPoints,
           item.subtotalNet, item.tax, item.subtotalGross, item.currency,
-          JSON.stringify({ discountMinor: quote.discount })
+          JSON.stringify({
+            discountMinor: quote.discount,
+            pricingMode: item.pricingMode,
+            billableDateUnits: item.dateUnits,
+            quantity: item.quantity,
+            effectiveUnitRateMinor: item.effectiveUnitRate,
+            subtotalBeforeOptionsMinor: item.subtotalBeforeOptions,
+            optionsSubtotalMinor: item.optionsSubtotal
+          })
         ]
       );
       await client.query(

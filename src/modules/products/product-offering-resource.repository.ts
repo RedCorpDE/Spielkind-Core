@@ -1,5 +1,6 @@
 import { pool } from '../../db/pool.js';
 import { withTransaction } from '../../db/transaction.js';
+import type { ResourceScalingMode } from '../resources/resource-requirements.repository.js';
 
 export interface OfferingResourceRequirement {
   offeringId: string;
@@ -10,6 +11,7 @@ export interface OfferingResourceRequirement {
   resourceId: string;
   resourceTitle: string;
   quantity: number;
+  scalingMode: ResourceScalingMode;
 }
 
 interface RequirementRow {
@@ -21,6 +23,7 @@ interface RequirementRow {
   resource_id: string;
   resource_title: string;
   quantity: number;
+  scaling_mode: ResourceScalingMode;
 }
 
 function mapRequirement(row: RequirementRow): OfferingResourceRequirement {
@@ -32,13 +35,14 @@ function mapRequirement(row: RequirementRow): OfferingResourceRequirement {
     locationTitle: row.location_title,
     resourceId: row.resource_id,
     resourceTitle: row.resource_title,
-    quantity: row.quantity
+    quantity: row.quantity,
+    scalingMode: row.scaling_mode
   };
 }
 
 const selectRequirement = `SELECT offering.product_offering_id, offering.product_id,
   product.title AS product_title, offering.location_id, location.title AS location_title,
-  resource.resource_id, resource.title AS resource_title, requirement.quantity
+  resource.resource_id, resource.title AS resource_title, requirement.quantity, requirement.scaling_mode
 FROM product_offering_resources requirement
 INNER JOIN location_products offering
   ON offering.product_offering_id = requirement.product_offering_id
@@ -62,28 +66,34 @@ export async function upsertOfferingResource(input: {
   offeringId: string;
   resourceId: string;
   quantity: number;
-}): Promise<OfferingResourceRequirement | 'offering_not_found' | 'resource_not_found' | 'wrong_location'> {
+  scalingMode?: ResourceScalingMode;
+}): Promise<OfferingResourceRequirement | 'offering_not_found' | 'resource_not_found' | 'wrong_location' | 'provider_managed_scaling'> {
   return withTransaction(async (client) => {
     const context = await client.query<{
       offering_location_id: string | null;
       resource_location_id: string | null;
+      booking_provider: 'core' | 'regiondo' | null;
     }>(
       `SELECT
          (SELECT location_id FROM location_products WHERE product_offering_id = $1) AS offering_location_id,
-         (SELECT location_id FROM resources WHERE resource_id = $2) AS resource_location_id`,
+         (SELECT location_id FROM resources WHERE resource_id = $2) AS resource_location_id,
+         (SELECT booking_provider FROM location_products WHERE product_offering_id = $1) AS booking_provider`,
       [input.offeringId, input.resourceId]
     );
     const row = context.rows[0];
     if (!row?.offering_location_id) return 'offering_not_found';
     if (!row.resource_location_id) return 'resource_not_found';
     if (row.offering_location_id !== row.resource_location_id) return 'wrong_location';
+    if (row.booking_provider !== 'core' && input.scalingMode === 'per_booking') return 'provider_managed_scaling';
 
     await client.query(
-      `INSERT INTO product_offering_resources (product_offering_id, resource_id, quantity)
-       VALUES ($1, $2, $3)
+      `INSERT INTO product_offering_resources (product_offering_id, resource_id, quantity, scaling_mode)
+       VALUES ($1, $2, $3, COALESCE($4, 'per_quantity'))
        ON CONFLICT (product_offering_id, resource_id)
-       DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now()`,
-      [input.offeringId, input.resourceId, input.quantity]
+       DO UPDATE SET quantity = EXCLUDED.quantity,
+                     scaling_mode = COALESCE($4, product_offering_resources.scaling_mode),
+                     updated_at = now()`,
+      [input.offeringId, input.resourceId, input.quantity, input.scalingMode ?? null]
     );
     const result = await client.query<RequirementRow>(
       `${selectRequirement}

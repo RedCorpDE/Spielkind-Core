@@ -4,7 +4,6 @@ import { createReservationHold, releaseReservationHold } from '../../modules/ava
 import { bookingProviderRegistry } from '../../modules/bookings/booking-provider.js';
 import { getCancellationQuote, requestCancellation } from '../../modules/cancellations/cancellation.service.js';
 import { getCatalogProductOffering, getExternalVariantReference, listCatalogProducts } from '../../modules/catalog/catalog.repository.js';
-import { getAvailabilitySummary } from '../../modules/resources/availability.service.js';
 import { getClientBooking } from '../../client-api/repository.js';
 import { requireClientAuth, type ClientFastifyRequest } from '../client.js';
 import { ConflictHttpError, HttpError, ValidationHttpError } from '../errors.js';
@@ -12,6 +11,7 @@ import { createStripeCheckout } from '../../modules/payments/payment-checkout.se
 import { bookingIntentSchema } from '../schemas/booking-intent.schema.js';
 import { bookingQuoteService } from '../../modules/bookings/booking-quote.service.js';
 import { getBookingOffering } from '../../modules/catalog/catalog.repository.js';
+import { listCoreStartSlots } from '../../modules/bookings/booking-slot.service.js';
 
 const uuid = z.string().uuid();
 const productParams = z.object({ productId: uuid });
@@ -55,6 +55,7 @@ export async function registerClientCommerceRoutes(app: FastifyInstance): Promis
       description: product.description,
       imageUrl: product.imageUrl,
       price: product.price,
+      bookingProvider: product.bookingProvider,
       variants: product.variants,
       offering: product.offering,
       bookingConfiguration: product.bookingConfiguration
@@ -65,7 +66,11 @@ export async function registerClientCommerceRoutes(app: FastifyInstance): Promis
     await requireClientAuth(request as ClientFastifyRequest);
     const { productId } = parse(productParams, request.params, 'Invalid product id.');
     const query = parse(
-      z.object({ locationId: uuid, variantId: uuid.optional(), start: z.string().datetime(), end: z.string().datetime(), quantity: z.coerce.number().int().positive().max(100).default(1) }),
+      z.object({
+        locationId: uuid, variantId: uuid.optional(), start: z.string().datetime(), end: z.string().datetime(),
+        durationMinutes: z.coerce.number().int().positive().max(7 * 24 * 60).optional(),
+        quantity: z.coerce.number().int().positive().max(100).default(1)
+      }),
       request.query,
       'Invalid availability query.'
     );
@@ -79,17 +84,59 @@ export async function registerClientCommerceRoutes(app: FastifyInstance): Promis
       const slots = await provider.getAvailability({ externalVariantId, start: query.start, end: query.end, quantity: query.quantity ?? 1 });
       return { available: slots.length > 0, capacity: null, reserved: null, held: null, remaining: null, maxBookableQuantity: null, slots };
     }
-    const availability = await getAvailabilitySummary({
-      product_id: productId, product_variant_id: query.variantId, location_id: query.locationId,
-      dt_from: query.start, dt_to: query.end, guest_count: query.quantity ?? 1
+    const offering = await getBookingOffering(product.offering.id);
+    if (!offering) throw new HttpError(404, 'This product is not available at this location.');
+    const intent = {
+      productId,
+      locationId: query.locationId,
+      locationProductId: product.offering.id,
+      variantId: query.variantId,
+      startAt: query.start,
+      endAt: query.end,
+      durationMinutes: query.durationMinutes,
+      participants: query.quantity ?? 1,
+      options: []
+    };
+    const result = await listCoreStartSlots({ intent, offering });
+    return {
+      available: result.slots.length > 0,
+      remaining: result.slots[0]?.remaining ?? null,
+      maxBookableQuantity: result.slots[0]?.maxBookableQuantity ?? null,
+      ...result
+    };
+  });
+
+  app.post('/api/client/products/:productId/availability', async (request) => {
+    await requireClientAuth(request as ClientFastifyRequest);
+    const { productId } = parse(productParams, request.params, 'Invalid product id.');
+    const body = parse(bookingIntentSchema, request.body, 'Invalid availability request.');
+    if (body.productId !== productId) throw new ValidationHttpError('Product id does not match the availability request.');
+    const product = await getCatalogProductOffering(productId, body.locationId);
+    if (!product) throw new HttpError(404, 'This product is not available at this location.');
+    const provider = bookingProviderRegistry.get(product.bookingProvider);
+    if (provider.key === 'regiondo') {
+      if (!body.variantId || !provider.getAvailability) throw new ValidationHttpError('A variant is required for Regiondo availability.');
+      const externalVariantId = await getExternalVariantReference(body.variantId);
+      if (!externalVariantId) throw new HttpError(409, 'The selected variant is not linked to Regiondo.');
+      const slots = await provider.getAvailability({
+        externalVariantId, start: body.startAt, end: body.endAt,
+        quantity: body.participants ?? body.quantities?.participants ?? 1
+      });
+      return { available: slots.length > 0, remaining: null, maxBookableQuantity: null, slots };
+    }
+    const offering = await getBookingOffering(product.offering.id);
+    if (!offering) throw new HttpError(404, 'This product is not available at this location.');
+    const result = await listCoreStartSlots({
+      intent: body,
+      offering,
+      requestedDate: body.startDate,
+      requestedTime: body.startTime
     });
     return {
-      available: availability.available,
-      capacity: availability.capacity,
-      reserved: availability.reserved,
-      held: availability.held,
-      remaining: availability.remaining,
-      maxBookableQuantity: availability.maxBookableQuantity
+      available: result.slots.length > 0,
+      remaining: result.slots[0]?.remaining ?? null,
+      maxBookableQuantity: result.slots[0]?.maxBookableQuantity ?? null,
+      ...result
     };
   });
 
@@ -122,8 +169,8 @@ export async function registerClientCommerceRoutes(app: FastifyInstance): Promis
       productOfferingId: body.locationProductId,
       productVariantId: body.variantId,
       quantity: body.participants ?? body.quantities?.participants ?? 1,
-      startsAt: body.startAt,
-      endsAt: body.endAt,
+      startsAt: quote.configuration.startAt,
+      endsAt: quote.configuration.endAt,
       expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
       idempotencyKey: requireIdempotencyKey(request)
     });
@@ -154,7 +201,12 @@ export async function registerClientCommerceRoutes(app: FastifyInstance): Promis
     const provider = bookingProviderRegistry.get(offering.bookingProvider);
     if (!provider.createBooking) throw new ConflictHttpError(`${provider.displayName} booking creation is unavailable.`);
     const result = await provider.createBooking({
-      intent: body,
+      intent: {
+        ...body,
+        startAt: quote.configuration.startAt,
+        endAt: quote.configuration.endAt,
+        durationMinutes: quote.configuration.durationMinutes ?? undefined
+      },
       clientId: auth.client.id,
       holdId: body.holdId,
       idempotencyKey: requireIdempotencyKey(request),

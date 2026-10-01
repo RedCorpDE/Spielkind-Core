@@ -14,8 +14,10 @@ vi.mock('../../src/db/transaction.js', () => ({
 
 const {
   addProductOffering,
+  cloneAdminProduct,
   createAdminProduct,
   createProductVariant,
+  deleteAdminProduct,
   deleteProductVariant,
   updateProductOffering
 } = await import('../../src/modules/products/product-admin.repository.js');
@@ -73,6 +75,124 @@ describe('Core-native product creation repository', () => {
     ]);
   });
 
+  it('clones catalog, offerings, resources and availability as an independent Core product', async () => {
+    const clonedProductId = '44444444-4444-4444-4444-444444444444';
+    const sourceVariantId = '55555555-5555-5555-5555-555555555555';
+    const clonedVariantId = '66666666-6666-6666-6666-666666666666';
+    const sourceOfferingId = '77777777-7777-7777-7777-777777777777';
+    const clonedOfferingId = '88888888-8888-8888-8888-888888888888';
+    transactionQuery
+      .mockResolvedValueOnce({
+        rowCount: 1,
+        rows: [{
+          title: productRow.title,
+          description: productRow.description,
+          image_url: productRow.image_url,
+          base_amount: productRow.base_amount,
+          price_minor: productRow.price_minor,
+          currency: productRow.currency,
+          vat_basis_points: productRow.vat_basis_points,
+          cancellation_policy_id: null
+        }]
+      })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ product_id: clonedProductId }] })
+      .mockResolvedValueOnce({
+        rowCount: 1,
+        rows: [{
+          variant_id: sourceVariantId,
+          title: '4 Hours',
+          price: '20.00',
+          price_minor: '2000',
+          currency: 'EUR',
+          duration_minutes: 240,
+          cancellation_policy_id: null,
+          is_active: true,
+          schedule_rule_enabled: true,
+          allowed_weekdays: [1, 2, 3, 4, 5],
+          local_start_time: '10:00',
+          local_end_time: '20:00'
+        }]
+      })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ variant_id: clonedVariantId }] })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ option_count: '0' }] })
+      .mockResolvedValueOnce({
+        rowCount: 1,
+        rows: [{
+          product_offering_id: sourceOfferingId,
+          location_id: '22222222-2222-2222-2222-222222222222',
+          enabled: true,
+          time_selection_mode: 'start_duration',
+          timezone: 'Europe/Berlin',
+          fixed_start_time: null,
+          fixed_end_time: null,
+          earliest_start_time: '10:00',
+          latest_start_time: '20:00',
+          start_interval_minutes: 30,
+          min_participants: 1,
+          max_participants: 8,
+          min_duration_minutes: 60,
+          max_duration_minutes: 240,
+          duration_step_minutes: 30,
+          default_duration_minutes: 120,
+          allowed_duration_minutes: [60, 120, 240],
+          min_advance_minutes: 60,
+          max_advance_days: 90,
+          same_day_booking_allowed: true,
+          pricing_mode: 'per_quantity',
+          date_range_billing_unit: 'nights'
+        }]
+      })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ product_offering_id: clonedOfferingId }] })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] })
+      .mockResolvedValueOnce({
+        rowCount: 1,
+        rows: [{
+          location_id: '22222222-2222-2222-2222-222222222222',
+          product_variant_id: sourceVariantId,
+          resource_id: null,
+          rule_type: 'recurring',
+          starts_at: null,
+          ends_at: null,
+          weekdays: [1, 2, 3, 4, 5],
+          local_start_time: '10:00',
+          local_end_time: '20:00',
+          timezone: 'Europe/Berlin',
+          capacity_override: null,
+          is_active: true,
+          metadata: {}
+        }]
+      })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] });
+    poolQuery.mockReset().mockResolvedValueOnce({
+      rowCount: 1,
+      rows: [{ ...productRow, product_id: clonedProductId, title: 'Escape Room (Copy)' }]
+    });
+
+    await expect(cloneAdminProduct(productRow.product_id)).resolves.toMatchObject({
+      productId: clonedProductId,
+      title: 'Escape Room (Copy)',
+      bookingProvider: 'core'
+    });
+
+    const statements = transactionQuery.mock.calls.map(([sql]) => String(sql));
+    expect(statements.some((sql) => sql.includes("'core'"))).toBe(true);
+    expect(statements.some((sql) => sql.includes('INSERT INTO product_options'))).toBe(true);
+    expect(statements.some((sql) => sql.includes('INSERT INTO location_products'))).toBe(true);
+    expect(statements.some((sql) => sql.includes('INSERT INTO product_offering_resources'))).toBe(true);
+    expect(statements.some((sql) => sql.includes('INSERT INTO availability_rules'))).toBe(true);
+    expect(transactionQuery.mock.calls.at(-1)?.[1]?.[2]).toBe(clonedVariantId);
+  });
+
+  it('protects products referenced by booking history from deletion', async () => {
+    poolQuery.mockReset().mockRejectedValueOnce(
+      Object.assign(new Error('foreign key violation'), { code: '23503' })
+    );
+
+    await expect(deleteAdminProduct(productRow.product_id)).resolves.toBe('in_use');
+  });
+
   it('uses the existing uniqueness rule when creating a Product Offering', async () => {
     poolQuery.mockReset();
     poolQuery
@@ -106,7 +226,10 @@ describe('Core-native product creation repository', () => {
 
     expect(poolQuery.mock.calls[1][0]).toContain('regiondo_variant_id, regiondo_product_id, regiondo_raw');
     expect(poolQuery.mock.calls[1][0]).toContain('NULL, NULL, NULL');
-    expect(poolQuery.mock.calls[1][1]).toEqual([productRow.product_id, '8 Hours', 3500, 'EUR']);
+    expect(poolQuery.mock.calls[1][1]).toEqual([
+      productRow.product_id, '8 Hours', 3500, 'EUR', null,
+      true, false, null, null, null
+    ]);
   });
 
   it('surfaces FK-protected Variant deletion as in-use instead of cascading history', async () => {

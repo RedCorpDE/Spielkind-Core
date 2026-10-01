@@ -23,6 +23,11 @@ interface ProductOfferingRow extends ProductRow {
   offering_booking_provider: 'core' | 'regiondo';
   time_selection_mode: OfferingBookingRules['timeSelectionMode'];
   timezone: string;
+  fixed_start_time: string | null;
+  fixed_end_time: string | null;
+  earliest_start_time: string | null;
+  latest_start_time: string | null;
+  start_interval_minutes: number;
   min_participants: number;
   max_participants: number;
   min_duration_minutes: number | null;
@@ -33,6 +38,8 @@ interface ProductOfferingRow extends ProductRow {
   min_advance_minutes: number;
   max_advance_days: number | null;
   same_day_booking_allowed: boolean;
+  pricing_mode: OfferingBookingRules['pricingMode'];
+  date_range_billing_unit: OfferingBookingRules['dateRangeBillingUnit'];
 }
 
 interface CatalogOption {
@@ -41,6 +48,7 @@ interface CatalogOption {
   title: string;
   values: Array<{ value: string; label: string }>;
   priceDelta: { amount: number; currency: string };
+  durationDeltaMinutes: number;
 }
 
 function optionValue(value: unknown): { value: string; label: string } | null {
@@ -81,7 +89,8 @@ function mapOptions(value: unknown): CatalogOption[] {
       priceDelta: {
         amount: Number(price?.amount ?? 0),
         currency: typeof price?.currency === 'string' ? price.currency : 'EUR'
-      }
+      },
+      durationDeltaMinutes: Number(record.durationDeltaMinutes ?? 0)
     }];
   });
 }
@@ -104,6 +113,7 @@ function mapProductOffering(row: ProductOfferingRow) {
   product.bookingProvider = row.offering_booking_provider;
   const variants = product.variants as Array<{
     id: string; title: string | null; price: { amount: number; currency: string }; durationMinutes?: number | null;
+    active?: boolean; scheduleRule?: { enabled: boolean; allowedWeekdays: number[] | null; localStartTime: string | null; localEndTime: string | null };
   }>;
   const options = mapOptions(row.options);
   const rules = mapOfferingRules(row);
@@ -130,7 +140,14 @@ function selectProductFields(providerExpression = 'product.booking_provider') {
       'id', variant.variant_id,
       'title', variant.title,
       'price', jsonb_build_object('amount', variant.price_minor, 'currency', variant.currency),
-      'durationMinutes', variant.duration_minutes
+      'durationMinutes', variant.duration_minutes,
+      'active', variant.is_active,
+      'scheduleRule', jsonb_build_object(
+        'enabled', variant.schedule_rule_enabled,
+        'allowedWeekdays', variant.allowed_weekdays,
+        'localStartTime', to_char(variant.local_start_time, 'HH24:MI'),
+        'localEndTime', to_char(variant.local_end_time, 'HH24:MI')
+      )
     ) ORDER BY variant.title NULLS LAST)
     FROM product_variants variant
     WHERE variant.product_id = product.product_id
@@ -170,19 +187,22 @@ export async function getCatalogProductOffering(productId: string, locationId: s
     `${selectProductFields('offering.booking_provider')},
        offering.product_offering_id, offering.location_id, location.title AS location_name, offering.enabled,
        offering.booking_provider AS offering_booking_provider,
-       offering.time_selection_mode, offering.timezone,
+       offering.time_selection_mode, offering.timezone, offering.fixed_start_time, offering.fixed_end_time,
+       offering.earliest_start_time, offering.latest_start_time, offering.start_interval_minutes,
        offering.min_participants, offering.max_participants,
        offering.min_duration_minutes, offering.max_duration_minutes,
        offering.duration_step_minutes, offering.default_duration_minutes,
        offering.allowed_duration_minutes, offering.min_advance_minutes,
        offering.max_advance_days, offering.same_day_booking_allowed,
+       offering.pricing_mode, offering.date_range_billing_unit,
        COALESCE((
          SELECT jsonb_agg(jsonb_build_object(
            'id', option_record.option_id,
            'variantId', option_record.variant_id,
            'title', COALESCE(option_record.title, 'Option'),
            'values', COALESCE(option_record.values_json, '[]'::jsonb),
-           'priceDelta', jsonb_build_object('amount', option_record.price_delta_minor, 'currency', option_record.currency)
+           'priceDelta', jsonb_build_object('amount', option_record.price_delta_minor, 'currency', option_record.currency),
+           'durationDeltaMinutes', option_record.duration_delta_minutes
          ) ORDER BY option_record.title NULLS LAST)
          FROM product_options option_record
          WHERE option_record.product_id = product.product_id
@@ -205,13 +225,19 @@ export async function getCatalogProductOffering(productId: string, locationId: s
 }
 
 function mapOfferingRules(row: Pick<ProductOfferingRow,
-  'time_selection_mode' | 'timezone' | 'min_participants' | 'max_participants'
+  'time_selection_mode' | 'timezone' | 'fixed_start_time' | 'fixed_end_time'
+  | 'earliest_start_time' | 'latest_start_time' | 'start_interval_minutes' | 'min_participants' | 'max_participants'
   | 'min_duration_minutes' | 'max_duration_minutes' | 'duration_step_minutes'
   | 'default_duration_minutes' | 'allowed_duration_minutes' | 'min_advance_minutes'
-  | 'max_advance_days' | 'same_day_booking_allowed'>): OfferingBookingRules {
+  | 'max_advance_days' | 'same_day_booking_allowed' | 'pricing_mode' | 'date_range_billing_unit'>): OfferingBookingRules {
   return {
     timeSelectionMode: row.time_selection_mode ?? 'start_end',
     timezone: row.timezone ?? 'Europe/Berlin',
+    fixedStartTime: row.fixed_start_time?.slice(0, 5) ?? null,
+    fixedEndTime: row.fixed_end_time?.slice(0, 5) ?? null,
+    earliestStartTime: row.earliest_start_time?.slice(0, 5) ?? null,
+    latestStartTime: row.latest_start_time?.slice(0, 5) ?? null,
+    startIntervalMinutes: row.start_interval_minutes ?? 30,
     minParticipants: row.min_participants ?? 1,
     maxParticipants: row.max_participants ?? 100,
     minDurationMinutes: row.min_duration_minutes ?? null,
@@ -221,7 +247,9 @@ function mapOfferingRules(row: Pick<ProductOfferingRow,
     allowedDurationMinutes: row.allowed_duration_minutes ?? [],
     minAdvanceMinutes: row.min_advance_minutes ?? 0,
     maxAdvanceDays: row.max_advance_days ?? null,
-    sameDayBookingAllowed: row.same_day_booking_allowed ?? true
+    sameDayBookingAllowed: row.same_day_booking_allowed ?? true,
+    pricingMode: row.pricing_mode ?? 'per_quantity',
+    dateRangeBillingUnit: row.date_range_billing_unit ?? 'nights'
   };
 }
 
@@ -229,12 +257,14 @@ export async function getBookingOffering(offeringId: string): Promise<BookingOff
   const result = await pool.query<ProductOfferingRow>(
     `SELECT offering.product_offering_id, offering.location_id, offering.product_id,
             offering.enabled, offering.booking_provider AS offering_booking_provider,
-            offering.time_selection_mode, offering.timezone,
+            offering.time_selection_mode, offering.timezone, offering.fixed_start_time, offering.fixed_end_time,
+            offering.earliest_start_time, offering.latest_start_time, offering.start_interval_minutes,
             offering.min_participants, offering.max_participants,
             offering.min_duration_minutes, offering.max_duration_minutes,
             offering.duration_step_minutes, offering.default_duration_minutes,
             offering.allowed_duration_minutes, offering.min_advance_minutes,
             offering.max_advance_days, offering.same_day_booking_allowed
+            , offering.pricing_mode, offering.date_range_billing_unit
      FROM location_products offering
      WHERE offering.product_offering_id = $1
      LIMIT 1`,

@@ -34,6 +34,16 @@ const protectedWritePaths = [
   },
   {
     method: 'POST',
+    path: '/api/admin/products/00000000-0000-0000-0000-000000000002/clone',
+    body: {}
+  },
+  {
+    method: 'DELETE',
+    path: '/api/admin/products/00000000-0000-0000-0000-000000000002',
+    body: {}
+  },
+  {
+    method: 'POST',
     path: '/api/admin/products/00000000-0000-0000-0000-000000000002/variants',
     body: { title: '4 Hours', priceMinor: 2000, currency: 'EUR' }
   },
@@ -50,7 +60,12 @@ const protectedWritePaths = [
   {
     method: 'POST',
     path: '/api/admin/products/00000000-0000-0000-0000-000000000002/variants/00000000-0000-0000-0000-000000000003/options',
-    body: { title: 'Headset', values: [], priceDeltaMinor: 300, currency: 'EUR' }
+    body: {
+      title: 'Headset',
+      values: [],
+      priceDeltaMinor: 300,
+      currency: 'EUR'
+    }
   },
   {
     method: 'POST',

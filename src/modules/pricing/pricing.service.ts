@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import { pool } from '../../db/pool.js';
 import { netFromGross, percentageOf } from '../commerce/money.js';
+import type { PricingMode } from '../bookings/booking-intent.js';
 
 export class PricingValidationError extends Error {
   constructor(message: string) {
@@ -40,6 +41,7 @@ export interface PricingQuoteInput {
   locationId?: string;
   locationProductId?: string;
   discountCode?: string;
+  dateUnits?: number;
 }
 
 export interface PricingQuoteItem {
@@ -56,6 +58,11 @@ export interface PricingQuoteItem {
   subtotalGross: number;
   currency: string;
   options: Array<{ optionId: string; name: string; value: string; priceDelta: number }>;
+  pricingMode: PricingMode;
+  dateUnits: number;
+  effectiveUnitRate: number;
+  subtotalBeforeOptions: number;
+  optionsSubtotal: number;
 }
 
 export interface PricingQuote {
@@ -66,6 +73,14 @@ export interface PricingQuote {
   discount: number;
   total: number;
   currency: string;
+  calculation: {
+    mode: PricingMode;
+    unitRate: number;
+    quantity: number;
+    dateUnits: number;
+    subtotalBeforeOptions: number;
+    optionsSubtotal: number;
+  };
 }
 
 export function calculatePrice(input: {
@@ -77,12 +92,25 @@ export function calculatePrice(input: {
   vatBasisPoints: number;
   currency: string;
   quantity: number;
+  pricingMode?: PricingMode;
+  dateUnits?: number;
   options?: Array<{ optionId: string; name: string; value: string; priceDelta: number }>;
   discount?: { type: 'fixed' | 'percentage'; amountMinor?: number | null; percentageBasisPoints?: number | null };
 }): PricingQuote {
   const options = input.options ?? [];
   const unitGross = input.baseGross + options.reduce((sum, option) => sum + option.priceDelta, 0);
-  const subtotalGrossBeforeDiscount = unitGross * input.quantity;
+  const pricingMode = input.pricingMode ?? 'per_quantity';
+  const dateUnits = input.dateUnits ?? 1;
+  if (!Number.isInteger(dateUnits) || dateUnits < 1) throw new PricingValidationError('Date units must be a positive integer.');
+  const baseMultiplier = pricingMode === 'once' ? 1
+    : pricingMode === 'per_quantity' ? input.quantity
+      : pricingMode === 'per_date_unit' ? dateUnits
+        : dateUnits * input.quantity;
+  const subtotalBeforeOptions = input.baseGross * baseMultiplier;
+  // Preserve established Option semantics: selected deltas scale per participant,
+  // independently of the Product base-rate pricing mode.
+  const optionsSubtotal = options.reduce((sum, option) => sum + option.priceDelta, 0) * input.quantity;
+  const subtotalGrossBeforeDiscount = subtotalBeforeOptions + optionsSubtotal;
   const requestedDiscount = input.discount?.type === 'percentage'
     ? percentageOf(subtotalGrossBeforeDiscount, input.discount.percentageBasisPoints ?? 0)
     : input.discount?.amountMinor ?? 0;
@@ -103,7 +131,12 @@ export function calculatePrice(input: {
     tax: subtotalGross - subtotalNet,
     subtotalGross,
     currency: input.currency,
-    options
+    options,
+    pricingMode,
+    dateUnits,
+    effectiveUnitRate: input.baseGross,
+    subtotalBeforeOptions,
+    optionsSubtotal
   };
   return {
     items: [item],
@@ -112,7 +145,15 @@ export function calculatePrice(input: {
     subtotalGross: subtotalGrossBeforeDiscount,
     discount,
     total: subtotalGross,
-    currency: input.currency
+    currency: input.currency,
+    calculation: {
+      mode: pricingMode,
+      unitRate: input.baseGross,
+      quantity: input.quantity,
+      dateUnits,
+      subtotalBeforeOptions,
+      optionsSubtotal
+    }
   };
 }
 
@@ -121,12 +162,14 @@ export async function quoteWithClient(client: PoolClient, input: PricingQuoteInp
     product_id: string; title: string; booking_provider: string; price_minor: string | number;
     currency: string; vat_basis_points: number; variant_id: string | null; variant_title: string | null;
     variant_price_minor: string | number | null;
+    pricing_mode: PricingMode | null;
   }>(
     `SELECT product.product_id, product.title,
             COALESCE(offering.booking_provider, product.booking_provider) AS booking_provider,
             product.price_minor,
             product.currency, product.vat_basis_points,
             variant.variant_id, variant.title AS variant_title, variant.price_minor AS variant_price_minor
+            , offering.pricing_mode
      FROM products product
      LEFT JOIN location_products offering
        ON offering.product_offering_id = $3::uuid
@@ -215,6 +258,8 @@ export async function quoteWithClient(client: PoolClient, input: PricingQuoteInp
     vatBasisPoints: product.vat_basis_points,
     currency: product.currency,
     quantity: input.quantity,
+    pricingMode: product.booking_provider === 'core' ? product.pricing_mode ?? 'per_quantity' : 'per_quantity',
+    dateUnits: product.booking_provider === 'core' ? input.dateUnits ?? 1 : 1,
     options: optionResult.rows.map((option) => ({
       optionId: option.option_id,
       name: option.title ?? 'Option',

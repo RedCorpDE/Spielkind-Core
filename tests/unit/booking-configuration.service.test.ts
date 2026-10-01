@@ -18,6 +18,8 @@ const baseRules: OfferingBookingRules = {
   minAdvanceMinutes: 0,
   maxAdvanceDays: 365,
   sameDayBookingAllowed: true
+  , pricingMode: 'per_quantity'
+  , dateRangeBillingUnit: 'nights'
 };
 
 const intent = (minutes: number, participants = 2): BookingIntent => ({

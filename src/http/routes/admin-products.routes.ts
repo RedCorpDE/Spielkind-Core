@@ -7,9 +7,11 @@ import { recordAdminWriteAudit } from '../admin-audit.js';
 import {
   deleteProductResourceMapping,
   addProductOffering,
+  cloneAdminProduct,
   createAdminProduct,
   createProductOption,
   createProductVariant,
+  deleteAdminProduct,
   deleteProductOption,
   deleteProductVariant,
   getAdminProduct,
@@ -61,7 +63,12 @@ const createProductSchema = z
     description: z.string().nullable().optional(),
     imageUrl: z.string().url().nullable().optional(),
     baseAmount: z.number().int().nonnegative().safe(),
-    currency: z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/).default('EUR'),
+    currency: z
+      .string()
+      .trim()
+      .toUpperCase()
+      .regex(/^[A-Z]{3}$/)
+      .default('EUR'),
     vatBasisPoints: z.number().int().min(0).max(10_000)
   })
   .strict();
@@ -70,34 +77,125 @@ const productResourceSchema = z.object({
   resourceId: z.string().uuid(),
   quantity: z.number().int().positive()
 });
+const offeringResourceSchema = z.object({
+  resourceId: z.string().uuid(),
+  quantity: z.number().int().positive(),
+  scalingMode: z.enum(['per_quantity', 'per_booking']).default('per_quantity')
+});
 const catalogParamsSchema = z.object({
   productId: z.string().uuid(),
   variantId: z.string().uuid().optional(),
   optionId: z.string().uuid().optional()
 });
-const currencySchema = z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/);
-const createVariantSchema = z.object({
-  title: z.string().trim().min(1).nullable().optional(),
-  isDefault: z.boolean().optional().default(false),
-  priceMinor: z.number().int().nonnegative().safe(),
-  currency: currencySchema
-}).strict().superRefine((value, context) => {
-  if (!value.isDefault && !value.title) {
-    context.addIssue({ code: z.ZodIssueCode.custom, path: ['title'], message: 'A named variant requires a title.' });
-  }
-});
-const updateVariantSchema = z.object({
-  title: z.string().trim().min(1).nullable().optional(),
-  isDefault: z.boolean().optional(),
-  priceMinor: z.number().int().nonnegative().safe().optional(),
-  currency: currencySchema.optional()
-}).strict().refine((value) => Object.keys(value).length > 0, { message: 'At least one variant field is required.' });
-const createOptionSchema = z.object({
-  title: z.string().trim().min(1),
-  values: z.array(z.string().trim().min(1)).max(100).default([]),
-  priceDeltaMinor: z.number().int().safe(),
-  currency: currencySchema
-}).strict();
+const currencySchema = z
+  .string()
+  .trim()
+  .toUpperCase()
+  .regex(/^[A-Z]{3}$/);
+const allowedWeekdaysSchema = z
+  .array(z.number().int().min(1).max(7))
+  .min(1)
+  .max(7)
+  .refine((values) => new Set(values).size === values.length, 'Weekday values must be unique.')
+  .nullable();
+const createVariantSchema = z
+  .object({
+    title: z.string().trim().min(1).nullable().optional(),
+    isDefault: z.boolean().optional().default(false),
+    priceMinor: z.number().int().nonnegative().safe(),
+    currency: currencySchema,
+    durationOverrideMinutes: z.number().int().positive().nullable().optional(),
+    active: z.boolean().optional(),
+    scheduleRuleEnabled: z.boolean().optional(),
+    allowedWeekdays: allowedWeekdaysSchema.optional(),
+    localStartTime: z
+      .string()
+      .regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/)
+      .nullable()
+      .optional(),
+    localEndTime: z
+      .string()
+      .regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/)
+      .nullable()
+      .optional()
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (!value.isDefault && !value.title) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['title'],
+        message: 'A named variant requires a title.'
+      });
+    }
+    if ((value.localStartTime == null) !== (value.localEndTime == null)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['localStartTime'],
+        message: 'Both schedule window times are required.'
+      });
+    }
+  });
+const updateVariantSchema = z
+  .object({
+    title: z.string().trim().min(1).nullable().optional(),
+    isDefault: z.boolean().optional(),
+    priceMinor: z.number().int().nonnegative().safe().optional(),
+    currency: currencySchema.optional(),
+    durationOverrideMinutes: z.number().int().positive().nullable().optional(),
+    active: z.boolean().optional(),
+    scheduleRuleEnabled: z.boolean().optional(),
+    allowedWeekdays: allowedWeekdaysSchema.optional(),
+    localStartTime: z
+      .string()
+      .regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/)
+      .nullable()
+      .optional(),
+    localEndTime: z
+      .string()
+      .regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/)
+      .nullable()
+      .optional()
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (!Object.keys(value).length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'At least one variant field is required.'
+      });
+    }
+    const startProvided = value.localStartTime !== undefined;
+    const endProvided = value.localEndTime !== undefined;
+    if (startProvided !== endProvided) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['localStartTime'],
+        message: 'Update both schedule window times together.'
+      });
+    }
+    if ((value.localStartTime === null) !== (value.localEndTime === null)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['localStartTime'],
+        message: 'Both schedule window times are required.'
+      });
+    }
+  });
+const createOptionSchema = z
+  .object({
+    title: z.string().trim().min(1),
+    values: z.array(z.string().trim().min(1)).max(100).default([]),
+    priceDeltaMinor: z.number().int().safe(),
+    currency: currencySchema,
+    durationDeltaMinutes: z
+      .number()
+      .int()
+      .min(-7 * 24 * 60)
+      .max(7 * 24 * 60)
+      .default(0)
+  })
+  .strict();
 const updateOptionSchema = createOptionSchema.partial().refine((value) => Object.keys(value).length > 0, {
   message: 'At least one option field is required.'
 });
@@ -105,34 +203,66 @@ const offeringParamsSchema = z.object({
   locationId: z.string().uuid(),
   productId: z.string().uuid()
 });
-const updateOfferingSchema = z.object({
-  bookingProvider: z.enum(['core', 'regiondo']).optional(),
-  regiondoProductId: z.string().trim().min(1).optional(),
-  timeSelectionMode: z.enum(['date_range', 'start_end', 'start_duration', 'fixed_duration']).optional(),
-  timezone: z.string().trim().min(1).max(100).optional(),
-  minParticipants: z.number().int().positive().optional(),
-  maxParticipants: z.number().int().positive().optional(),
-  minDurationMinutes: z.number().int().positive().nullable().optional(),
-  maxDurationMinutes: z.number().int().positive().nullable().optional(),
-  durationStepMinutes: z.number().int().positive().nullable().optional(),
-  defaultDurationMinutes: z.number().int().positive().nullable().optional(),
-  allowedDurationMinutes: z.array(z.number().int().positive()).max(100).nullable().optional(),
-  minAdvanceMinutes: z.number().int().nonnegative().optional(),
-  maxAdvanceDays: z.number().int().nonnegative().nullable().optional(),
-  sameDayBookingAllowed: z.boolean().optional(),
-  enabled: z.boolean().optional()
-}).strict().refine((value) => Object.keys(value).length > 0, { message: 'At least one offering field is required.' });
+const updateOfferingSchema = z
+  .object({
+    bookingProvider: z.enum(['core', 'regiondo']).optional(),
+    regiondoProductId: z.string().trim().min(1).optional(),
+    timeSelectionMode: z.enum(['date_range', 'start_end', 'start_duration', 'fixed_duration']).optional(),
+    timezone: z.string().trim().min(1).max(100).optional(),
+    fixedStartTime: z
+      .string()
+      .regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/)
+      .nullable()
+      .optional(),
+    fixedEndTime: z
+      .string()
+      .regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/)
+      .nullable()
+      .optional(),
+    earliestStartTime: z
+      .string()
+      .regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/)
+      .nullable()
+      .optional(),
+    latestStartTime: z
+      .string()
+      .regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/)
+      .nullable()
+      .optional(),
+    startIntervalMinutes: z.number().int().min(1).max(1440).optional(),
+    minParticipants: z.number().int().positive().optional(),
+    maxParticipants: z.number().int().positive().optional(),
+    minDurationMinutes: z.number().int().positive().nullable().optional(),
+    maxDurationMinutes: z.number().int().positive().nullable().optional(),
+    durationStepMinutes: z.number().int().positive().nullable().optional(),
+    defaultDurationMinutes: z.number().int().positive().nullable().optional(),
+    allowedDurationMinutes: z.array(z.number().int().positive()).max(100).nullable().optional(),
+    minAdvanceMinutes: z.number().int().nonnegative().optional(),
+    maxAdvanceDays: z.number().int().nonnegative().nullable().optional(),
+    sameDayBookingAllowed: z.boolean().optional(),
+    enabled: z.boolean().optional(),
+    pricingMode: z.enum(['once', 'per_quantity', 'per_date_unit', 'per_date_unit_per_quantity']).optional(),
+    dateRangeBillingUnit: z.enum(['nights', 'calendar_days']).optional()
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, {
+    message: 'At least one offering field is required.'
+  });
 const offeringResourceParamsSchema = z.object({
   offeringId: z.string().uuid(),
   resourceId: z.string().uuid().optional()
 });
-const availabilityQuerySchema = z.object({
-  locationId: z.string().uuid(),
-  variantId: z.string().uuid().optional(),
-  start: z.string().datetime(),
-  end: z.string().datetime(),
-  quantity: z.coerce.number().int().positive().max(100).default(1)
-}).refine((value) => new Date(value.end) > new Date(value.start), { message: 'End must be after start.' });
+const availabilityQuerySchema = z
+  .object({
+    locationId: z.string().uuid(),
+    variantId: z.string().uuid().optional(),
+    start: z.string().datetime(),
+    end: z.string().datetime(),
+    quantity: z.coerce.number().int().positive().max(100).default(1)
+  })
+  .refine((value) => new Date(value.end) > new Date(value.start), {
+    message: 'End must be after start.'
+  });
 
 function getRegiondoSyncStatusCode(error: RegiondoApiError): number {
   if (error instanceof RegiondoRateLimitError) {
@@ -187,18 +317,33 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
   app.post('/api/admin/product-offerings/:offeringId/resources', async (request, reply) => {
     const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
     const params = offeringResourceParamsSchema.safeParse(request.params);
-    const body = productResourceSchema.safeParse(request.body);
+    const body = offeringResourceSchema.safeParse(request.body);
     if (!params.success || !body.success) throw new ValidationHttpError('Invalid Offering Resource payload.');
-    const result = await upsertOfferingResource({ offeringId: params.data.offeringId, ...body.data });
+    const result = await upsertOfferingResource({
+      offeringId: params.data.offeringId,
+      ...body.data
+    });
     if (result === 'offering_not_found' || result === 'resource_not_found') {
       throw new HttpError(404, result === 'offering_not_found' ? 'Product Offering not found.' : 'Resource not found.');
     }
     if (result === 'wrong_location') {
-      throw new ConflictHttpError('The Resource must belong to the same Location as the Product Offering.', 'OFFERING_RESOURCE_LOCATION_MISMATCH');
+      throw new ConflictHttpError(
+        'The Resource must belong to the same Location as the Product Offering.',
+        'OFFERING_RESOURCE_LOCATION_MISMATCH'
+      );
+    }
+    if (result === 'provider_managed_scaling') {
+      throw new ConflictHttpError(
+        'Per-booking Resource scaling is available only for Core-managed Product Offerings.',
+        'CORE_RESOURCE_SCALING_REQUIRED'
+      );
     }
     await recordAdminWriteAudit({
-      request, auth, action: 'admin.product_offering_resource.upserted',
-      entityType: 'product_offering', entityId: params.data.offeringId,
+      request,
+      auth,
+      action: 'admin.product_offering_resource.upserted',
+      entityType: 'product_offering',
+      entityId: params.data.offeringId,
       details: body.data as Record<string, unknown>
     });
     reply.code(201);
@@ -208,17 +353,42 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
   app.patch('/api/admin/product-offerings/:offeringId/resources/:resourceId', async (request) => {
     const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
     const params = offeringResourceParamsSchema.safeParse(request.params);
-    const body = z.object({ quantity: z.number().int().positive() }).strict().safeParse(request.body);
+    const body = z
+      .object({
+        quantity: z.number().int().positive().optional(),
+        scalingMode: z.enum(['per_quantity', 'per_booking']).optional()
+      })
+      .strict()
+      .refine((value) => Object.keys(value).length > 0, {
+        message: 'At least one Offering Resource field is required.'
+      })
+      .safeParse(request.body);
     if (!params.success || !params.data.resourceId || !body.success) {
       throw new ValidationHttpError('Invalid Offering Resource update.');
     }
+    const current = await listOfferingResources(params.data.offeringId);
+    const existing = current?.find((item) => item.resourceId === params.data.resourceId);
+    if (!existing) throw new HttpError(404, 'Offering Resource requirement not found.');
     const result = await upsertOfferingResource({
-      offeringId: params.data.offeringId, resourceId: params.data.resourceId, quantity: body.data.quantity
+      offeringId: params.data.offeringId,
+      resourceId: params.data.resourceId,
+      quantity: body.data.quantity ?? existing.quantity,
+      scalingMode: body.data.scalingMode
     });
+    if (result === 'provider_managed_scaling') {
+      throw new ConflictHttpError(
+        'Per-booking Resource scaling is available only for Core-managed Product Offerings.',
+        'CORE_RESOURCE_SCALING_REQUIRED'
+      );
+    }
     if (typeof result === 'string') throw new HttpError(404, 'Offering Resource requirement not found.');
     await recordAdminWriteAudit({
-      request, auth, action: 'admin.product_offering_resource.updated', entityType: 'product_offering',
-      entityId: params.data.offeringId, details: { resourceId: params.data.resourceId, quantity: body.data.quantity }
+      request,
+      auth,
+      action: 'admin.product_offering_resource.updated',
+      entityType: 'product_offering',
+      entityId: params.data.offeringId,
+      details: { resourceId: params.data.resourceId, ...body.data }
     });
     return { ok: true, item: result };
   });
@@ -231,15 +401,22 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
       throw new HttpError(404, 'Offering Resource requirement not found.');
     }
     await recordAdminWriteAudit({
-      request, auth, action: 'admin.product_offering_resource.deleted', entityType: 'product_offering',
-      entityId: params.data.offeringId, details: { resourceId: params.data.resourceId }
+      request,
+      auth,
+      action: 'admin.product_offering_resource.deleted',
+      entityType: 'product_offering',
+      entityId: params.data.offeringId,
+      details: { resourceId: params.data.resourceId }
     });
     return { ok: true };
   });
 
   app.get('/api/admin/product-offering-resource-migration-conflicts', async (request) => {
     await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
-    return { ok: true, items: await listOfferingResourceMigrationConflicts() };
+    return {
+      ok: true,
+      items: await listOfferingResourceMigrationConflicts()
+    };
   });
 
   app.post('/api/admin/products', async (request, reply) => {
@@ -267,6 +444,53 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
     return { ok: true, item: product };
   });
 
+  app.post('/api/admin/products/:productId/clone', async (request, reply) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
+    const parsed = z.object({ productId: z.string().uuid() }).safeParse(request.params);
+    if (!parsed.success) throw new ValidationHttpError('Invalid product id.');
+
+    const product = await cloneAdminProduct(parsed.data.productId);
+    if (!product) throw new HttpError(404, 'Product not found.');
+
+    await recordAdminWriteAudit({
+      request,
+      auth,
+      action: 'admin.product.cloned',
+      entityType: 'product',
+      entityId: product.productId,
+      details: { sourceProductId: parsed.data.productId }
+    });
+
+    reply.code(201);
+    return { ok: true, item: product };
+  });
+
+  app.delete('/api/admin/products/:productId', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
+    const parsed = z.object({ productId: z.string().uuid() }).safeParse(request.params);
+    if (!parsed.success) throw new ValidationHttpError('Invalid product id.');
+
+    const result = await deleteAdminProduct(parsed.data.productId);
+    if (result === 'not_found') throw new HttpError(404, 'Product not found.');
+    if (result === 'in_use') {
+      throw new ConflictHttpError(
+        'This product is referenced by booking history and cannot be deleted.',
+        'PRODUCT_IN_USE'
+      );
+    }
+
+    await recordAdminWriteAudit({
+      request,
+      auth,
+      action: 'admin.product.deleted',
+      entityType: 'product',
+      entityId: parsed.data.productId,
+      details: {}
+    });
+
+    return { ok: true };
+  });
+
   app.get('/api/admin/products/:productId', async (request) => {
     await requireAdminPermission(request as AdminFastifyRequest, 'products', 'view');
     const { productId } = request.params as { productId: string };
@@ -282,7 +506,10 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
     await requireAdminPermission(request as AdminFastifyRequest, 'products', 'view');
     const parsed = z.object({ locationId: z.string().uuid() }).safeParse(request.params);
     if (!parsed.success) throw new ValidationHttpError('Invalid location id.');
-    return { ok: true, items: await listLocationProducts(parsed.data.locationId) };
+    return {
+      ok: true,
+      items: await listLocationProducts(parsed.data.locationId)
+    };
   });
 
   app.get('/api/admin/locations/:locationId/products/:productId/booking-configuration', async (request) => {
@@ -311,8 +538,12 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
     const product = await addProductOffering(parsed.data.locationId, parsed.data.productId);
     if (!product) throw new HttpError(404, 'Location or product not found.');
     await recordAdminWriteAudit({
-      request, auth, action: 'admin.product_offering.created', entityType: 'product',
-      entityId: parsed.data.productId, details: { locationId: parsed.data.locationId }
+      request,
+      auth,
+      action: 'admin.product_offering.created',
+      entityType: 'product',
+      entityId: parsed.data.productId,
+      details: { locationId: parsed.data.locationId }
     });
     reply.code(201);
     return { ok: true, item: product };
@@ -350,8 +581,12 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
       );
     }
     await recordAdminWriteAudit({
-      request, auth, action: 'admin.product_offering.deleted', entityType: 'product',
-      entityId: parsed.data.productId, details: { locationId: parsed.data.locationId }
+      request,
+      auth,
+      action: 'admin.product_offering.deleted',
+      entityType: 'product',
+      entityId: parsed.data.productId,
+      details: { locationId: parsed.data.locationId }
     });
     return { ok: true };
   });
@@ -363,7 +598,9 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
     if (!parsed.success) throw new ValidationHttpError('Invalid availability query.');
     const product = await getAdminProduct(productId);
     if (!product) throw new HttpError(404, 'Product not found.');
-    if (product.bookingProvider !== 'core') {
+    const offering = product.locations.find((item) => item.locationId === parsed.data.locationId && item.enabled);
+    if (!offering) throw new HttpError(404, 'Product Offering not found.');
+    if (offering.bookingProvider !== 'core') {
       throw new ValidationHttpError('Admin availability diagnostics currently support Core products only.');
     }
     return getAvailabilitySummary({
@@ -372,7 +609,8 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
       location_id: parsed.data.locationId,
       dt_from: parsed.data.start,
       dt_to: parsed.data.end,
-      guest_count: parsed.data.quantity
+      guest_count: parsed.data.quantity,
+      max_quantity: offering.maxParticipants
     });
   });
 
@@ -386,7 +624,9 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
     const { productId } = request.params as { productId: string };
     const currentProduct = await getAdminProduct(productId);
     if (parsed.data.bookingProvider === 'regiondo' && !currentProduct?.regiondoProductId) {
-      throw new ValidationHttpError('A product must have a Regiondo reference before it can use the Regiondo provider.');
+      throw new ValidationHttpError(
+        'A product must have a Regiondo reference before it can use the Regiondo provider.'
+      );
     }
     if (currentProduct?.bookingProvider === 'regiondo' && parsed.data.bookingProvider === 'core') {
       const validation = await validateCoreProviderSwitch(productId);
@@ -425,14 +665,29 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
       throw new ValidationHttpError('Variant currency must match the Product currency.');
     }
     const result = await createProductVariant(params.data.productId, {
-      title: body.data.isDefault ? null : body.data.title ?? null,
+      title: body.data.isDefault ? null : (body.data.title ?? null),
       priceMinor: body.data.priceMinor,
-      currency: body.data.currency
+      currency: body.data.currency,
+      ...(body.data.durationOverrideMinutes !== undefined
+        ? { durationOverrideMinutes: body.data.durationOverrideMinutes }
+        : {}),
+      ...(body.data.active !== undefined ? { active: body.data.active } : {}),
+      ...(body.data.scheduleRuleEnabled !== undefined ? { scheduleRuleEnabled: body.data.scheduleRuleEnabled } : {}),
+      ...(body.data.allowedWeekdays !== undefined ? { allowedWeekdays: body.data.allowedWeekdays } : {}),
+      ...(body.data.localStartTime !== undefined ? { localStartTime: body.data.localStartTime } : {}),
+      ...(body.data.localEndTime !== undefined ? { localEndTime: body.data.localEndTime } : {})
     });
     if (typeof result === 'string') throwCatalogMutationFailure(result);
     await recordAdminWriteAudit({
-      request, auth, action: 'admin.product_variant.created', entityType: 'product_variant',
-      entityId: result.variantId, details: { productId: params.data.productId, isDefault: result.isDefault }
+      request,
+      auth,
+      action: 'admin.product_variant.created',
+      entityType: 'product_variant',
+      entityId: result.variantId,
+      details: {
+        productId: params.data.productId,
+        isDefault: result.isDefault
+      }
     });
     reply.code(201);
     return { ok: true, item: await getAdminProduct(params.data.productId) };
@@ -450,18 +705,33 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
     if (body.data.currency && body.data.currency !== product.currency) {
       throw new ValidationHttpError('Variant currency must match the Product currency.');
     }
-    const title = body.data.isDefault === true ? null
-      : body.data.isDefault === false && body.data.title === undefined ? undefined
-        : body.data.title;
+    const title =
+      body.data.isDefault === true
+        ? null
+        : body.data.isDefault === false && body.data.title === undefined
+          ? undefined
+          : body.data.title;
     const result = await updateProductVariant(params.data.productId, params.data.variantId, {
       ...(title !== undefined ? { title } : {}),
       ...(body.data.priceMinor !== undefined ? { priceMinor: body.data.priceMinor } : {}),
-      ...(body.data.currency !== undefined ? { currency: body.data.currency } : {})
+      ...(body.data.currency !== undefined ? { currency: body.data.currency } : {}),
+      ...(body.data.durationOverrideMinutes !== undefined
+        ? { durationOverrideMinutes: body.data.durationOverrideMinutes }
+        : {}),
+      ...(body.data.active !== undefined ? { active: body.data.active } : {}),
+      ...(body.data.scheduleRuleEnabled !== undefined ? { scheduleRuleEnabled: body.data.scheduleRuleEnabled } : {}),
+      ...(body.data.allowedWeekdays !== undefined ? { allowedWeekdays: body.data.allowedWeekdays } : {}),
+      ...(body.data.localStartTime !== undefined ? { localStartTime: body.data.localStartTime } : {}),
+      ...(body.data.localEndTime !== undefined ? { localEndTime: body.data.localEndTime } : {})
     });
     if (typeof result === 'string') throwCatalogMutationFailure(result);
     await recordAdminWriteAudit({
-      request, auth, action: 'admin.product_variant.updated', entityType: 'product_variant',
-      entityId: result.variantId, details: { productId: params.data.productId }
+      request,
+      auth,
+      action: 'admin.product_variant.updated',
+      entityType: 'product_variant',
+      entityId: result.variantId,
+      details: { productId: params.data.productId }
     });
     return { ok: true, item: await getAdminProduct(params.data.productId) };
   });
@@ -473,8 +743,12 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
     const result = await deleteProductVariant(params.data.productId, params.data.variantId);
     if (result !== 'deleted') throwCatalogMutationFailure(result);
     await recordAdminWriteAudit({
-      request, auth, action: 'admin.product_variant.deleted', entityType: 'product_variant',
-      entityId: params.data.variantId, details: { productId: params.data.productId }
+      request,
+      auth,
+      action: 'admin.product_variant.deleted',
+      entityType: 'product_variant',
+      entityId: params.data.variantId,
+      details: { productId: params.data.productId }
     });
     return { ok: true };
   });
@@ -495,8 +769,15 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
     const result = await createProductOption(params.data.productId, params.data.variantId, { ...body.data, values });
     if (typeof result === 'string') throwCatalogMutationFailure(result);
     await recordAdminWriteAudit({
-      request, auth, action: 'admin.product_option.created', entityType: 'product_option',
-      entityId: result.optionId, details: { productId: params.data.productId, variantId: params.data.variantId }
+      request,
+      auth,
+      action: 'admin.product_option.created',
+      entityType: 'product_option',
+      entityId: result.optionId,
+      details: {
+        productId: params.data.productId,
+        variantId: params.data.variantId
+      }
     });
     reply.code(201);
     return { ok: true, item: await getAdminProduct(params.data.productId) };
@@ -516,12 +797,23 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
     }
     const result = await updateProductOption(params.data.productId, params.data.variantId, params.data.optionId, {
       ...body.data,
-      ...(body.data.values ? { values: [...new Set(body.data.values.map((value) => value.trim()))] } : {})
+      ...(body.data.values
+        ? {
+            values: [...new Set(body.data.values.map((value) => value.trim()))]
+          }
+        : {})
     });
     if (typeof result === 'string') throwCatalogMutationFailure(result);
     await recordAdminWriteAudit({
-      request, auth, action: 'admin.product_option.updated', entityType: 'product_option',
-      entityId: result.optionId, details: { productId: params.data.productId, variantId: params.data.variantId }
+      request,
+      auth,
+      action: 'admin.product_option.updated',
+      entityType: 'product_option',
+      entityId: result.optionId,
+      details: {
+        productId: params.data.productId,
+        variantId: params.data.variantId
+      }
     });
     return { ok: true, item: await getAdminProduct(params.data.productId) };
   });
@@ -535,8 +827,15 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
     const result = await deleteProductOption(params.data.productId, params.data.variantId, params.data.optionId);
     if (result !== 'deleted') throwCatalogMutationFailure(result);
     await recordAdminWriteAudit({
-      request, auth, action: 'admin.product_option.deleted', entityType: 'product_option',
-      entityId: params.data.optionId, details: { productId: params.data.productId, variantId: params.data.variantId }
+      request,
+      auth,
+      action: 'admin.product_option.deleted',
+      entityType: 'product_option',
+      entityId: params.data.optionId,
+      details: {
+        productId: params.data.productId,
+        variantId: params.data.variantId
+      }
     });
     return { ok: true };
   });
@@ -553,9 +852,15 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
       throw new HttpError(404, 'Product or Regiondo variants not found.');
     }
     await recordAdminWriteAudit({
-      request, auth, action: 'admin.product.core_migration_prepared', entityType: 'product',
+      request,
+      auth,
+      action: 'admin.product.core_migration_prepared',
+      entityType: 'product',
       entityId: params.data.productId,
-      details: { policy: 'prepare_once', variantCount: result.coreMigration?.variantCount ?? 0 }
+      details: {
+        policy: 'prepare_once',
+        variantCount: result.coreMigration?.variantCount ?? 0
+      }
     });
     return { ok: true, item: result };
   });
@@ -596,7 +901,10 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
 
   app.delete('/api/admin/products/:productId/resources/:resourceId', async (request) => {
     const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'products', 'manage');
-    const { productId, resourceId } = request.params as { productId: string; resourceId: string };
+    const { productId, resourceId } = request.params as {
+      productId: string;
+      resourceId: string;
+    };
     const deleted = await deleteProductResourceMapping(productId, resourceId);
     if (!deleted) {
       throw new HttpError(404, 'Product resource mapping not found.');

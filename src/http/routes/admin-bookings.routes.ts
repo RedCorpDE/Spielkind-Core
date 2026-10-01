@@ -74,6 +74,8 @@ const listBookingsQuerySchema = z
     search: z.string().trim().optional(),
     from: z.string().datetime({ offset: true }).optional(),
     to: z.string().datetime({ offset: true }).optional(),
+    rangeFrom: z.string().datetime({ offset: true }).optional(),
+    rangeTo: z.string().datetime({ offset: true }).optional(),
     updatedSince: z.string().datetime({ offset: true }).optional(),
     cursor: z.string().optional(),
     sort: bookingSortSchema.optional(),
@@ -86,6 +88,23 @@ const listBookingsQuerySchema = z
         code: z.ZodIssueCode.custom,
         message: 'from must be before or equal to to.',
         path: ['to']
+      });
+    }
+    if (Boolean(value.rangeFrom) !== Boolean(value.rangeTo)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'rangeFrom and rangeTo must be provided together.',
+        path: [value.rangeFrom ? 'rangeTo' : 'rangeFrom']
+      });
+    } else if (
+      value.rangeFrom &&
+      value.rangeTo &&
+      new Date(value.rangeFrom).getTime() >= new Date(value.rangeTo).getTime()
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'rangeFrom must be before rangeTo.',
+        path: ['rangeTo']
       });
     }
   });
@@ -209,8 +228,8 @@ export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<
       productOfferingId: parsed.data.locationProductId,
       productVariantId: parsed.data.variantId,
       quantity: parsed.data.participants ?? parsed.data.quantities?.participants ?? 1,
-      startsAt: parsed.data.startAt,
-      endsAt: parsed.data.endAt,
+      startsAt: quote.configuration.startAt,
+      endsAt: quote.configuration.endAt,
       expiresAt: quote.expiresAt,
       idempotencyKey: `admin:${request.id}:${parsed.data.locationProductId}`,
       metadata: { source: 'dashboard', quoteId: quote.quoteId, overrides }
@@ -246,8 +265,8 @@ export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<
         productOfferingId: parsed.data.locationProductId,
         productVariantId: parsed.data.variantId,
         quantity: parsed.data.participants ?? parsed.data.quantities?.participants ?? 1,
-        startsAt: parsed.data.startAt,
-        endsAt: parsed.data.endAt,
+        startsAt: quote.configuration.startAt,
+        endsAt: quote.configuration.endAt,
         expiresAt: quote.expiresAt,
         idempotencyKey: `admin-hold:${request.id}:${parsed.data.locationProductId}`,
         metadata: { source: 'dashboard', quoteId: quote.quoteId, overrides }
@@ -255,7 +274,12 @@ export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<
       holdId = hold.id;
     }
     const result = await provider.createBooking({
-      intent: parsed.data,
+      intent: {
+        ...parsed.data,
+        startAt: quote.configuration.startAt,
+        endAt: quote.configuration.endAt,
+        durationMinutes: quote.configuration.durationMinutes ?? undefined
+      },
       clientId: parsed.data.clientId,
       holdId,
       idempotencyKey: `admin:${request.id}:${parsed.data.locationProductId}`,

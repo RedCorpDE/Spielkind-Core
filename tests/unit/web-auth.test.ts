@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { appConfig } from '../../src/config/env.js';
 import { requireWebServiceScope } from '../../src/http/web-auth.js';
 
 function request(token: string) {
@@ -8,7 +9,7 @@ function request(token: string) {
 describe('WordPress service authentication', () => {
   it('accepts the configured token for an explicitly granted scope', async () => {
     await expect(requireWebServiceScope(
-      request('0123456789abcdef0123456789abcdef'),
+      request(appConfig.WORDPRESS_SERVICE_TOKEN),
       'locations:read'
     )).resolves.toBeUndefined();
   });
@@ -19,7 +20,7 @@ describe('WordPress service authentication', () => {
   });
 
   it('rejects a valid service identity when the route scope is missing', async () => {
-    const scopedRequest = request('0123456789abcdef0123456789abcdef') as unknown as { webServiceScopes: Set<string> };
+    const scopedRequest = request(appConfig.WORDPRESS_SERVICE_TOKEN) as unknown as { webServiceScopes: Set<string> };
     scopedRequest.webServiceScopes = new Set(['locations:read']);
     await expect(requireWebServiceScope(scopedRequest as never, 'checkout:create'))
       .rejects.toMatchObject({ statusCode: 403, code: 'AUTH_INSUFFICIENT_SCOPE' });

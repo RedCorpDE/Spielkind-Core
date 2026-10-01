@@ -26,7 +26,7 @@ erDiagram
     RESOURCES ||--o{ CONSUMPTIONS : consumes
 ```
 
-`location_products` remains the physical Product Offering table. `product_offering_resources` has one row per Offering and Resource, with `quantity` meaning capacity required per booking unit. Core rejects a requirement unless the Resource and Offering have the same Location.
+`location_products` remains the physical Product Offering table. `product_offering_resources` has one row per Offering and Resource. `quantity` is the base capacity requirement; `scaling_mode = 'per_quantity'` multiplies it by participant/booking quantity, while `scaling_mode = 'per_booking'` consumes it once for the booking. Existing rows and the `product_resources` fallback use `per_quantity`. Core rejects a requirement unless the Resource and Offering have the same Location. Regiondo availability remains provider-owned and is not routed through Core scaling semantics.
 
 ## Requirement resolution and migration
 

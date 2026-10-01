@@ -9,12 +9,14 @@ export interface AvailabilityQuery {
   dt_from: string;
   dt_to: string;
   guest_count: number;
+  max_quantity?: number;
 }
 
 export interface AvailabilityItem {
   resource_id: string;
   resource_title: string;
   required_quantity: number;
+  scaling_mode: 'per_quantity' | 'per_booking';
   capacity_available: number;
   capacity_reserved: number;
   capacity_held: number;
@@ -53,17 +55,19 @@ export async function getAvailability(query: AvailabilityQuery): Promise<Availab
       ? { rows: await loadResourceRequirements(pool, {
           productId: query.product_id,
           locationId: query.location_id,
-          quantity: 1
+          quantity: query.guest_count
         }) }
       : { rows: [] }
     : await pool.query<{
         resource_id: string; resource_title: string; capacity_available: number;
-        required_quantity: number; source: 'offering';
+        quantity: number; scaling_mode: 'per_booking'; required_quantity: number; source: 'offering';
       }>(
         `SELECT
            r.resource_id,
            r.title AS resource_title,
            r.capacity_available,
+           1 AS quantity,
+           'per_booking'::text AS scaling_mode,
            1 AS required_quantity,
            'offering'::text AS source
          FROM resources r
@@ -126,7 +130,7 @@ export async function getAvailability(query: AvailabilityQuery): Promise<Availab
     const capacityReserved = reservedMap.get(row.resource_id) ?? 0;
     const capacityHeld = heldMap.get(row.resource_id) ?? 0;
     const snapshot = calculateAvailabilitySnapshot({
-      requiredQuantity: Number(row.required_quantity) * query.guest_count,
+      requiredQuantity: Number(row.required_quantity),
       capacityAvailable: Math.min(
         Number(row.capacity_available),
         manualBlockCapacities.get(row.resource_id) ?? Number(row.capacity_available)
@@ -137,6 +141,7 @@ export async function getAvailability(query: AvailabilityQuery): Promise<Availab
     return {
       resource_id: row.resource_id,
       resource_title: row.resource_title,
+      scaling_mode: row.scaling_mode,
       ...snapshot,
       capacity_reserved: capacityReserved,
       capacity_held: capacityHeld
@@ -149,17 +154,21 @@ export async function getAvailabilitySummary(query: AvailabilityQuery) {
   const remaining = resources.length ? Math.min(...resources.map((item) => item.capacity_remaining)) : 0;
   const maxBookableQuantity = resources.length
     ? Math.min(...resources.map((item) => {
+        if (item.scaling_mode === 'per_booking') {
+          return item.capacity_remaining >= item.required_quantity ? Number.MAX_SAFE_INTEGER : 0;
+        }
         const capacityPerBookingUnit = item.required_quantity / query.guest_count;
         return capacityPerBookingUnit > 0 ? Math.floor(item.capacity_remaining / capacityPerBookingUnit) : 0;
       }))
     : 0;
+  const participantLimit = query.max_quantity ?? Number.MAX_SAFE_INTEGER;
   return {
     available: resources.length > 0 && resources.every((item) => item.is_available),
     capacity: resources.length ? Math.min(...resources.map((item) => item.capacity_available)) : 0,
     reserved: resources.reduce((total, item) => total + item.capacity_reserved, 0),
     held: resources.reduce((total, item) => total + item.capacity_held, 0),
     remaining,
-    maxBookableQuantity: Math.max(0, maxBookableQuantity),
+    maxBookableQuantity: Math.max(0, Math.min(maxBookableQuantity, participantLimit)),
     resources
   };
 }

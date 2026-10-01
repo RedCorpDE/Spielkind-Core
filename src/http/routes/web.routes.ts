@@ -26,6 +26,7 @@ import {
 import { bookingIntentSchema } from '../schemas/booking-intent.schema.js';
 import { bookingQuoteService } from '../../modules/bookings/booking-quote.service.js';
 import { createReservationHold } from '../../modules/availability/reservation-hold.service.js';
+import { getVariantEligibility } from '../../modules/bookings/variant-eligibility.service.js';
 
 const uuid = z.string().uuid();
 const email = z.string().trim().email().transform((value) => value.toLowerCase());
@@ -46,6 +47,7 @@ const checkoutSchema = z.object({
   startAt: z.string().datetime().optional(), endAt: z.string().datetime().optional(),
   participants: z.coerce.number().int().positive().max(100).optional(),
   quantity: z.coerce.number().int().positive().max(100).default(1),
+  durationMinutes: z.coerce.number().int().positive().max(7 * 24 * 60).optional(),
   options: z.array(z.object({
     optionId: uuid,
     value: z.string().trim().min(1).max(500).optional(),
@@ -180,8 +182,8 @@ export async function registerWebRoutes(app: FastifyInstance): Promise<void> {
       productOfferingId: body.locationProductId,
       productVariantId: body.variantId,
       quantity: body.participants ?? body.quantities?.participants ?? 1,
-      startsAt: body.startAt,
-      endsAt: body.endAt,
+      startsAt: quote.configuration.startAt,
+      endsAt: quote.configuration.endAt,
       expiresAt: quote.expiresAt,
       idempotencyKey: `web:${idempotencyKey(request)}`,
       metadata: { source: 'wordpress', quoteId: quote.quoteId }
@@ -198,9 +200,45 @@ export async function registerWebRoutes(app: FastifyInstance): Promise<void> {
       durationMinutes: z.coerce.number().int().positive().max(7 * 24 * 60).optional(),
       quantity: z.coerce.number().int().positive().max(100).default(1)
     }).refine((value) => Boolean(value.date || (value.from && value.to)), 'date or from/to are required'), request.query, 'Invalid availability query.');
-    const items = await listWebAvailability({ productId, ...query, quantity: query.quantity ?? 1 });
-    if (items === null) throw new HttpError(404, 'Product was not found.', 'PRODUCT_NOT_FOUND');
-    return { items };
+    const result = await listWebAvailability({ productId, ...query, quantity: query.quantity ?? 1 });
+    if (result === null) throw new HttpError(404, 'Product was not found.', 'PRODUCT_NOT_FOUND');
+    return result;
+  });
+
+  app.post('/api/web/products/:productId/availability', async (request) => {
+    await service(request, 'availability:read');
+    rateLimit(request, 'web-availability', 60);
+    const { productId } = parse(productParams, request.params, 'Invalid product id.');
+    const body = parse(z.object({
+      locationId: uuid,
+      variantId: uuid.optional(),
+      date: z.string().date().optional(),
+      from: z.string().datetime().optional(),
+      to: z.string().datetime().optional(),
+      startDate: z.string().date().optional(),
+      endDate: z.string().date().optional(),
+      startTime: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/).optional(),
+      endTime: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/).optional(),
+      durationMinutes: z.number().int().positive().max(7 * 24 * 60).optional(),
+      quantity: z.number().int().positive().max(100).default(1),
+      options: z.array(z.object({
+        optionId: uuid,
+        value: z.string().trim().min(1).max(500).optional(),
+        quantity: z.number().int().positive().max(100).optional()
+      })).max(30).default([])
+    }).refine((value) => Boolean(value.date || (value.from && value.to)), 'date or from/to are required'), request.body, 'Invalid availability request.');
+    const result = await listWebAvailability({ productId, ...body, quantity: body.quantity ?? 1 });
+    if (result === null) throw new HttpError(404, 'Product was not found.', 'PRODUCT_NOT_FOUND');
+    const product = await getCatalogProductOffering(productId, body.locationId);
+    const startsAt = result.items[0]?.startsAt ?? (body.startDate && body.startTime ? `${body.startDate}T${body.startTime}:00` : null);
+    const variants = result.variants ?? (product?.bookingProvider === 'core' && startsAt
+      ? await getVariantEligibility({
+          productId,
+          startsAt,
+          timezone: product.bookingConfiguration.timeSelection.timezone
+        })
+      : []);
+    return { ...result, variants };
   });
 
   app.post('/api/web/auth/login', async (request) => {

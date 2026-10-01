@@ -16,6 +16,8 @@ import type { AdminFastifyRequest } from './admin.js';
 import { DomainError, ProviderUnavailableError } from '../modules/bookings/booking.errors.js';
 import { RefundAmountExceededError } from '../modules/payments/refund.service.js';
 import { PricingValidationError } from '../modules/pricing/pricing.service.js';
+import { BookingRuleValidationError } from '../modules/bookings/booking-configuration.service.js';
+import { VariantNotAvailableForScheduleError } from '../modules/bookings/variant-eligibility.service.js';
 
 export class HttpError extends Error {
   constructor(
@@ -80,7 +82,8 @@ function getStatusCode(error: Error): number {
   if (error instanceof HttpError) return error.statusCode;
   if (error instanceof DashboardNotFoundError) return 404;
   if (error instanceof DashboardConflictError || error instanceof OverbookingError || error instanceof MissingProductResourceMappingError) return 409;
-  if (error instanceof DashboardValidationError || error instanceof RegiondoSyncValidationError || error instanceof RegiondoWebhookValidationError || error instanceof PricingValidationError) return 400;
+  if (error instanceof VariantNotAvailableForScheduleError) return 409;
+  if (error instanceof DashboardValidationError || error instanceof RegiondoSyncValidationError || error instanceof RegiondoWebhookValidationError || error instanceof PricingValidationError || error instanceof BookingRuleValidationError) return 400;
   if (error instanceof RegiondoPurchaseRecoveryRequiredError) return 502;
   if (error instanceof RegiondoApiError) return getRegiondoStatusCode(error);
   if (error instanceof ProviderUnavailableError) return 503;
@@ -170,7 +173,9 @@ export function registerErrorHandler() {
 
     if ((request.url ?? '').startsWith('/api/web')) {
       const domainCode = error instanceof DomainError ? error.code : null;
-      const code = domainCode === 'BOOKING_NOT_CANCELLABLE' || domainCode === 'INVALID_BOOKING_TRANSITION'
+      const code = error instanceof VariantNotAvailableForScheduleError
+        ? error.code
+        : domainCode === 'BOOKING_NOT_CANCELLABLE' || domainCode === 'INVALID_BOOKING_TRANSITION'
         ? 'BOOKING_CANCELLATION_NOT_ALLOWED'
         : domainCode === 'HOLD_EXPIRED'
           ? 'CHECKOUT_EXPIRED'
@@ -216,10 +221,23 @@ export function registerErrorHandler() {
     if (
       error instanceof DashboardValidationError ||
       error instanceof PricingValidationError ||
+      error instanceof BookingRuleValidationError ||
       error instanceof RegiondoSyncValidationError ||
       error instanceof RegiondoWebhookValidationError
     ) {
-      reply.status(400).send({ ok: false, error: error.message });
+      reply.status(400).send({
+        ok: false,
+        ...(error instanceof BookingRuleValidationError ? { code: 'BOOKING_RULE_INVALID' } : {}),
+        error: error.message,
+        ...((request.url ?? '').startsWith('/api/client') && error instanceof BookingRuleValidationError
+          ? { message: error.message }
+          : {})
+      });
+      return;
+    }
+
+    if (error instanceof VariantNotAvailableForScheduleError) {
+      reply.status(409).send({ ok: false, code: error.code, error: error.message, message: error.message });
       return;
     }
 

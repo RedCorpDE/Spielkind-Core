@@ -631,6 +631,8 @@ export interface ListDashboardBookingsFilters {
   search?: string;
   from?: string;
   to?: string;
+  rangeFrom?: string;
+  rangeTo?: string;
   updatedSince?: string;
   cursor?: string;
   sort?: DashboardBookingSort;

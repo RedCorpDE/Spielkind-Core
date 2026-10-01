@@ -15,6 +15,7 @@ export interface WebCheckoutInput {
   productId: string;
   variantId?: string;
   quantity: number;
+  durationMinutes?: number;
   options?: Array<{ optionId: string; value?: string; quantity?: number }>;
   contact: { firstName: string; lastName: string; email: string; phone?: string };
   availability: WebAvailabilityTokenPayload;
@@ -34,6 +35,8 @@ function requestHash(input: WebCheckoutInput): string {
     productId: input.productId,
     variantId: input.variantId ?? null,
     quantity: input.quantity,
+    durationMinutes: input.durationMinutes ?? null,
+    options: input.options ?? [],
     contact: input.contact,
     availability: input.availability
   })).digest('hex');
@@ -116,6 +119,7 @@ export async function createWebCheckout(input: WebCheckoutInput): Promise<WebChe
     startAt: input.availability.startsAt,
     endAt: input.availability.endsAt,
     participants: input.quantity,
+    durationMinutes: input.durationMinutes,
     options: input.options ?? []
   };
   const quote = await bookingQuoteService.quote(bookingIntent, { clientId });
@@ -129,7 +133,7 @@ export async function createWebCheckout(input: WebCheckoutInput): Promise<WebChe
       clientId, locationId: input.locationId, productId: input.productId,
       productOfferingId: locationProductId,
       productVariantId: input.variantId, quantity: input.quantity,
-      startsAt: input.availability.startsAt, endsAt: input.availability.endsAt,
+      startsAt: quote.configuration.startAt, endsAt: quote.configuration.endAt,
       expiresAt, idempotencyKey: `web-hold:${input.idempotencyKey}`,
       metadata: { source: 'wordpress', quoteId: quote.quoteId }
     });
@@ -137,7 +141,12 @@ export async function createWebCheckout(input: WebCheckoutInput): Promise<WebChe
   }
   if (!bookingProvider.createBooking) throw new Error(`${bookingProvider.displayName} booking creation is unavailable.`);
   const booking = await bookingProvider.createBooking({
-    intent: bookingIntent,
+    intent: {
+      ...bookingIntent,
+      startAt: quote.configuration.startAt,
+      endAt: quote.configuration.endAt,
+      durationMinutes: quote.configuration.durationMinutes ?? undefined
+    },
     clientId,
     holdId,
     idempotencyKey: `web-booking:${input.idempotencyKey}`,

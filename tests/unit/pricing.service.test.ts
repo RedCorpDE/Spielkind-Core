@@ -15,6 +15,29 @@ describe('pricing service', () => {
     expect(quote.subtotalNet + quote.tax).toBe(quote.total);
   });
 
+  it('keeps Core participant pricing independent from Resource scaling', () => {
+    const quote = calculatePrice({
+      productId: 'flat', productName: 'LAN Flat', baseGross: 4000,
+      vatBasisPoints: 1900, currency: 'EUR', quantity: 3
+    });
+    expect(quote.total).toBe(12000);
+    expect(quote.items[0]).toMatchObject({ quantity: 3, unitPriceGross: 4000, subtotalGross: 12000 });
+  });
+
+  it.each([
+    ['once', 4000],
+    ['per_quantity', 12000],
+    ['per_date_unit', 8000],
+    ['per_date_unit_per_quantity', 24000]
+  ] as const)('calculates %s date-range pricing', (pricingMode, expected) => {
+    const quote = calculatePrice({
+      productId: 'flat', productName: 'LAN Flat', baseGross: 4000,
+      vatBasisPoints: 1900, currency: 'EUR', quantity: 3, dateUnits: 2, pricingMode
+    });
+    expect(quote.total).toBe(expected);
+    expect(quote.calculation).toMatchObject({ mode: pricingMode, unitRate: 4000, quantity: 3, dateUnits: 2 });
+  });
+
   it('keeps a completed quote snapshot independent from later catalog prices', () => {
     const purchased = calculatePrice({
       productId: 'product', productName: 'Product', baseGross: 3900,

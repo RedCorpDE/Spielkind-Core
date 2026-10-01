@@ -179,6 +179,25 @@ describe('dashboard repository queries', () => {
     expect(queryMock).not.toHaveBeenCalled();
   });
 
+  it('uses persisted schedule overlap semantics for calendar ranges', async () => {
+    queryMock.mockResolvedValueOnce({ rows: [] });
+
+    await listBookings({
+      rangeFrom: '2026-10-10T00:00:00.000Z',
+      rangeTo: '2026-10-13T00:00:00.000Z'
+    });
+
+    const [bookingQuery, bookingValues] = queryMock.mock.calls[0] as [string, Array<string | number>];
+    expect(bookingQuery).toContain('b.dt_from < $1::timestamptz');
+    expect(bookingQuery).toContain('b.dt_to > $2::timestamptz');
+    expect(bookingQuery).not.toContain('b.dt_from >= $2::timestamptz');
+    expect(bookingValues).toEqual([
+      '2026-10-13T00:00:00.000Z',
+      '2026-10-10T00:00:00.000Z',
+      51
+    ]);
+  });
+
   it('validates task column reorders against the complete current set', () => {
     const existingColumns = [
       { id: '11111111-1111-1111-1111-111111111111', title: 'Backlog', booking_related: false, position: 0 },

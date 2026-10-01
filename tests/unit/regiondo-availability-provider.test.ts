@@ -32,6 +32,8 @@ const offering = {
     minAdvanceMinutes: 0,
     maxAdvanceDays: null,
     sameDayBookingAllowed: true
+    , pricingMode: 'per_quantity'
+    , dateRangeBillingUnit: 'nights'
   }
 };
 

@@ -158,8 +158,11 @@ Admin auth:
 
 Admin APIs:
 - `GET /api/admin/products`
+- `POST /api/admin/products`
 - `GET /api/admin/products/:productId`
 - `PATCH /api/admin/products/:productId`
+- `DELETE /api/admin/products/:productId`
+- `POST /api/admin/products/:productId/clone`
 - `POST /api/admin/products/:productId/resources`
 - `DELETE /api/admin/products/:productId/resources/:resourceId`
 - `GET /api/admin/locations/:locationId/products`

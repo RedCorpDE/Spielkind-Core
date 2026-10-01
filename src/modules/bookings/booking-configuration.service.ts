@@ -12,6 +12,13 @@ export interface BookingConfigurationVariant {
   title: string | null;
   price: { amount: number; currency: string };
   durationMinutes?: number | null;
+  active?: boolean;
+  scheduleRule?: {
+    enabled: boolean;
+    allowedWeekdays: number[] | null;
+    localStartTime: string | null;
+    localEndTime: string | null;
+  };
 }
 
 export interface BookingConfigurationOption {
@@ -20,6 +27,7 @@ export interface BookingConfigurationOption {
   title: string;
   values: Array<{ value: string; label: string }>;
   priceDelta: { amount: number; currency: string };
+  durationDeltaMinutes?: number;
 }
 
 function sameCalendarDate(left: Date, right: Date, timezone: string): boolean {
@@ -97,25 +105,28 @@ export function validateBookingRules(input: {
   return { participants, durationMinutes: duration };
 }
 
-function timeFields(mode: TimeSelectionMode): Array<Record<string, unknown>> {
+function timeFields(rules: OfferingBookingRules): Array<Record<string, unknown>> {
+  const mode = rules.timeSelectionMode;
+  const startType = rules.fixedStartTime ? 'date' : 'datetime';
+  const endType = rules.fixedEndTime ? 'date' : 'datetime';
   if (mode === 'date_range') {
     return [
-      { key: 'startAt', type: 'date', label: 'Arrival', required: true },
-      { key: 'endAt', type: 'date', label: 'Departure', required: true }
+      { key: 'startAt', type: startType, label: 'Arrival', required: true },
+      { key: 'endAt', type: endType, label: 'Departure', required: true }
     ];
   }
   if (mode === 'start_duration') {
     return [
-      { key: 'startAt', type: 'datetime', label: 'Start', required: true },
+      { key: 'startAt', type: startType, label: 'Start', required: true },
       { key: 'durationMinutes', type: 'duration', label: 'Duration', required: true }
     ];
   }
   if (mode === 'fixed_duration') {
-    return [{ key: 'startAt', type: 'datetime', label: 'Start', required: true }];
+    return [{ key: 'startAt', type: startType, label: 'Start', required: true }];
   }
   return [
-    { key: 'startAt', type: 'datetime', label: 'Start', required: true },
-    { key: 'endAt', type: 'datetime', label: 'End', required: true }
+    { key: 'startAt', type: startType, label: 'Start', required: true },
+    { key: 'endAt', type: endType, label: 'End', required: true }
   ];
 }
 
@@ -124,11 +135,13 @@ export function buildBookingConfiguration(input: {
   variants: BookingConfigurationVariant[];
   options: BookingConfigurationOption[];
 }) {
+  const endTimeConfigurable = input.rules.timeSelectionMode === 'date_range' || input.rules.timeSelectionMode === 'start_end';
+  const fixedEndTime = endTimeConfigurable ? input.rules.fixedEndTime ?? null : null;
   const durationValues = input.rules.allowedDurationMinutes.length
     ? input.rules.allowedDurationMinutes
     : undefined;
   const fields: Array<Record<string, unknown>> = [
-    ...timeFields(input.rules.timeSelectionMode),
+    ...timeFields(input.rules),
     {
       key: 'participants',
       type: 'quantity',
@@ -146,7 +159,9 @@ export function buildBookingConfiguration(input: {
         value: variant.id,
         label: variant.title ?? 'Standard',
         price: variant.price,
-        durationMinutes: variant.durationMinutes ?? null
+        durationMinutes: variant.durationMinutes ?? null,
+        active: variant.active ?? true,
+        scheduleRule: variant.scheduleRule ?? null
       }))
     });
   }
@@ -160,7 +175,8 @@ export function buildBookingConfiguration(input: {
       label: option.title,
       required: false,
       values: option.values,
-      priceDelta: option.priceDelta
+      priceDelta: option.priceDelta,
+      durationDeltaMinutes: option.durationDeltaMinutes ?? 0
     });
   }
 
@@ -168,6 +184,14 @@ export function buildBookingConfiguration(input: {
     timeSelection: {
       mode: input.rules.timeSelectionMode,
       timezone: input.rules.timezone,
+      startTimeSelection: input.rules.fixedStartTime ? 'fixed' : 'customer',
+      endTimeSelection: fixedEndTime ? 'fixed' : 'customer',
+      fixedStartTime: input.rules.fixedStartTime ?? null,
+      fixedEndTime,
+      earliestStartTime: input.rules.earliestStartTime ?? null,
+      latestStartTime: input.rules.latestStartTime ?? null,
+      startIntervalMinutes: input.rules.startIntervalMinutes ?? 30,
+      baseDurationMinutes: input.rules.defaultDurationMinutes,
       ...(input.rules.timeSelectionMode === 'start_duration' || input.rules.timeSelectionMode === 'fixed_duration'
         ? {
             duration: {
@@ -182,6 +206,10 @@ export function buildBookingConfiguration(input: {
         : {})
     },
     participants: { min: input.rules.minParticipants, max: input.rules.maxParticipants, step: 1 },
+    pricing: {
+      mode: input.rules.pricingMode,
+      dateRangeBillingUnit: input.rules.dateRangeBillingUnit
+    },
     variants: input.variants,
     options: input.options,
     // Compatibility for the current renderers while App and WordPress move to
