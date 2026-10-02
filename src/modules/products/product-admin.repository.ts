@@ -24,6 +24,10 @@ export interface AdminProductOffering {
   bookingProvider: 'core' | 'regiondo';
   timeSelectionMode: 'date_range' | 'start_end' | 'start_duration' | 'fixed_duration';
   timezone: string;
+  dateSelection: 'customer' | 'fixed';
+  fixedDate: string | null;
+  salesOpenAt: string | null;
+  salesCloseAt: string | null;
   fixedStartTime: string | null;
   fixedEndTime: string | null;
   minParticipants: number;
@@ -66,6 +70,7 @@ export interface AdminProductVariant {
   allowedWeekdays: number[] | null;
   localStartTime: string | null;
   localEndTime: string | null;
+  cancellationPolicyId: string | null;
   options: AdminProductOption[];
 }
 
@@ -87,6 +92,7 @@ export interface AdminProduct {
   priceMinor: number;
   currency: string;
   vatBasisPoints: number;
+  cancellationPolicyId: string | null;
   regiondoProductId: string | null;
   regiondoCatalog: RegiondoProductCatalogSummary;
   rawJson: unknown;
@@ -103,6 +109,7 @@ export interface CreateAdminProductInput {
   baseAmount: number;
   currency?: string;
   vatBasisPoints: number;
+  cancellationPolicyId?: string | null;
 }
 
 export interface AdminProductVariantInput {
@@ -115,6 +122,7 @@ export interface AdminProductVariantInput {
   allowedWeekdays?: number[] | null;
   localStartTime?: string | null;
   localEndTime?: string | null;
+  cancellationPolicyId?: string | null;
 }
 
 export interface AdminProductOptionInput {
@@ -142,6 +150,7 @@ interface ProductRow {
   price_minor: string | number;
   currency: string;
   vat_basis_points: number;
+  cancellation_policy_id: string | null;
   regiondo_product_id: string | null;
   regiondo_raw: unknown;
   core_migration_prepared_at: string | null;
@@ -185,6 +194,7 @@ function mapProductRow(row: ProductRow, regiondoCatalog: RegiondoProductCatalogS
     priceMinor: Number(row.price_minor),
     currency: row.currency,
     vatBasisPoints: row.vat_basis_points,
+    cancellationPolicyId: row.cancellation_policy_id,
     regiondoProductId: row.regiondo_product_id,
     regiondoCatalog,
     rawJson: row.regiondo_raw,
@@ -204,6 +214,16 @@ function mapProductRow(row: ProductRow, regiondoCatalog: RegiondoProductCatalogS
   };
 }
 
+async function assertCancellationPolicyAssignable(policyId: string | null | undefined): Promise<void> {
+  if (!policyId) return;
+  const result = await pool.query(
+    `SELECT 1 FROM cancellation_policies
+     WHERE cancellation_policy_id = $1 AND is_active = true AND archived_at IS NULL`,
+    [policyId]
+  );
+  if (!result.rowCount) throw new Error('Cancellation policy is inactive, archived, or missing.');
+}
+
 const productSelect = `SELECT
    p.product_id,
    p.title,
@@ -214,6 +234,7 @@ const productSelect = `SELECT
    p.price_minor,
    p.currency,
    p.vat_basis_points,
+   p.cancellation_policy_id,
    p.regiondo_product_id,
    p.regiondo_raw,
    (
@@ -236,6 +257,10 @@ const productSelect = `SELECT
            'bookingProvider', lp.booking_provider,
            'timeSelectionMode', lp.time_selection_mode,
            'timezone', lp.timezone,
+           'dateSelection', lp.date_selection,
+           'fixedDate', to_char(lp.fixed_date, 'YYYY-MM-DD'),
+           'salesOpenAt', lp.sales_open_at,
+           'salesCloseAt', lp.sales_close_at,
            'fixedStartTime', to_char(lp.fixed_start_time, 'HH24:MI'),
            'fixedEndTime', to_char(lp.fixed_end_time, 'HH24:MI'),
            'earliestStartTime', to_char(lp.earliest_start_time, 'HH24:MI'),
@@ -290,6 +315,7 @@ const productSelect = `SELECT
            'allowedWeekdays', variant.allowed_weekdays,
            'localStartTime', to_char(variant.local_start_time, 'HH24:MI'),
            'localEndTime', to_char(variant.local_end_time, 'HH24:MI'),
+           'cancellationPolicyId', variant.cancellation_policy_id,
            'options', COALESCE(
              (
                SELECT jsonb_agg(
@@ -425,6 +451,7 @@ export async function listAdminProducts(): Promise<AdminProduct[]> {
 }
 
 export async function createAdminProduct(input: CreateAdminProductInput): Promise<AdminProduct> {
+  await assertCancellationPolicyAssignable(input.cancellationPolicyId);
   const result = await pool.query<{ product_id: string }>(
     `INSERT INTO products (
        title,
@@ -437,7 +464,8 @@ export async function createAdminProduct(input: CreateAdminProductInput): Promis
        vat_basis_points,
        regiondo_product_id,
        regiondo_raw
-     ) VALUES ($1, $2, $3, $4::numeric / 100, 'core', $4, $5, $6, NULL, NULL)
+       , cancellation_policy_id
+     ) VALUES ($1, $2, $3, $4::numeric / 100, 'core', $4, $5, $6, NULL, NULL, $7)
      RETURNING product_id`,
     [
       input.title.trim(),
@@ -445,7 +473,8 @@ export async function createAdminProduct(input: CreateAdminProductInput): Promis
       input.imageUrl?.trim() || null,
       input.baseAmount,
       (input.currency ?? 'EUR').trim().toUpperCase(),
-      input.vatBasisPoints
+      input.vatBasisPoints,
+      input.cancellationPolicyId ?? null
     ]
   );
 
@@ -614,6 +643,10 @@ export async function cloneAdminProduct(productId: string): Promise<AdminProduct
       enabled: boolean;
       time_selection_mode: string;
       timezone: string;
+      date_selection: 'customer' | 'fixed';
+      fixed_date: string | null;
+      sales_open_at: string | null;
+      sales_close_at: string | null;
       fixed_start_time: string | null;
       fixed_end_time: string | null;
       earliest_start_time: string | null;
@@ -633,7 +666,8 @@ export async function cloneAdminProduct(productId: string): Promise<AdminProduct
       date_range_billing_unit: string;
     }>(
       `SELECT product_offering_id, location_id, enabled, time_selection_mode,
-              timezone, fixed_start_time, fixed_end_time, earliest_start_time,
+              timezone, date_selection, fixed_date, sales_open_at, sales_close_at,
+              fixed_start_time, fixed_end_time, earliest_start_time,
               latest_start_time, start_interval_minutes, min_participants,
               max_participants, min_duration_minutes, max_duration_minutes,
               duration_step_minutes, default_duration_minutes,
@@ -650,7 +684,8 @@ export async function cloneAdminProduct(productId: string): Promise<AdminProduct
       }>(
         `INSERT INTO location_products (
            location_id, product_id, enabled, booking_provider,
-           time_selection_mode, timezone, fixed_start_time, fixed_end_time,
+           time_selection_mode, timezone, date_selection, fixed_date, sales_open_at, sales_close_at,
+           fixed_start_time, fixed_end_time,
            earliest_start_time, latest_start_time, start_interval_minutes,
            min_participants, max_participants, min_duration_minutes,
            max_duration_minutes, duration_step_minutes, default_duration_minutes,
@@ -658,7 +693,7 @@ export async function cloneAdminProduct(productId: string): Promise<AdminProduct
            same_day_booking_allowed, pricing_mode, date_range_billing_unit
          ) VALUES (
            $1, $2, $3, 'core', $4, $5, $6, $7, $8, $9, $10, $11, $12,
-           $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+           $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
          )
          RETURNING product_offering_id`,
         [
@@ -667,6 +702,10 @@ export async function cloneAdminProduct(productId: string): Promise<AdminProduct
           offering.enabled,
           offering.time_selection_mode,
           offering.timezone,
+          offering.date_selection,
+          offering.fixed_date,
+          offering.sales_open_at,
+          offering.sales_close_at,
           offering.fixed_start_time,
           offering.fixed_end_time,
           offering.earliest_start_time,
@@ -817,6 +856,10 @@ export interface UpdateProductOfferingInput {
   regiondoProductId?: string;
   timeSelectionMode?: 'date_range' | 'start_end' | 'start_duration' | 'fixed_duration';
   timezone?: string;
+  dateSelection?: 'customer' | 'fixed';
+  fixedDate?: string | null;
+  salesOpenAt?: string | null;
+  salesCloseAt?: string | null;
   fixedStartTime?: string | null;
   fixedEndTime?: string | null;
   earliestStartTime?: string | null;
@@ -907,6 +950,14 @@ export async function updateProductOffering(
          earliest_start_time = CASE WHEN $29::boolean THEN $30::time ELSE earliest_start_time END,
          latest_start_time = CASE WHEN $31::boolean THEN $32::time ELSE latest_start_time END,
          start_interval_minutes = COALESCE($33, start_interval_minutes),
+         date_selection = COALESCE($34, date_selection),
+         fixed_date = CASE
+           WHEN $34::text = 'customer' THEN NULL
+           WHEN $35::boolean THEN $36::date
+           ELSE fixed_date
+         END,
+         sales_open_at = CASE WHEN $37::boolean THEN $38::timestamptz ELSE sales_open_at END,
+         sales_close_at = CASE WHEN $39::boolean THEN $40::timestamptz ELSE sales_close_at END,
          min_participants = COALESCE($6, min_participants),
          max_participants = COALESCE($7, max_participants),
          min_duration_minutes = CASE WHEN $8::boolean THEN $9 ELSE min_duration_minutes END,
@@ -953,7 +1004,14 @@ export async function updateProductOffering(
         input.earliestStartTime ?? null,
         'latestStartTime' in input,
         input.latestStartTime ?? null,
-        input.startIntervalMinutes ?? null
+        input.startIntervalMinutes ?? null,
+        input.dateSelection ?? null,
+        'fixedDate' in input,
+        input.fixedDate ?? null,
+        'salesOpenAt' in input,
+        input.salesOpenAt ?? null,
+        'salesCloseAt' in input,
+        input.salesCloseAt ?? null
       ]
     );
     return true;
@@ -1045,8 +1103,10 @@ export async function updateAdminProduct(
     baseAmount?: number;
     bookingProvider?: 'core' | 'regiondo';
     vatBasisPoints?: number;
+    cancellationPolicyId?: string | null;
   }
 ): Promise<AdminProduct | null> {
+  if ('cancellationPolicyId' in input) await assertCancellationPolicyAssignable(input.cancellationPolicyId);
   const existing = await getAdminProduct(productId);
   if (!existing) {
     return null;
@@ -1061,8 +1121,9 @@ export async function updateAdminProduct(
        base_amount = $4,
        price_minor = $5,
        booking_provider = $6,
-       vat_basis_points = $7
-     WHERE product_id = $8`,
+       vat_basis_points = $7,
+       cancellation_policy_id = $8
+     WHERE product_id = $9`,
     [
       input.title?.trim() || existing.title,
       input.description === undefined ? existing.description : input.description,
@@ -1071,6 +1132,7 @@ export async function updateAdminProduct(
       input.baseAmount === undefined ? existing.priceMinor : Math.round(input.baseAmount * 100),
       input.bookingProvider ?? existing.bookingProvider,
       input.vatBasisPoints ?? existing.vatBasisPoints,
+      input.cancellationPolicyId === undefined ? existing.cancellationPolicyId : input.cancellationPolicyId,
       productId
     ]
   );
@@ -1125,6 +1187,7 @@ export async function createProductVariant(
   productId: string,
   input: AdminProductVariantInput
 ): Promise<AdminProductVariant | CatalogMutationFailure> {
+  await assertCancellationPolicyAssignable(input.cancellationPolicyId);
   const ownership = await getCatalogOwnership(productId);
   if (!ownership) return 'not_found';
   if (ownership !== 'core') return 'provider_managed';
@@ -1141,16 +1204,19 @@ export async function createProductVariant(
       allowed_weekdays: number[] | null;
       local_start_time: string | null;
       local_end_time: string | null;
+      cancellation_policy_id: string | null;
     }>(
       `INSERT INTO product_variants (
          product_id, title, price, price_minor, currency,
          regiondo_variant_id, regiondo_product_id, regiondo_raw, duration_minutes,
-         is_active, schedule_rule_enabled, allowed_weekdays, local_start_time, local_end_time
-       ) VALUES ($1, $2, $3::numeric / 100, $3, $4, NULL, NULL, NULL, $5, $6, $7, $8, $9::time, $10::time)
+         is_active, schedule_rule_enabled, allowed_weekdays, local_start_time, local_end_time,
+         cancellation_policy_id
+       ) VALUES ($1, $2, $3::numeric / 100, $3, $4, NULL, NULL, NULL, $5, $6, $7, $8, $9::time, $10::time, $11)
        RETURNING variant_id, title, price_minor, currency, duration_minutes,
                  is_active, schedule_rule_enabled, allowed_weekdays,
                  to_char(local_start_time, 'HH24:MI') AS local_start_time,
-                 to_char(local_end_time, 'HH24:MI') AS local_end_time`,
+                 to_char(local_end_time, 'HH24:MI') AS local_end_time,
+                 cancellation_policy_id`,
       [
         productId,
         input.title,
@@ -1161,7 +1227,8 @@ export async function createProductVariant(
         input.scheduleRuleEnabled ?? false,
         input.allowedWeekdays ?? null,
         input.localStartTime ?? null,
-        input.localEndTime ?? null
+        input.localEndTime ?? null,
+        input.cancellationPolicyId ?? null
       ]
     );
     const row = result.rows[0];
@@ -1178,6 +1245,7 @@ export async function createProductVariant(
       allowedWeekdays: row.allowed_weekdays,
       localStartTime: row.local_start_time,
       localEndTime: row.local_end_time,
+      cancellationPolicyId: row.cancellation_policy_id,
       options: []
     };
   } catch (error) {
@@ -1191,6 +1259,7 @@ export async function updateProductVariant(
   variantId: string,
   input: Partial<AdminProductVariantInput>
 ): Promise<AdminProductVariant | CatalogMutationFailure> {
+  if ('cancellationPolicyId' in input) await assertCancellationPolicyAssignable(input.cancellationPolicyId);
   const ownership = await getCatalogOwnership(productId);
   if (!ownership) return 'not_found';
   if (ownership !== 'core') return 'provider_managed';
@@ -1207,6 +1276,7 @@ export async function updateProductVariant(
       allowed_weekdays: number[] | null;
       local_start_time: string | null;
       local_end_time: string | null;
+      cancellation_policy_id: string | null;
     }>(
       `UPDATE product_variants
        SET title = CASE WHEN $3::boolean THEN $4::text ELSE title END,
@@ -1219,12 +1289,14 @@ export async function updateProductVariant(
            allowed_weekdays = CASE WHEN $11::boolean THEN $12::smallint[] ELSE allowed_weekdays END,
            local_start_time = CASE WHEN $13::boolean THEN $14::time ELSE local_start_time END,
            local_end_time = CASE WHEN $15::boolean THEN $16::time ELSE local_end_time END,
+           cancellation_policy_id = CASE WHEN $17::boolean THEN $18::uuid ELSE cancellation_policy_id END,
            updated_at = now()
        WHERE product_id = $1 AND variant_id = $2 AND regiondo_variant_id IS NULL
        RETURNING variant_id, title, price_minor, currency, duration_minutes,
                  is_active, schedule_rule_enabled, allowed_weekdays,
                  to_char(local_start_time, 'HH24:MI') AS local_start_time,
-                 to_char(local_end_time, 'HH24:MI') AS local_end_time`,
+                 to_char(local_end_time, 'HH24:MI') AS local_end_time,
+                 cancellation_policy_id`,
       [
         productId,
         variantId,
@@ -1241,7 +1313,9 @@ export async function updateProductVariant(
         'localStartTime' in input,
         input.localStartTime ?? null,
         'localEndTime' in input,
-        input.localEndTime ?? null
+        input.localEndTime ?? null,
+        'cancellationPolicyId' in input,
+        input.cancellationPolicyId ?? null
       ]
     );
     if (!result.rowCount) return 'not_found';
@@ -1259,6 +1333,7 @@ export async function updateProductVariant(
       allowedWeekdays: row.allowed_weekdays,
       localStartTime: row.local_start_time,
       localEndTime: row.local_end_time,
+      cancellationPolicyId: row.cancellation_policy_id,
       options: []
     };
   } catch (error) {

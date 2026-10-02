@@ -1,4 +1,6 @@
 import { withTransaction } from '../../db/transaction.js';
+import { transitionBookingInTransaction } from '../bookings/booking-lifecycle.service.js';
+import { transitionPaymentStateInTransaction } from './payment-lifecycle.service.js';
 
 export class RefundAmountExceededError extends Error {
   constructor() {
@@ -24,6 +26,7 @@ export async function recordRefund(input: {
   reason?: string;
   status: 'pending' | 'processing' | 'succeeded' | 'failed' | 'cancelled';
   idempotencyKey: string;
+  finalizeBooking?: boolean;
 }): Promise<{ refundId: string; created: boolean }> {
   return withTransaction(async (client) => {
     const duplicate = await client.query<{ refund_id: string }>(`SELECT refund_id FROM refunds WHERE idempotency_key = $1`, [input.idempotencyKey]);
@@ -53,18 +56,22 @@ export async function recordRefund(input: {
       ]
     );
     if (input.status === 'succeeded') {
-      await client.query(
-        `UPDATE bookings SET payment_status = CASE
-           WHEN $2 >= ROUND(total_amount * 100)::bigint THEN 'refunded' ELSE 'partially_refunded' END,
-           status = 'cancelled', cancelled_at = COALESCE(cancelled_at, now()), updated_at = now()
-         WHERE booking_id = $1`,
-        [input.bookingId, newTotal]
-      );
+      const paymentState = newTotal >= paymentTotal ? 'refunded' : 'partially_refunded';
+      await transitionPaymentStateInTransaction(client, input.bookingId, paymentState, {
+        actorType: input.provider === 'stripe' ? 'stripe' : 'integration',
+        source: 'refund', reason: input.reason ?? 'refund_succeeded', refundId: result.rows[0].refund_id
+      });
       await client.query(
         `UPDATE payments SET status = CASE WHEN $2 >= amount_minor THEN 'refunded' ELSE 'partially_refunded' END, updated_at = now()
          WHERE payment_id = $1`,
         [input.paymentId, newTotal]
       );
+      if (input.finalizeBooking !== false) {
+        await transitionBookingInTransaction(client, input.bookingId, 'cancelled', {
+          actorType: input.provider === 'stripe' ? 'stripe' : 'integration',
+          source: 'refund', reason: input.reason ?? 'refund_succeeded', refundId: result.rows[0].refund_id
+        });
+      }
       await client.query(
         `INSERT INTO outbox_events (aggregate_type, aggregate_id, event_type, payload)
          VALUES ('booking', $1, 'refund.completed', $2::jsonb)`,
@@ -82,9 +89,9 @@ export async function updateStripeRefundState(input: {
 }): Promise<{ bookingId: string } | null> {
   return withTransaction(async (client) => {
     const result = await client.query<{
-      refund_id: string; booking_id: string; payment_id: string; amount_minor: string | number;
+      refund_id: string; booking_id: string; payment_id: string; amount_minor: string | number; reason: string | null;
     }>(
-      `SELECT refund_id, booking_id, payment_id, amount_minor FROM refunds
+      `SELECT refund_id, booking_id, payment_id, amount_minor, reason FROM refunds
        WHERE provider = 'stripe' AND provider_refund_id = $1 LIMIT 1 FOR UPDATE`,
       [input.providerRefundId]
     );
@@ -95,7 +102,9 @@ export async function updateStripeRefundState(input: {
       [refund.refund_id, input.status, JSON.stringify({ lastStripeEventId: input.externalEventId })]
     );
     if (input.status === 'failed') {
-      await client.query(`UPDATE bookings SET payment_status = 'refund_failed', updated_at = now() WHERE booking_id = $1`, [refund.booking_id]);
+      await transitionPaymentStateInTransaction(client, refund.booking_id, 'refund_failed', {
+        actorType: 'stripe', source: 'refund_webhook', reason: 'refund_failed', externalEventId: input.externalEventId
+      });
     } else {
       const totals = await client.query<{ refunded: string | number; payment_total: string | number }>(
         `SELECT COALESCE(SUM(refund_record.amount_minor) FILTER (WHERE refund_record.status = 'succeeded'), 0) AS refunded,
@@ -108,11 +117,14 @@ export async function updateStripeRefundState(input: {
       const paymentTotal = Number(totals.rows[0]?.payment_total ?? 0);
       const state = refunded >= paymentTotal ? 'refunded' : 'partially_refunded';
       await client.query(`UPDATE payments SET status = $2, updated_at = now() WHERE payment_id = $1`, [refund.payment_id, state]);
-      await client.query(
-        `UPDATE bookings SET payment_status = $2, status = 'cancelled', cancelled_at = COALESCE(cancelled_at, now()), updated_at = now()
-         WHERE booking_id = $1`,
-        [refund.booking_id, state]
-      );
+      await transitionPaymentStateInTransaction(client, refund.booking_id, state, {
+        actorType: 'stripe', source: 'refund_webhook', reason: 'refund_succeeded', externalEventId: input.externalEventId
+      });
+      if (refund.reason !== 'no_show') {
+        await transitionBookingInTransaction(client, refund.booking_id, 'cancelled', {
+          actorType: 'stripe', source: 'refund_webhook', reason: 'refund_succeeded', externalEventId: input.externalEventId
+        });
+      }
       await client.query(
         `INSERT INTO web_audit_events (action, actor_type, booking_id, details)
          VALUES ('stripe.refund.complete', 'stripe', $1, $2::jsonb)`,

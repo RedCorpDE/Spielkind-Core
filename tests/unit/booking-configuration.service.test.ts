@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildBookingConfiguration,
+  salesWindowStatus,
   validateBookingRules
 } from '../../src/modules/bookings/booking-configuration.service.js';
 import type { BookingIntent, OfferingBookingRules } from '../../src/modules/bookings/booking-intent.js';
@@ -33,6 +34,17 @@ const intent = (minutes: number, participants = 2): BookingIntent => ({
 });
 
 describe('offering booking configuration', () => {
+  it('supports independent optional sales-window bounds', () => {
+    const now = new Date('2026-10-01T10:00:00.000Z');
+    expect(salesWindowStatus({}, now)).toBe('open');
+    expect(salesWindowStatus({ salesOpenAt: '2026-10-02T10:00:00.000Z' }, now)).toBe('upcoming');
+    expect(salesWindowStatus({ salesCloseAt: '2026-09-30T10:00:00.000Z' }, now)).toBe('closed');
+    expect(salesWindowStatus({
+      salesOpenAt: '2026-10-01T10:00:00.000Z',
+      salesCloseAt: '2026-10-01T10:00:00.000Z'
+    }, now)).toBe('open');
+  });
+
   it.each([
     ['date_range', 24 * 60],
     ['start_end', 120],

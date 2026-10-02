@@ -5,6 +5,8 @@ import { HoldExpiredError, InsufficientCapacityError } from '../bookings/booking
 import { MissingProductResourceMappingError } from '../resources/consumption.service.js';
 import { loadResourceRequirements } from '../resources/resource-requirements.repository.js';
 import { isIntervalAllowedByAvailabilityRules, loadManualBlockCapacities } from '../resources/availability-rule.repository.js';
+import { transitionBookingInTransaction } from '../bookings/booking-lifecycle.service.js';
+import { transitionPaymentStateInTransaction } from '../payments/payment-lifecycle.service.js';
 
 export interface CreateReservationHoldInput {
   clientId?: string;
@@ -169,13 +171,22 @@ export async function expireReservationHolds(limit = 500): Promise<number> {
     );
     const bookingIds = result.rows.flatMap((row) => row.booking_id ? [row.booking_id] : []);
     if (bookingIds.length) {
-      await client.query(
-        `UPDATE bookings SET status = 'expired', payment_status = CASE
-           WHEN payment_status IN ('unpaid', 'processing', 'failed') THEN 'failed' ELSE payment_status END,
-           updated_at = now()
-         WHERE booking_id = ANY($1::uuid[]) AND status IN ('held', 'pending', 'payment_pending', 'payment_failed')`,
+      const expirable = await client.query<{ booking_id: string; status: string; payment_status: string }>(
+        `SELECT booking_id, status, payment_status FROM bookings
+         WHERE booking_id = ANY($1::uuid[]) AND status IN ('held', 'pending', 'payment_pending', 'payment_failed')
+         ORDER BY booking_id FOR UPDATE`,
         [bookingIds]
       );
+      for (const booking of expirable.rows) {
+        if (['unpaid', 'processing', 'failed'].includes(booking.payment_status)) {
+          await transitionPaymentStateInTransaction(client, booking.booking_id, 'failed', {
+            actorType: 'job', source: 'expire_reservation_holds', reason: 'hold_expired'
+          });
+        }
+        await transitionBookingInTransaction(client, booking.booking_id, 'expired', {
+          actorType: 'job', source: 'expire_reservation_holds', reason: 'hold_expired'
+        });
+      }
       await client.query(
         `UPDATE payments SET status = 'cancelled', updated_at = now()
          WHERE booking_id = ANY($1::uuid[]) AND status IN ('requires_payment', 'processing')`,

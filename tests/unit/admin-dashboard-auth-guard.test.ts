@@ -4,6 +4,14 @@ process.env.NODE_ENV = 'test';
 
 const { appConfig } = await import('../../src/config/env.js');
 
+const missingBearerResponse = {
+  ok: false,
+  error: 'Missing bearer token.',
+  code: 'AUTHENTICATION_REQUIRED',
+  message: 'Missing bearer token.',
+  errorDetails: { code: 'AUTHENTICATION_REQUIRED', message: 'Missing bearer token.' }
+};
+
 const protectedReadPaths = [
   '/api/admin/users',
   '/api/admin/locations',
@@ -149,10 +157,7 @@ describe('admin dashboard read auth guards', () => {
         });
 
         expect(response.statusCode).toBe(401);
-        expect(response.json()).toEqual({
-          ok: false,
-          error: 'Missing bearer token.'
-        });
+        expect(response.json()).toEqual(missingBearerResponse);
       } finally {
         await app.close();
       }
@@ -172,10 +177,7 @@ describe('admin dashboard read auth guards', () => {
         });
 
         expect(response.statusCode).toBe(401);
-        expect(response.json()).toEqual({
-          ok: false,
-          error: 'Missing bearer token.'
-        });
+        expect(response.json()).toEqual(missingBearerResponse);
       } finally {
         await app.close();
       }

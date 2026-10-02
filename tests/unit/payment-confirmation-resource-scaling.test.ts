@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ clientQuery: vi.fn(), transitionBooking: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  clientQuery: vi.fn(),
+  transitionBooking: vi.fn(),
+  transitionPayment: vi.fn()
+}));
 
 vi.mock('../../src/db/transaction.js', () => ({
   withTransaction: async (work: (client: { query: typeof mocks.clientQuery }) => Promise<unknown>) =>
@@ -8,6 +12,9 @@ vi.mock('../../src/db/transaction.js', () => ({
 }));
 vi.mock('../../src/modules/bookings/booking-lifecycle.service.js', () => ({
   transitionBookingInTransaction: mocks.transitionBooking
+}));
+vi.mock('../../src/modules/payments/payment-lifecycle.service.js', () => ({
+  transitionPaymentStateInTransaction: mocks.transitionPayment
 }));
 
 const { confirmStripePayment } = await import('../../src/modules/payments/payment-confirmation.service.js');

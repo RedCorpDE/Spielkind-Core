@@ -243,7 +243,13 @@ describe('POST /api/admin/products', () => {
       expect(response.statusCode).toBe(409);
       expect(response.json()).toEqual({
         ok: false,
-        error: 'This product is referenced by booking history and cannot be deleted.'
+        error: 'This product is referenced by booking history and cannot be deleted.',
+        code: 'PRODUCT_IN_USE',
+        message: 'This product is referenced by booking history and cannot be deleted.',
+        errorDetails: {
+          code: 'PRODUCT_IN_USE',
+          message: 'This product is referenced by booking history and cannot be deleted.'
+        }
       });
       expect(recordAdminAuditEventMock).not.toHaveBeenCalled();
     } finally {

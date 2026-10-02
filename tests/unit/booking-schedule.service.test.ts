@@ -32,6 +32,61 @@ const intent: BookingIntent = {
 };
 
 describe('Core booking schedule resolution', () => {
+  it('uses the authoritative fixed local date when the client omits startDate', () => {
+    const result = resolveBookingSchedule({
+      intent: { ...intent, startTime: '18:00' },
+      rules: { ...rules, dateSelection: 'fixed', fixedDate: '2026-12-05' },
+      now: new Date('2026-10-01T00:00:00.000Z')
+    });
+    expect(result.startsAt).toBe('2026-12-05T17:00:00.000Z');
+    expect(result.endsAt).toBe('2026-12-05T21:00:00.000Z');
+  });
+
+  it('rewrites a manipulated startAt date even when no local date fields are supplied', () => {
+    const result = resolveBookingSchedule({
+      intent,
+      rules: { ...rules, dateSelection: 'fixed', fixedDate: '2026-12-05' },
+      now: new Date('2026-10-01T00:00:00.000Z')
+    });
+    expect(result.startsAt.slice(0, 10)).toBe('2026-12-05');
+    expect(result.endsAt.slice(0, 10)).toBe('2026-12-05');
+  });
+
+  it('rejects a conflicting explicit date for a fixed-date offering', () => {
+    expect(() => resolveBookingSchedule({
+      intent: { ...intent, startDate: '2026-12-06', startTime: '18:00' },
+      rules: { ...rules, dateSelection: 'fixed', fixedDate: '2026-12-05' },
+      now: new Date('2026-10-01T00:00:00.000Z')
+    })).toThrow('Booking date must be 2026-12-05');
+  });
+
+  it.each([
+    ['2026-09-30T23:59:59.000Z', 'not open yet'],
+    ['2026-12-05T00:00:01.000Z', 'closed']
+  ])('enforces the sales window at %s', (now, message) => {
+    expect(() => resolveBookingSchedule({
+      intent,
+      rules: {
+        ...rules,
+        salesOpenAt: '2026-10-01T00:00:00.000Z',
+        salesCloseAt: '2026-12-04T23:59:59.000Z'
+      },
+      now: new Date(now)
+    })).toThrow(message);
+  });
+
+  it('allows booking inside the independent sales window', () => {
+    expect(resolveBookingSchedule({
+      intent,
+      rules: {
+        ...rules,
+        salesOpenAt: '2026-10-01T00:00:00.000Z',
+        salesCloseAt: '2026-12-04T23:59:59.000Z'
+      },
+      now: new Date('2026-10-01T00:00:00.000Z')
+    }).startsAt).toBe(intent.startAt);
+  });
+
   it.each([
     [null, 60, 300],
     [360, 60, 420],

@@ -1,5 +1,8 @@
 # Spielkind Core
 
+Booking lifecycle, concurrency, idempotency, and test guidance is documented in
+[`docs/sprint1-booking-stabilization.md`](docs/sprint1-booking-stabilization.md).
+
 Core is a TypeScript Node.js backend for:
 - Regiondo webhook ingestion
 - external parsed client-email task intake

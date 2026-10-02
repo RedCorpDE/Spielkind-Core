@@ -12,6 +12,7 @@ export type PermissionResource =
   | 'task_columns'
   | 'locations'
   | 'bookings'
+  | 'cancellation_policies'
   | 'products'
   | 'messages'
   | 'users'
@@ -121,6 +122,12 @@ export const permissionDefinitions: PermissionDefinition[] = [
     actions: ['view', 'create', 'update', 'delete', 'manage', 'export']
   },
   {
+    resource: 'cancellation_policies',
+    label: 'Cancellation Policies',
+    description: 'View and maintain reusable cancellation and no-show policies.',
+    actions: ['view', 'create', 'update', 'delete']
+  },
+  {
     resource: 'products',
     label: 'Products',
     description: 'View and manage product details, resource mappings, and catalog sync actions.',
@@ -217,6 +224,7 @@ const defaultRoleGrants: Record<string, PermissionGrant[]> = {
     ...grant('task_columns', { view: 'all' }),
     ...grant('locations', { view: 'all' }),
     ...grant('bookings', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all', export: 'all' }),
+    ...grant('cancellation_policies', { view: 'all' }),
     ...grant('products', { view: 'all', update: 'all' }),
     ...grant('messages', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all' }),
     ...grant('customers', { view: 'all', update: 'all' }),
@@ -234,6 +242,7 @@ const defaultRoleGrants: Record<string, PermissionGrant[]> = {
     ...grant('task_columns', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all' }),
     ...grant('locations', { view: 'all', create: 'all', update: 'all', delete: 'all' }),
     ...grant('bookings', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all', export: 'all' }),
+    ...grant('cancellation_policies', { view: 'all', create: 'all', update: 'all', delete: 'all' }),
     ...grant('products', { view: 'all', update: 'all', manage: 'all' }),
     ...grant('messages', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all' }),
     ...grant('users', { view: 'all', update: 'all', manage: 'all' }),
@@ -250,6 +259,7 @@ const defaultRoleGrants: Record<string, PermissionGrant[]> = {
     ...grant('tasks', { view: 'all', create: 'all', update: 'all' }),
     ...grant('task_comments', { view: 'all', create: 'all' }),
     ...grant('bookings', { view: 'all', create: 'all', update: 'all', delete: 'all', manage: 'all' }),
+    ...grant('cancellation_policies', { view: 'all' }),
     ...grant('products', { view: 'all' }),
     ...grant('messages', { view: 'all', create: 'all', update: 'all' }),
     ...grant('locations', { view: 'all' }),

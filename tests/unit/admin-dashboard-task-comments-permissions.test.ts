@@ -125,7 +125,10 @@ describe('admin dashboard task comment permissions', () => {
       expect(response.statusCode).toBe(403);
       expect(response.json()).toEqual({
         ok: false,
-        error: 'You do not have permission to view task comments.'
+        error: 'You do not have permission to view task comments.',
+        code: 'FORBIDDEN',
+        message: 'You do not have permission to view task comments.',
+        errorDetails: { code: 'FORBIDDEN', message: 'You do not have permission to view task comments.' }
       });
       expect(listTaskCommentsMock).not.toHaveBeenCalled();
     } finally {
@@ -153,7 +156,10 @@ describe('admin dashboard task comment permissions', () => {
       expect(response.statusCode).toBe(403);
       expect(response.json()).toEqual({
         ok: false,
-        error: 'You do not have permission to create task comments.'
+        error: 'You do not have permission to create task comments.',
+        code: 'FORBIDDEN',
+        message: 'You do not have permission to create task comments.',
+        errorDetails: { code: 'FORBIDDEN', message: 'You do not have permission to create task comments.' }
       });
       expect(createTaskCommentMock).not.toHaveBeenCalled();
     } finally {

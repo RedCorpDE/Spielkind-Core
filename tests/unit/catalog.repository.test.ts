@@ -172,6 +172,46 @@ describe('customer catalog product listing', () => {
     expect(query).not.toContain('location.name AS location_name');
   });
 
+  it('normalizes a PostgreSQL date object to a YYYY-MM-DD fixed booking date', async () => {
+    poolQuery.mockResolvedValueOnce({
+      rowCount: 1,
+      rows: [{
+        product_id: '22222222-2222-4222-8222-222222222222',
+        title: 'Akiba Night',
+        description: null,
+        image_url: null,
+        booking_provider: 'core',
+        offering_booking_provider: 'core',
+        price_minor: '1350',
+        currency: 'EUR',
+        vat_basis_points: 1900,
+        product_offering_id: '55555555-5555-4555-8555-555555555555',
+        location_id: locationId,
+        location_name: 'Braunschweig',
+        enabled: true,
+        variants: [],
+        options: [],
+        time_selection_mode: 'fixed_duration',
+        timezone: 'Europe/Berlin',
+        date_selection: 'fixed',
+        fixed_date: new Date(2026, 9, 31),
+        fixed_start_time: '19:00:00',
+        default_duration_minutes: 480
+      }]
+    });
+
+    const product = await getCatalogProductOffering(
+      '22222222-2222-4222-8222-222222222222',
+      locationId
+    );
+
+    expect(product?.bookingConfiguration.timeSelection).toMatchObject({
+      dateSelection: 'fixed',
+      fixedDate: '2026-10-31',
+      fixedStartTime: '19:00'
+    });
+  });
+
   it('does not return products that have no enabled offering for the venue', async () => {
     poolQuery.mockResolvedValueOnce({ rowCount: 0, rows: [] });
 

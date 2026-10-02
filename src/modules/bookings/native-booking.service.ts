@@ -1,6 +1,7 @@
 import { withTransaction } from '../../db/transaction.js';
 import { attachReservationHold } from '../availability/reservation-hold.service.js';
 import { quoteWithClient, type PricingQuoteInput } from '../pricing/pricing.service.js';
+import { resolveCancellationPolicySnapshot } from '../cancellations/cancellation-policy.service.js';
 
 export interface CreateNativeBookingInput extends PricingQuoteInput {
   clientId: string;
@@ -61,15 +62,7 @@ export async function createNativeBooking(input: CreateNativeBookingInput): Prom
     }
 
     const quote = await quoteWithClient(client, input);
-    const policy = await client.query<{ rules: unknown }>(
-      `SELECT COALESCE(variant_policy.rules, product_policy.rules, '[]'::jsonb) AS rules
-       FROM products product
-       LEFT JOIN product_variants variant ON variant.variant_id = $2 AND variant.product_id = product.product_id
-       LEFT JOIN cancellation_policies variant_policy ON variant_policy.cancellation_policy_id = variant.cancellation_policy_id
-       LEFT JOIN cancellation_policies product_policy ON product_policy.cancellation_policy_id = product.cancellation_policy_id
-       WHERE product.product_id = $1`,
-      [input.productId, input.variantId ?? null]
-    );
+    const policySnapshot = await resolveCancellationPolicySnapshot(client, input.productId, input.variantId);
     const inserted = await client.query<{ booking_id: string }>(
       `INSERT INTO bookings (
          client_id, location_id, product_offering_id, status, guest_count, total_amount, paid_amount,
@@ -79,7 +72,8 @@ export async function createNativeBooking(input: CreateNativeBookingInput): Prom
        RETURNING booking_id`,
       [
         input.clientId, input.locationId, input.locationProductId ?? null, input.quantity, quote.total / 100, input.startsAt,
-        input.endsAt, quote.currency, input.idempotencyKey, JSON.stringify(policy.rows[0]?.rules ?? [])
+        input.endsAt, quote.currency, input.idempotencyKey,
+        policySnapshot ? JSON.stringify(policySnapshot) : null
       ]
     );
     const bookingId = inserted.rows[0].booking_id;

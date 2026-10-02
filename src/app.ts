@@ -5,6 +5,7 @@ import { applyClientCors } from './http/client.js';
 import { registerErrorHandler } from './http/errors.js';
 import { registerAdminAuthRoutes } from './http/routes/admin-auth.routes.js';
 import { registerAdminBookingRoutes } from './http/routes/admin-bookings.routes.js';
+import { registerAdminCancellationPolicyRoutes } from './http/routes/admin-cancellation-policies.routes.js';
 import { registerAdminClientGroupRoutes } from './http/routes/admin-client-groups.routes.js';
 import { registerAdminClientRoutes } from './http/routes/admin-clients.routes.js';
 import { registerAdminProductRoutes } from './http/routes/admin-products.routes.js';
@@ -25,6 +26,7 @@ import { registerAdminFeedbackRoutes } from './http/routes/admin-feedback.routes
 import { registerClientCommerceRoutes } from './http/routes/client-commerce.routes.js';
 import { registerStripeWebhookRoutes } from './http/routes/stripe-webhook.routes.js';
 import { registerWebRoutes } from './http/routes/web.routes.js';
+import { registerOpenApiRoutes } from './http/routes/openapi.routes.js';
 
 export function createApp() {
   const app = Fastify({
@@ -80,6 +82,7 @@ export function createApp() {
   app.setErrorHandler(registerErrorHandler());
 
   void registerHealthRoutes(app);
+  void registerOpenApiRoutes(app);
   void registerClientAuthRoutes(app);
   void registerClientApiRoutes(app);
   void registerClientFeedbackRoutes(app);
@@ -92,6 +95,7 @@ export function createApp() {
   void registerStripeWebhookRoutes(app);
   void registerInternalJobRoutes(app);
   void registerAdminBookingRoutes(app);
+  void registerAdminCancellationPolicyRoutes(app);
   void registerAdminClientRoutes(app);
   void registerAdminFeedbackRoutes(app);
   void registerAdminClientGroupRoutes(app);

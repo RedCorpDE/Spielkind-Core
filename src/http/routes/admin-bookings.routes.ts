@@ -21,15 +21,16 @@ import {
 import { rebuildConsumptionsForBooking } from '../../modules/resources/consumption.service.js';
 import { pool } from '../../db/client.js';
 import { resolveBookingChangeRequestByAdmin } from '../../modules/bookings/booking-change-request.repository.js';
-import { getCancellationQuote } from '../../modules/cancellations/cancellation.service.js';
-import { cancelWebBooking } from '../../modules/web/web-booking.service.js';
+import { getCancellationQuote, getNoShowQuote } from '../../modules/cancellations/cancellation.service.js';
+import { cancelWebBooking, markNoShowBooking } from '../../modules/web/web-booking.service.js';
 import { bookingIntentSchema } from '../schemas/booking-intent.schema.js';
 import { bookingQuoteService } from '../../modules/bookings/booking-quote.service.js';
 import { bookingProviderRegistry } from '../../modules/bookings/booking-provider.js';
 import { getBookingOffering } from '../../modules/catalog/catalog.repository.js';
 import { createReservationHold, releaseReservationHold } from '../../modules/availability/reservation-hold.service.js';
+import { transitionBooking } from '../../modules/bookings/booking-lifecycle.service.js';
 
-const bookingExternalStatusSchema = z.enum(['Pending', 'Processing', 'Confirmed', 'Completed', 'Rejected', 'Canceled', 'Unknown']);
+const bookingExternalStatusSchema = z.enum(['Pending', 'Processing', 'Confirmed', 'Completed', 'Rejected', 'Canceled', 'No-Show', 'Unknown']);
 const bookingOpsStatusSchema = z.enum(['Normal', 'Escalated']);
 const bookingStatusSchema = z.union([bookingExternalStatusSchema, z.literal('Escalated')]);
 const bookingExternalSyncStatusSchema = z.enum(['synced', 'pending_update', 'syncing', 'conflict', 'error']);
@@ -42,8 +43,16 @@ const applyRegiondoSyncSchema = z.object({
 });
 const staffCancellationSchema = z.object({
   reason: z.string().trim().min(1).max(1000),
-  override: z.boolean().default(false)
+  reasonCode: z.enum(['location_closed', 'technical_issue', 'duplicate', 'staff_override', 'other']).default('other'),
+  refundMode: z.enum(['policy', 'full', 'none', 'custom']).default('policy'),
+  customRefundAmount: z.number().int().nonnegative().safe().optional(),
+  override: z.boolean().optional()
+}).superRefine((value, context) => {
+  if (value.refundMode === 'custom' && value.customRefundAmount === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['customRefundAmount'], message: 'Custom refund amount is required.' });
+  }
 });
+const noShowSchema = z.object({ note: z.string().trim().max(1000).optional() }).default({});
 const adminOverridesSchema = z.object({
   availability: z.boolean().default(false),
   bookingRules: z.boolean().default(false),
@@ -291,10 +300,9 @@ export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<
         [result.bookingId]
       );
       if (overrides.createWithoutPayment) {
-        await pool.query(
-          `UPDATE bookings SET status = 'confirmed', payment_status = 'unpaid', updated_at = now() WHERE booking_id = $1`,
-          [result.bookingId]
-        );
+        await transitionBooking(result.bookingId, 'confirmed', {
+          actorType: 'admin', actorId: auth.user.id, source: 'dashboard', reason: 'create_without_payment'
+        });
         await rebuildConsumptionsForBooking(result.bookingId);
         if (holdId) await releaseReservationHold(holdId);
       }
@@ -321,24 +329,85 @@ export async function registerAdminBookingRoutes(app: FastifyInstance): Promise<
     const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'delete');
     const parsed = staffCancellationSchema.safeParse(request.body);
     if (!parsed.success) throw new ValidationHttpError('A cancellation reason is required.');
-    if (parsed.data.override) {
+    if (parsed.data.override || parsed.data.refundMode !== 'policy') {
       await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'manage');
     }
     const { bookingId } = request.params as { bookingId: string };
     const currentBooking = await getBooking(bookingId);
+    const quote = await getCancellationQuote(bookingId);
     if (currentBooking?.regiondoBookingId) {
-      const quote = await getCancellationQuote(bookingId);
       if (!quote.canCancel) throw new ValidationHttpError(quote.reason);
+      if (parsed.data.refundMode !== 'policy') {
+        throw new ValidationHttpError('Regiondo refunds remain provider-managed and cannot be overridden in Core.');
+      }
       await cancelBookingInRegiondo(bookingId);
+      await recordAdminWriteAudit({
+        request, auth, action: 'staff.booking.cancel', entityType: 'booking', entityId: bookingId,
+        details: { reason: parsed.data.reason, reasonCode: parsed.data.reasonCode, providerManaged: true }
+      });
+      return { ok: true, item: await getBooking(bookingId) };
     }
+    const refundAmountOverride = parsed.data.refundMode === 'policy' ? undefined
+      : parsed.data.refundMode === 'full' ? quote.refundableAmount
+        : parsed.data.refundMode === 'none' ? 0 : parsed.data.customRefundAmount;
     await cancelWebBooking({
-      bookingId, actorType: 'staff', actorId: auth.user.id, reason: parsed.data.reason
+      bookingId, actorType: 'staff', actorId: auth.user.id, reason: parsed.data.reason,
+      reasonCode: parsed.data.reasonCode, refundAmountOverride
     });
+    const financial = await pool.query<{
+      payment_id: string | null; provider_payment_id: string | null;
+      refund_id: string | null; provider_refund_id: string | null;
+    }>(
+      `SELECT payment.payment_id, payment.provider_payment_id,
+              refund.refund_id, refund.provider_refund_id
+       FROM bookings booking
+       LEFT JOIN LATERAL (SELECT payment_id, provider_payment_id FROM payments
+         WHERE booking_id = booking.booking_id ORDER BY created_at DESC LIMIT 1) payment ON true
+       LEFT JOIN LATERAL (SELECT refund_id, provider_refund_id FROM refunds
+         WHERE booking_id = booking.booking_id ORDER BY created_at DESC LIMIT 1) refund ON true
+       WHERE booking.booking_id = $1`, [bookingId]
+    );
     await recordAdminWriteAudit({
       request, auth, action: 'staff.booking.cancel', entityType: 'booking', entityId: bookingId,
-      details: { reason: parsed.data.reason, override: parsed.data.override }
+      details: {
+        reason: parsed.data.reason, reasonCode: parsed.data.reasonCode, refundMode: parsed.data.refundMode,
+        policyRefundAmount: quote.refundAmount,
+        actualRefundAmount: refundAmountOverride ?? quote.refundAmount,
+        policyCancellationFee: quote.cancellationFee,
+        paymentId: financial.rows[0]?.payment_id ?? null,
+        providerPaymentId: financial.rows[0]?.provider_payment_id ?? null,
+        refundId: financial.rows[0]?.refund_id ?? null,
+        providerRefundId: financial.rows[0]?.provider_refund_id ?? null
+      }
     });
     return { ok: true, item: await getBooking(bookingId) };
+  });
+
+  app.get('/api/admin/bookings/:bookingId/no-show-preview', async (request) => {
+    await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'view');
+    const { bookingId } = request.params as { bookingId: string };
+    return { ok: true, item: await getNoShowQuote(bookingId) };
+  });
+
+  app.post('/api/admin/bookings/:bookingId/no-show', async (request) => {
+    const { auth } = await requireAdminPermission(request as AdminFastifyRequest, 'bookings', 'manage');
+    const parsed = noShowSchema.safeParse(request.body ?? {});
+    if (!parsed.success) throw new ValidationHttpError('Invalid no-show request.');
+    const { bookingId } = request.params as { bookingId: string };
+    const result = await markNoShowBooking({ bookingId, actorId: auth.user.id, note: parsed.data.note });
+    const noShowRefund = await pool.query<{ refund_id: string; provider_refund_id: string | null }>(
+      `SELECT refund_id, provider_refund_id FROM refunds WHERE booking_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [bookingId]
+    );
+    await recordAdminWriteAudit({
+      request, auth, action: 'staff.booking.no_show', entityType: 'booking', entityId: bookingId,
+      details: {
+        policyRefundAmount: result.quote.refundAmount, resourcesReleased: false, note: parsed.data.note ?? null,
+        refundId: noShowRefund.rows[0]?.refund_id ?? null,
+        providerRefundId: noShowRefund.rows[0]?.provider_refund_id ?? null
+      }
+    });
+    return { ok: true, item: await getBooking(bookingId), noShow: result.quote };
   });
 
   app.get('/api/admin/bookings', async (request) => {

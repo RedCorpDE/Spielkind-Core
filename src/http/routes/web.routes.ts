@@ -16,6 +16,7 @@ import { getBookingOffering, getCatalogProduct, getCatalogProductOffering, listC
 import { verifyAvailabilityToken } from '../../modules/web/availability-token.js';
 import { listWebAvailability } from '../../modules/web/web-availability.service.js';
 import { createWebCheckout } from '../../modules/web/web-checkout.service.js';
+import { resolveWebCheckoutIdentity } from '../../modules/web/web-checkout-identity.js';
 import {
   canClientCancelBooking, cancelWebBooking, getOwnedWebBooking, getWebBooking,
   listWebClientBookings, webBookingStatus
@@ -27,6 +28,7 @@ import { bookingIntentSchema } from '../schemas/booking-intent.schema.js';
 import { bookingQuoteService } from '../../modules/bookings/booking-quote.service.js';
 import { createReservationHold } from '../../modules/availability/reservation-hold.service.js';
 import { getVariantEligibility } from '../../modules/bookings/variant-eligibility.service.js';
+import { getCancellationQuote } from '../../modules/cancellations/cancellation.service.js';
 
 const uuid = z.string().uuid();
 const email = z.string().trim().email().transform((value) => value.toLowerCase());
@@ -53,10 +55,10 @@ const checkoutSchema = z.object({
     value: z.string().trim().min(1).max(500).optional(),
     quantity: z.coerce.number().int().positive().max(100).optional()
   })).max(30).default([]),
-  contact: z.object({
-    firstName: z.string().trim().min(1).max(100), lastName: z.string().trim().min(1).max(100),
-    email, phone: z.string().trim().max(50).optional()
-  })
+  guest: z.unknown().optional(),
+  // Accepted temporarily for older deployed WordPress bundles. It is never used
+  // when a Core client session is authenticated.
+  contact: z.unknown().optional()
 }).superRefine((value, context) => {
   if (!value.availabilityId && !(value.locationProductId && value.startAt && value.endAt)) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['availabilityId'], message: 'availabilityId or canonical booking times are required.' });
@@ -199,7 +201,7 @@ export async function registerWebRoutes(app: FastifyInstance): Promise<void> {
       from: z.string().datetime().optional(), to: z.string().datetime().optional(),
       durationMinutes: z.coerce.number().int().positive().max(7 * 24 * 60).optional(),
       quantity: z.coerce.number().int().positive().max(100).default(1)
-    }).refine((value) => Boolean(value.date || (value.from && value.to)), 'date or from/to are required'), request.query, 'Invalid availability query.');
+    }), request.query, 'Invalid availability query.');
     const result = await listWebAvailability({ productId, ...query, quantity: query.quantity ?? 1 });
     if (result === null) throw new HttpError(404, 'Product was not found.', 'PRODUCT_NOT_FOUND');
     return result;
@@ -226,7 +228,7 @@ export async function registerWebRoutes(app: FastifyInstance): Promise<void> {
         value: z.string().trim().min(1).max(500).optional(),
         quantity: z.number().int().positive().max(100).optional()
       })).max(30).default([])
-    }).refine((value) => Boolean(value.date || (value.from && value.to)), 'date or from/to are required'), request.body, 'Invalid availability request.');
+    }), request.body, 'Invalid availability request.');
     const result = await listWebAvailability({ productId, ...body, quantity: body.quantity ?? 1 });
     if (result === null) throw new HttpError(404, 'Product was not found.', 'PRODUCT_NOT_FOUND');
     const product = await getCatalogProductOffering(productId, body.locationId);
@@ -325,6 +327,16 @@ export async function registerWebRoutes(app: FastifyInstance): Promise<void> {
     return booking;
   });
 
+  app.get('/api/web/me/bookings/:bookingId/cancellation-quote', async (request) => {
+    await service(request, 'booking-management');
+    const auth = await requireWebClientAuth(request as WebFastifyRequest);
+    const { bookingId } = parse(bookingParams, request.params, 'Invalid booking id.');
+    if (!(await canClientCancelBooking(auth.client.id, bookingId))) {
+      throw new HttpError(403, 'You cannot cancel this booking.', 'BOOKING_NOT_OWNED');
+    }
+    return getCancellationQuote(bookingId);
+  });
+
   app.post('/api/web/me/bookings/:bookingId/cancel', async (request) => {
     await service(request, 'booking-management');
     rateLimit(request, 'web-cancel', 10, 10 * 60_000);
@@ -358,9 +370,10 @@ export async function registerWebRoutes(app: FastifyInstance): Promise<void> {
       throw new ConflictHttpError('Availability does not match the checkout selection.', 'AVAILABILITY_UNAVAILABLE');
     }
     const auth = await optionalWebClientAuth(request as WebFastifyRequest);
+    const identity = resolveWebCheckoutIdentity(auth?.client ?? null, body.guest ?? body.contact);
     const result = await createWebCheckout({
       ...body, quantity: body.participants ?? body.quantity ?? 1, variantId: body.variantId ?? undefined, availability,
-      clientId: auth?.client.id, idempotencyKey: idempotencyKey(request)
+      identity, idempotencyKey: idempotencyKey(request)
     });
     reply.status(201);
     return result;
@@ -371,13 +384,20 @@ export async function registerWebRoutes(app: FastifyInstance): Promise<void> {
     rateLimit(request, 'web-status', 60);
     const { bookingId } = parse(bookingParams, request.params, 'Invalid booking id.');
     const token = request.headers['x-checkout-token'];
-    if (typeof token !== 'string' || !(await validateCheckoutToken(bookingId, token))) {
+    const checkoutSession = typeof token === 'string' ? await validateCheckoutToken(bookingId, token) : null;
+    if (!checkoutSession) {
       throw new UnauthorizedHttpError('Checkout token is invalid or expired.', 'CHECKOUT_TOKEN_INVALID');
+    }
+    const auth = await optionalWebClientAuth(request as WebFastifyRequest);
+    if (checkoutSession.authenticatedClientId && auth?.client.id !== checkoutSession.authenticatedClientId) {
+      throw new UnauthorizedHttpError('Checkout belongs to a different or expired client session.', 'AUTH_INVALID');
     }
     const status = await webBookingStatus(bookingId);
     if (!status) throw new HttpError(404, 'Booking was not found.', 'BOOKING_NOT_FOUND');
     if (status.bookingStatus === 'confirmed' && status.paymentStatus === 'paid') {
-      return { ...status, managementToken: await ensureManagementToken(bookingId) };
+      return checkoutSession.authenticatedClientId
+        ? status
+        : { ...status, managementToken: await ensureManagementToken(bookingId) };
     }
     return status;
   });
@@ -391,6 +411,15 @@ export async function registerWebRoutes(app: FastifyInstance): Promise<void> {
     const booking = await getWebBooking(bookingId);
     if (!booking) throw new HttpError(404, 'Booking was not found.', 'BOOKING_NOT_FOUND');
     return booking;
+  });
+
+  app.get('/api/web/booking-management/:token/cancellation-quote', async (request) => {
+    await service(request, 'booking-management');
+    rateLimit(request, 'web-management', 30);
+    const { token } = parse(managementParams, request.params, 'Invalid management token.');
+    const bookingId = await bookingForManagementToken(token);
+    if (!bookingId) throw new UnauthorizedHttpError('Management token is invalid or expired.', 'AUTH_INVALID');
+    return getCancellationQuote(bookingId);
   });
 
   app.post('/api/web/booking-management/:token/cancel', async (request) => {

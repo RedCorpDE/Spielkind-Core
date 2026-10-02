@@ -19,19 +19,28 @@ export async function listWebAvailability(input: {
 }) {
   const product = await getCatalogProductOffering(input.productId, input.locationId);
   if (!product) return null;
-  const queryStart = input.from ?? `${input.date}T00:00:00.000Z`;
-  const queryEnd = input.to ?? `${input.date}T23:59:59.999Z`;
+  const timeSelection = product.bookingConfiguration.timeSelection;
+  const salesWindow = product.bookingConfiguration.salesWindow;
+  if (product.bookingProvider === 'core' && salesWindow.status !== 'open') {
+    return { items: [], salesWindow };
+  }
+  const selectedDate = input.date ?? input.startDate ?? timeSelection.fixedDate;
+  if (!input.from && !input.to && !selectedDate) return { items: [], salesWindow };
+  const queryStart = input.from ?? `${selectedDate}T00:00:00.000Z`;
+  const queryEnd = input.to ?? `${selectedDate}T23:59:59.999Z`;
+  const resolvedStartDate = timeSelection.dateSelection === 'fixed'
+    ? timeSelection.fixedDate ?? undefined
+    : input.startDate;
   const customerStartSlots = product.bookingProvider === 'core'
-    && product.bookingConfiguration.timeSelection.startTimeSelection === 'customer'
-    && (product.bookingConfiguration.timeSelection.mode === 'fixed_duration'
-      || product.bookingConfiguration.timeSelection.mode === 'start_duration')
-    && input.startDate && input.startTime;
+    && timeSelection.startTimeSelection === 'customer'
+    && (timeSelection.mode === 'fixed_duration' || timeSelection.mode === 'start_duration')
+    && resolvedStartDate && input.startTime;
   if (customerStartSlots) {
     const offering = await getBookingOffering(product.offering.id);
     if (!offering) return null;
     const result = await listCoreStartSlots({
       offering,
-      requestedDate: input.startDate,
+      requestedDate: resolvedStartDate,
       requestedTime: input.startTime,
       intent: {
         locationId: input.locationId,
@@ -40,7 +49,7 @@ export async function listWebAvailability(input: {
         variantId: input.variantId,
         startAt: queryStart,
         endAt: queryEnd,
-        startDate: input.startDate,
+        startDate: resolvedStartDate,
         startTime: input.startTime,
         durationMinutes: input.durationMinutes,
         participants: input.quantity,
@@ -60,13 +69,20 @@ export async function listWebAvailability(input: {
       effectiveDurationMinutes: result.effectiveDurationMinutes,
       allowedStart: result.allowedStart,
       variants: result.variants,
-      fixedStart: result.fixedStart
+      fixedStart: result.fixedStart,
+      salesWindow
     };
   }
   const directCoreSelection = product.bookingProvider === 'core' && (
-    (product.bookingConfiguration.timeSelection.mode === 'date_range' && input.from && input.to)
-    || (product.bookingConfiguration.timeSelection.mode === 'fixed_duration' && input.startDate
-      && (input.startTime || product.bookingConfiguration.timeSelection.fixedStartTime))
+    (timeSelection.dateSelection === 'fixed'
+      && Boolean(input.startTime || timeSelection.fixedStartTime)
+      && (
+        ['fixed_duration', 'start_duration'].includes(timeSelection.mode)
+        || Boolean(input.endTime || timeSelection.fixedEndTime)
+      ))
+    || (timeSelection.mode === 'date_range' && input.from && input.to)
+    || (timeSelection.mode === 'fixed_duration' && resolvedStartDate
+      && (input.startTime || timeSelection.fixedStartTime))
   );
   if (directCoreSelection) {
     const offering = await getBookingOffering(product.offering.id);
@@ -79,7 +95,7 @@ export async function listWebAvailability(input: {
       variantId: input.variantId,
       startAt: queryStart,
       endAt: queryEnd,
-      startDate: input.startDate,
+      startDate: resolvedStartDate,
       endDate: input.endDate,
       startTime: input.startTime,
       endTime: input.endTime,
@@ -94,7 +110,7 @@ export async function listWebAvailability(input: {
       offering,
       intent: resolvedIntent
     });
-    if (!result?.available) return { items: [] };
+    if (!result?.available) return { items: [], salesWindow };
     return { items: [{
       availabilityId: createAvailabilityToken({
         locationId: input.locationId,
@@ -109,7 +125,7 @@ export async function listWebAvailability(input: {
       endsAt: resolvedIntent.endAt,
       remaining: result.maxBookableQuantity,
       label: 'Selected stay'
-    }] };
+    }], salesWindow };
   }
   if (product.bookingProvider === 'regiondo') {
     if (!input.variantId) return { items: [] };
@@ -152,7 +168,7 @@ export async function listWebAvailability(input: {
        AND (ends_at IS NULL OR ends_at > $6::timestamptz)
        AND (starts_at IS NOT NULL OR (local_start_time IS NOT NULL AND local_end_time IS NOT NULL))
      ORDER BY starts_at NULLS LAST, local_start_time`,
-    [input.productId, input.locationId, input.date, input.variantId ?? null, queryEnd, queryStart]
+    [input.productId, input.locationId, selectedDate, input.variantId ?? null, queryEnd, queryStart]
   );
   const slots = [];
   const offering = await getBookingOffering(product.offering.id);
@@ -187,5 +203,5 @@ export async function listWebAvailability(input: {
       startsAt, endsAt, remaining: summary.maxBookableQuantity
     });
   }
-  return { items: slots };
+  return { items: slots, salesWindow };
 }

@@ -51,7 +51,8 @@ const updateProductSchema = z
     imageUrl: z.string().nullable().optional(),
     baseAmount: z.number().nonnegative().optional(),
     bookingProvider: z.enum(['core', 'regiondo']).optional(),
-    vatBasisPoints: z.number().int().min(0).max(10_000).optional()
+    vatBasisPoints: z.number().int().min(0).max(10_000).optional(),
+    cancellationPolicyId: z.string().uuid().nullable().optional()
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: 'At least one product field must be provided.'
@@ -69,7 +70,8 @@ const createProductSchema = z
       .toUpperCase()
       .regex(/^[A-Z]{3}$/)
       .default('EUR'),
-    vatBasisPoints: z.number().int().min(0).max(10_000)
+    vatBasisPoints: z.number().int().min(0).max(10_000),
+    cancellationPolicyId: z.string().uuid().nullable().optional()
   })
   .strict();
 
@@ -118,6 +120,7 @@ const createVariantSchema = z
       .regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/)
       .nullable()
       .optional()
+    , cancellationPolicyId: z.string().uuid().nullable().optional()
   })
   .strict()
   .superRefine((value, context) => {
@@ -156,6 +159,7 @@ const updateVariantSchema = z
       .regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/)
       .nullable()
       .optional()
+    , cancellationPolicyId: z.string().uuid().nullable().optional()
   })
   .strict()
   .superRefine((value, context) => {
@@ -209,6 +213,10 @@ const updateOfferingSchema = z
     regiondoProductId: z.string().trim().min(1).optional(),
     timeSelectionMode: z.enum(['date_range', 'start_end', 'start_duration', 'fixed_duration']).optional(),
     timezone: z.string().trim().min(1).max(100).optional(),
+    dateSelection: z.enum(['customer', 'fixed']).optional(),
+    fixedDate: z.string().date().nullable().optional(),
+    salesOpenAt: z.string().datetime().nullable().optional(),
+    salesCloseAt: z.string().datetime().nullable().optional(),
     fixedStartTime: z
       .string()
       .regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/)
@@ -245,6 +253,17 @@ const updateOfferingSchema = z
     dateRangeBillingUnit: z.enum(['nights', 'calendar_days']).optional()
   })
   .strict()
+  .superRefine((value, context) => {
+    if (value.dateSelection === 'fixed' && !value.fixedDate) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['fixedDate'], message: 'Fixed date is required.' });
+    }
+    if (value.dateSelection === 'customer' && value.fixedDate) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['fixedDate'], message: 'Customer-selected dates cannot have a fixed date.' });
+    }
+    if (value.salesOpenAt && value.salesCloseAt && new Date(value.salesCloseAt) < new Date(value.salesOpenAt)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['salesCloseAt'], message: 'Booking close must not be before booking open.' });
+    }
+  })
   .refine((value) => Object.keys(value).length > 0, {
     message: 'At least one offering field is required.'
   });
@@ -676,6 +695,7 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
       ...(body.data.allowedWeekdays !== undefined ? { allowedWeekdays: body.data.allowedWeekdays } : {}),
       ...(body.data.localStartTime !== undefined ? { localStartTime: body.data.localStartTime } : {}),
       ...(body.data.localEndTime !== undefined ? { localEndTime: body.data.localEndTime } : {})
+      , ...(body.data.cancellationPolicyId !== undefined ? { cancellationPolicyId: body.data.cancellationPolicyId } : {})
     });
     if (typeof result === 'string') throwCatalogMutationFailure(result);
     await recordAdminWriteAudit({
@@ -723,6 +743,7 @@ export async function registerAdminProductRoutes(app: FastifyInstance): Promise<
       ...(body.data.allowedWeekdays !== undefined ? { allowedWeekdays: body.data.allowedWeekdays } : {}),
       ...(body.data.localStartTime !== undefined ? { localStartTime: body.data.localStartTime } : {}),
       ...(body.data.localEndTime !== undefined ? { localEndTime: body.data.localEndTime } : {})
+      , ...(body.data.cancellationPolicyId !== undefined ? { cancellationPolicyId: body.data.cancellationPolicyId } : {})
     });
     if (typeof result === 'string') throwCatalogMutationFailure(result);
     await recordAdminWriteAudit({

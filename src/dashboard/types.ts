@@ -273,6 +273,7 @@ export type DashboardBookingExternalStatus =
   | 'Completed'
   | 'Rejected'
   | 'Canceled'
+  | 'No-Show'
   | 'Unknown';
 
 export type DashboardBookingOpsStatus = 'Normal' | 'Escalated';

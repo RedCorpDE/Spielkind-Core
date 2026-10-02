@@ -2,7 +2,8 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { createReservationHold, releaseReservationHold } from '../../modules/availability/reservation-hold.service.js';
 import { bookingProviderRegistry } from '../../modules/bookings/booking-provider.js';
-import { getCancellationQuote, requestCancellation } from '../../modules/cancellations/cancellation.service.js';
+import { getCancellationQuote } from '../../modules/cancellations/cancellation.service.js';
+import { cancelWebBooking } from '../../modules/web/web-booking.service.js';
 import { getCatalogProductOffering, getExternalVariantReference, listCatalogProducts } from '../../modules/catalog/catalog.repository.js';
 import { getClientBooking } from '../../client-api/repository.js';
 import { requireClientAuth, type ClientFastifyRequest } from '../client.js';
@@ -227,7 +228,7 @@ export async function registerClientCommerceRoutes(app: FastifyInstance): Promis
     const auth = await requireClientAuth(request as ClientFastifyRequest);
     const { bookingId } = parse(bookingParams, request.params, 'Invalid booking id.');
     await requireOwnedBooking(auth.client.id, bookingId);
-    return requestCancellation(bookingId);
+    return cancelWebBooking({ bookingId, actorType: 'client', actorClientId: auth.client.id, reasonCode: 'customer_request' });
   });
 
   app.post('/api/client/bookings/:bookingId/checkout', async (request) => {

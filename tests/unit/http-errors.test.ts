@@ -43,7 +43,13 @@ describe('registerErrorHandler', () => {
     expect(reply.status).toHaveBeenCalledWith(400);
     expect(reply.send).toHaveBeenCalledWith({
       ok: false,
-      error: 'One or more selected option values are invalid.'
+      code: 'INVALID_OPTION',
+      error: 'One or more selected option values are invalid.',
+      message: 'One or more selected option values are invalid.',
+      errorDetails: {
+        code: 'INVALID_OPTION',
+        message: 'One or more selected option values are invalid.'
+      }
     });
   });
 
@@ -73,7 +79,12 @@ describe('registerErrorHandler', () => {
     expect(reply.send).toHaveBeenCalledWith({
       ok: false,
       code: 'REGIONDO_LOCATION_INVALID',
-      error: 'Regiondo location ID 5467 is a region, not a city.'
+      error: 'Regiondo location ID 5467 is a region, not a city.',
+      message: 'Regiondo location ID 5467 is a region, not a city.',
+      errorDetails: {
+        code: 'REGIONDO_LOCATION_INVALID',
+        message: 'Regiondo location ID 5467 is a region, not a city.'
+      }
     });
   });
 
@@ -91,7 +102,13 @@ describe('registerErrorHandler', () => {
     expect(reply.status).toHaveBeenCalledWith(400);
     expect(reply.send).toHaveBeenCalledWith({
       ok: false,
+      code: 'REGIONDO_UNAVAILABLE',
       error: 'Regiondo request failed with status 400',
+      message: 'Regiondo request failed with status 400',
+      errorDetails: {
+        code: 'REGIONDO_UNAVAILABLE',
+        message: 'Regiondo request failed with status 400'
+      },
       details: '{"message":"Invalid checkout item."}'
     });
   });
@@ -110,7 +127,13 @@ describe('registerErrorHandler', () => {
     expect(reply.status).toHaveBeenCalledWith(503);
     expect(reply.send).toHaveBeenCalledWith({
       ok: false,
+      code: 'REGIONDO_UNAVAILABLE',
       error: 'Regiondo transient failure: 503',
+      message: 'Regiondo transient failure: 503',
+      errorDetails: {
+        code: 'REGIONDO_UNAVAILABLE',
+        message: 'Regiondo transient failure: 503'
+      },
       details: 'Regiondo is temporarily unavailable.'
     });
   });
@@ -141,6 +164,11 @@ describe('registerErrorHandler', () => {
       code: 'REGIONDO_PURCHASE_RECONCILIATION_REQUIRED',
       retryable: false,
       error: 'The Regiondo purchase may already exist. Do not submit it again until the existing attempt is reconciled.',
+      message: 'The Regiondo purchase may already exist. Do not submit it again until the existing attempt is reconciled.',
+      errorDetails: {
+        code: 'REGIONDO_PURCHASE_RECONCILIATION_REQUIRED',
+        message: 'The Regiondo purchase may already exist. Do not submit it again until the existing attempt is reconciled.'
+      },
       reason: 'snapshot_unavailable',
       subId: 'task-1',
       orderNumber: 'R-10001',

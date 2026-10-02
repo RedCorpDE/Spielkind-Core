@@ -158,7 +158,17 @@ export async function listCoreStartSlots(input: {
     throw new BookingRuleValidationError('Core start slots only apply to Core-managed offerings.');
   }
   const local = localDateAndTime(input.intent.startAt, input.offering.rules.timezone);
-  const selectedDate = input.requestedDate ?? input.intent.startDate ?? local.date;
+  const submittedDate = input.requestedDate ?? input.intent.startDate;
+  if (
+    input.offering.rules.dateSelection === 'fixed'
+    && submittedDate
+    && submittedDate !== input.offering.rules.fixedDate
+  ) {
+    throw new BookingRuleValidationError(`Booking date must be ${input.offering.rules.fixedDate}.`);
+  }
+  const selectedDate = input.offering.rules.dateSelection === 'fixed'
+    ? input.offering.rules.fixedDate ?? (() => { throw new BookingRuleValidationError('A fixed booking date is required.'); })()
+    : submittedDate ?? local.date;
   const requestedTime = input.requestedTime ?? input.intent.startTime ?? local.time;
   const intervalMinutes = input.offering.rules.startIntervalMinutes ?? 30;
   const selectedWindow = await variantWindow(input.intent.variantId);

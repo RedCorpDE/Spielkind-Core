@@ -1,10 +1,29 @@
-import type { BookingIntent, OfferingBookingRules, TimeSelectionMode } from './booking-intent.js';
+import type { BookingIntent, OfferingBookingRules, SalesWindowStatus, TimeSelectionMode } from './booking-intent.js';
 
 export class BookingRuleValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'BookingRuleValidationError';
   }
+}
+
+export function salesWindowStatus(
+  rules: Pick<OfferingBookingRules, 'salesOpenAt' | 'salesCloseAt'>,
+  now = new Date()
+): SalesWindowStatus {
+  const instant = now.getTime();
+  if (rules.salesOpenAt && instant < new Date(rules.salesOpenAt).getTime()) return 'upcoming';
+  if (rules.salesCloseAt && instant > new Date(rules.salesCloseAt).getTime()) return 'closed';
+  return 'open';
+}
+
+export function assertSalesWindowOpen(
+  rules: Pick<OfferingBookingRules, 'salesOpenAt' | 'salesCloseAt'>,
+  now = new Date()
+): void {
+  const status = salesWindowStatus(rules, now);
+  if (status === 'upcoming') throw new BookingRuleValidationError('Booking is not open yet.');
+  if (status === 'closed') throw new BookingRuleValidationError('Booking is closed.');
 }
 
 export interface BookingConfigurationVariant {
@@ -184,6 +203,8 @@ export function buildBookingConfiguration(input: {
     timeSelection: {
       mode: input.rules.timeSelectionMode,
       timezone: input.rules.timezone,
+      dateSelection: input.rules.dateSelection ?? 'customer',
+      fixedDate: input.rules.fixedDate ?? null,
       startTimeSelection: input.rules.fixedStartTime ? 'fixed' : 'customer',
       endTimeSelection: fixedEndTime ? 'fixed' : 'customer',
       fixedStartTime: input.rules.fixedStartTime ?? null,
@@ -204,6 +225,11 @@ export function buildBookingConfiguration(input: {
             }
           }
         : {})
+    },
+    salesWindow: {
+      opensAt: input.rules.salesOpenAt ?? null,
+      closesAt: input.rules.salesCloseAt ?? null,
+      status: salesWindowStatus(input.rules)
     },
     participants: { min: input.rules.minParticipants, max: input.rules.maxParticipants, step: 1 },
     pricing: {

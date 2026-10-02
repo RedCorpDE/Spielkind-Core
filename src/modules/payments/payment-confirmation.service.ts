@@ -2,6 +2,7 @@ import type { PoolClient } from 'pg';
 import { withTransaction } from '../../db/transaction.js';
 import { transitionBookingInTransaction } from '../bookings/booking-lifecycle.service.js';
 import { ProviderSyncConflictError } from '../bookings/booking.errors.js';
+import { transitionPaymentStateInTransaction } from './payment-lifecycle.service.js';
 
 interface PaymentRecord {
   payment_id: string;
@@ -134,6 +135,10 @@ export async function confirmStripePayment(input: ConfirmStripePaymentInput): Pr
       [payment.payment_id, input.providerPaymentId ?? null, input.providerCheckoutId ?? null,
         JSON.stringify({ lastStripeEventId: input.externalEventId, lastStripeEventType: input.eventType })]
     );
+    await transitionPaymentStateInTransaction(client, booking.booking_id, 'paid', {
+      actorType: 'stripe', source: input.eventType, reason: 'verified_provider_payment',
+      externalEventId: input.externalEventId, paymentId: payment.payment_id
+    });
 
     if (payment.status === 'succeeded' && booking.status === 'confirmed') {
       return { bookingId: booking.booking_id, paymentId: payment.payment_id, status: 'already_confirmed', consumptionsCreated: 0 };
@@ -220,9 +225,9 @@ export async function confirmStripePayment(input: ConfirmStripePaymentInput): Pr
       [hold.reservation_hold_id]
     );
     await client.query(`UPDATE bookings SET paid_amount = $2, updated_at = now() WHERE booking_id = $1`, [booking.booking_id, expectedAmount / 100]);
-    await client.query(`UPDATE bookings SET payment_status = 'paid' WHERE booking_id = $1`, [booking.booking_id]);
     await transitionBookingInTransaction(client, booking.booking_id, 'confirmed', {
-      paymentId: payment.payment_id, provider: 'stripe'
+      actorType: 'stripe', source: input.eventType, reason: 'payment_succeeded',
+      paymentId: payment.payment_id, provider: 'stripe', externalEventId: input.externalEventId
     });
     await emitOutbox(client, 'payment', payment.payment_id, 'payment.succeeded', {
       paymentId: payment.payment_id, bookingId: booking.booking_id, amountMinor: expectedAmount,
@@ -275,20 +280,24 @@ export async function updateStripePaymentState(input: UpdateStripePaymentStateIn
           ...(input.failureMessage ? { failureMessage: input.failureMessage } : {})
         })]
     );
-    await client.query(
-      `UPDATE bookings SET payment_status = CASE
-         WHEN $2 = 'processing' THEN 'processing'
-         WHEN $2 = 'failed' THEN 'failed'
-         ELSE payment_status END
-       WHERE booking_id = $1`,
-      [payment.booking_id, input.outcome]
+    await transitionPaymentStateInTransaction(
+      client,
+      payment.booking_id,
+      input.outcome === 'processing' ? 'processing' : input.outcome === 'failed' ? 'failed' : 'unpaid',
+      {
+        actorType: 'stripe', source: input.eventType,
+        reason: input.failureMessage ?? `stripe_${input.outcome}`,
+        externalEventId: input.externalEventId, paymentId: payment.payment_id
+      }
     );
     if (input.outcome === 'processing') return { bookingId: payment.booking_id, paymentId: payment.payment_id };
 
     const target = input.outcome === 'cancelled' ? 'expired' : 'payment_failed';
     if (bookingStatus === 'payment_pending' || bookingStatus === 'payment_failed') {
       await transitionBookingInTransaction(client, payment.booking_id, target, {
-        paymentId: payment.payment_id, provider: 'stripe', eventType: input.eventType
+        actorType: 'stripe', source: input.eventType, reason: `payment_${input.outcome}`,
+        paymentId: payment.payment_id, provider: 'stripe', eventType: input.eventType,
+        externalEventId: input.externalEventId
       });
     }
     await client.query(

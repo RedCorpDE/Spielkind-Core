@@ -1,6 +1,7 @@
 import { pool } from '../../db/pool.js';
 import { buildBookingConfiguration } from '../bookings/booking-configuration.service.js';
 import type { BookingOffering, OfferingBookingRules } from '../bookings/booking-intent.js';
+import { policySummary, type CancellationPolicySnapshot } from '../cancellations/cancellation-policy.service.js';
 
 interface ProductRow {
   product_id: string;
@@ -12,6 +13,7 @@ interface ProductRow {
   currency: string;
   vat_basis_points: number;
   variants: unknown;
+  cancellation_policy: unknown;
 }
 
 interface ProductOfferingRow extends ProductRow {
@@ -23,6 +25,10 @@ interface ProductOfferingRow extends ProductRow {
   offering_booking_provider: 'core' | 'regiondo';
   time_selection_mode: OfferingBookingRules['timeSelectionMode'];
   timezone: string;
+  date_selection: OfferingBookingRules['dateSelection'];
+  fixed_date: string | Date | null;
+  sales_open_at: string | null;
+  sales_close_at: string | null;
   fixed_start_time: string | null;
   fixed_end_time: string | null;
   earliest_start_time: string | null;
@@ -96,6 +102,8 @@ function mapOptions(value: unknown): CatalogOption[] {
 }
 
 function mapProduct(row: ProductRow) {
+  const rawPolicy = row.cancellation_policy && typeof row.cancellation_policy === 'object'
+    ? row.cancellation_policy as CancellationPolicySnapshot : null;
   return {
     id: row.product_id,
     title: row.title,
@@ -104,6 +112,7 @@ function mapProduct(row: ProductRow) {
     bookingProvider: row.booking_provider,
     price: { amount: Number(row.price_minor), currency: row.currency },
     vatBasisPoints: row.vat_basis_points,
+    ...(rawPolicy ? { cancellationPolicy: { ...rawPolicy, summary: policySummary(rawPolicy) } } : {}),
     variants: Array.isArray(row.variants) ? row.variants : []
   };
 }
@@ -131,10 +140,31 @@ function mapProductOffering(row: ProductOfferingRow) {
   };
 }
 
+function databaseDateToLocalDate(value: string | Date | null): string | null {
+  if (!value) return null;
+  if (value instanceof Date) {
+    if (!Number.isFinite(value.getTime())) return null;
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, '0');
+    const day = String(value.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+  const match = /^(\d{4}-\d{2}-\d{2})/.exec(value);
+  return match?.[1] ?? null;
+}
+
 function selectProductFields(providerExpression = 'product.booking_provider') {
   return `SELECT
   product.product_id, product.title, product.description, product.image_url,
   ${providerExpression} AS booking_provider, product.price_minor, product.currency, product.vat_basis_points,
+  (SELECT jsonb_build_object(
+      'policyId', policy.cancellation_policy_id, 'name', policy.name, 'description', policy.description,
+      'rules', policy.rules,
+      'noShow', jsonb_build_object('gracePeriodMinutes', policy.no_show_grace_period_minutes,
+        'feeType', policy.no_show_fee_type, 'feeValue', policy.no_show_fee_value)
+    ) FROM cancellation_policies policy
+    WHERE policy.cancellation_policy_id = product.cancellation_policy_id
+      AND policy.is_active = true AND policy.archived_at IS NULL) AS cancellation_policy,
   COALESCE((
     SELECT jsonb_agg(jsonb_build_object(
       'id', variant.variant_id,
@@ -147,7 +177,15 @@ function selectProductFields(providerExpression = 'product.booking_provider') {
         'allowedWeekdays', variant.allowed_weekdays,
         'localStartTime', to_char(variant.local_start_time, 'HH24:MI'),
         'localEndTime', to_char(variant.local_end_time, 'HH24:MI')
-      )
+      ),
+      'cancellationPolicy', (SELECT jsonb_build_object(
+        'policyId', policy.cancellation_policy_id, 'name', policy.name, 'description', policy.description,
+        'rules', policy.rules,
+        'noShow', jsonb_build_object('gracePeriodMinutes', policy.no_show_grace_period_minutes,
+          'feeType', policy.no_show_fee_type, 'feeValue', policy.no_show_fee_value)
+        ) FROM cancellation_policies policy
+        WHERE policy.cancellation_policy_id = COALESCE(variant.cancellation_policy_id, product.cancellation_policy_id)
+          AND policy.is_active = true AND policy.archived_at IS NULL)
     ) ORDER BY variant.title NULLS LAST)
     FROM product_variants variant
     WHERE variant.product_id = product.product_id
@@ -187,7 +225,8 @@ export async function getCatalogProductOffering(productId: string, locationId: s
     `${selectProductFields('offering.booking_provider')},
        offering.product_offering_id, offering.location_id, location.title AS location_name, offering.enabled,
        offering.booking_provider AS offering_booking_provider,
-       offering.time_selection_mode, offering.timezone, offering.fixed_start_time, offering.fixed_end_time,
+       offering.time_selection_mode, offering.timezone, offering.date_selection, offering.fixed_date,
+       offering.sales_open_at, offering.sales_close_at, offering.fixed_start_time, offering.fixed_end_time,
        offering.earliest_start_time, offering.latest_start_time, offering.start_interval_minutes,
        offering.min_participants, offering.max_participants,
        offering.min_duration_minutes, offering.max_duration_minutes,
@@ -225,7 +264,8 @@ export async function getCatalogProductOffering(productId: string, locationId: s
 }
 
 function mapOfferingRules(row: Pick<ProductOfferingRow,
-  'time_selection_mode' | 'timezone' | 'fixed_start_time' | 'fixed_end_time'
+  'time_selection_mode' | 'timezone' | 'date_selection' | 'fixed_date' | 'sales_open_at' | 'sales_close_at'
+  | 'fixed_start_time' | 'fixed_end_time'
   | 'earliest_start_time' | 'latest_start_time' | 'start_interval_minutes' | 'min_participants' | 'max_participants'
   | 'min_duration_minutes' | 'max_duration_minutes' | 'duration_step_minutes'
   | 'default_duration_minutes' | 'allowed_duration_minutes' | 'min_advance_minutes'
@@ -233,6 +273,10 @@ function mapOfferingRules(row: Pick<ProductOfferingRow,
   return {
     timeSelectionMode: row.time_selection_mode ?? 'start_end',
     timezone: row.timezone ?? 'Europe/Berlin',
+    dateSelection: row.date_selection ?? 'customer',
+    fixedDate: databaseDateToLocalDate(row.fixed_date),
+    salesOpenAt: row.sales_open_at ? new Date(row.sales_open_at).toISOString() : null,
+    salesCloseAt: row.sales_close_at ? new Date(row.sales_close_at).toISOString() : null,
     fixedStartTime: row.fixed_start_time?.slice(0, 5) ?? null,
     fixedEndTime: row.fixed_end_time?.slice(0, 5) ?? null,
     earliestStartTime: row.earliest_start_time?.slice(0, 5) ?? null,
@@ -257,7 +301,8 @@ export async function getBookingOffering(offeringId: string): Promise<BookingOff
   const result = await pool.query<ProductOfferingRow>(
     `SELECT offering.product_offering_id, offering.location_id, offering.product_id,
             offering.enabled, offering.booking_provider AS offering_booking_provider,
-            offering.time_selection_mode, offering.timezone, offering.fixed_start_time, offering.fixed_end_time,
+            offering.time_selection_mode, offering.timezone, offering.date_selection, offering.fixed_date,
+            offering.sales_open_at, offering.sales_close_at, offering.fixed_start_time, offering.fixed_end_time,
             offering.earliest_start_time, offering.latest_start_time, offering.start_interval_minutes,
             offering.min_participants, offering.max_participants,
             offering.min_duration_minutes, offering.max_duration_minutes,

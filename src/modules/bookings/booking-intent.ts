@@ -3,6 +3,8 @@ export type BookingProviderType = 'core' | 'regiondo';
 export type TimeSelectionMode = 'date_range' | 'start_end' | 'start_duration' | 'fixed_duration';
 export type PricingMode = 'once' | 'per_quantity' | 'per_date_unit' | 'per_date_unit_per_quantity';
 export type DateRangeBillingUnit = 'nights' | 'calendar_days';
+export type DateSelection = 'customer' | 'fixed';
+export type SalesWindowStatus = 'upcoming' | 'open' | 'closed';
 
 export interface BookingIntentOption {
   optionId: string;
@@ -32,6 +34,10 @@ export interface BookingIntent {
 export interface OfferingBookingRules {
   timeSelectionMode: TimeSelectionMode;
   timezone: string;
+  dateSelection?: DateSelection;
+  fixedDate?: string | null;
+  salesOpenAt?: string | null;
+  salesCloseAt?: string | null;
   fixedStartTime?: string | null;
   fixedEndTime?: string | null;
   earliestStartTime?: string | null;

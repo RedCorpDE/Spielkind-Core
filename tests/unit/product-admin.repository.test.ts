@@ -71,7 +71,8 @@ describe('Core-native product creation repository', () => {
       'https://example.com/product.jpg',
       2000,
       'EUR',
-      1900
+      1900,
+      null
     ]);
   });
 
@@ -228,7 +229,7 @@ describe('Core-native product creation repository', () => {
     expect(poolQuery.mock.calls[1][0]).toContain('NULL, NULL, NULL');
     expect(poolQuery.mock.calls[1][1]).toEqual([
       productRow.product_id, '8 Hours', 3500, 'EUR', null,
-      true, false, null, null, null
+      true, false, null, null, null, null
     ]);
   });
 

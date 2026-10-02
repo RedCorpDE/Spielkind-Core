@@ -47,7 +47,13 @@ describe('external task intake route', () => {
       expect(response.statusCode).toBe(401);
       expect(response.json()).toEqual({
         ok: false,
-        error: 'Invalid external task webhook authentication header.'
+        error: 'Invalid external task webhook authentication header.',
+        code: 'AUTHENTICATION_REQUIRED',
+        message: 'Invalid external task webhook authentication header.',
+        errorDetails: {
+          code: 'AUTHENTICATION_REQUIRED',
+          message: 'Invalid external task webhook authentication header.'
+        }
       });
       expect(createExternalClientEmailTaskMock).not.toHaveBeenCalled();
     } finally {
@@ -263,7 +269,13 @@ describe('external task intake route', () => {
       expect(response.statusCode).toBe(409);
       expect(response.json()).toEqual({
         ok: false,
-        error: 'externalMessageId was already processed with a different payload.'
+        error: 'externalMessageId was already processed with a different payload.',
+        code: 'CONFLICT',
+        message: 'externalMessageId was already processed with a different payload.',
+        errorDetails: {
+          code: 'CONFLICT',
+          message: 'externalMessageId was already processed with a different payload.'
+        }
       });
     } finally {
       await app.close();

@@ -4,16 +4,15 @@ import { regiondoClient } from '../regiondo/regiondo.client.js';
 import { normalizeRegiondoBookingImport } from './booking-normalizer.js';
 import { importNormalizedRegiondoBooking } from './booking.repository.js';
 import { bookingProviderRegistry } from './booking-provider.js';
+import { transitionBooking } from './booking-lifecycle.service.js';
 
 export async function cancelBookingLocally(bookingId: string): Promise<boolean> {
-  const result = await pool.query(
-    `UPDATE bookings
-     SET status = 'canceled', updated_at = now()
-     WHERE booking_id = $1`,
-    [bookingId]
-  );
-
-  return Boolean(result.rowCount);
+  const existing = await pool.query(`SELECT 1 FROM bookings WHERE booking_id = $1`, [bookingId]);
+  if (!existing.rowCount) return false;
+  await transitionBooking(bookingId, 'cancelled', {
+    actorType: 'admin', source: 'dashboard', reason: 'local_cancellation'
+  });
+  return true;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

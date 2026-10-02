@@ -17,7 +17,9 @@ describe('client API auth guard', () => {
     expect(response.json()).toEqual({
       ok: false,
       error: 'Missing bearer token.',
-      message: 'Missing bearer token.'
+      code: 'AUTHENTICATION_REQUIRED',
+      message: 'Missing bearer token.',
+      errorDetails: { code: 'AUTHENTICATION_REQUIRED', message: 'Missing bearer token.' }
     });
   });
 

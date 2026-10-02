@@ -10,22 +10,32 @@ function opaqueToken(): string {
   return randomBytes(48).toString('base64url');
 }
 
-export async function createCheckoutToken(bookingId: string, expiresAt: string): Promise<string> {
+export async function createCheckoutToken(
+  bookingId: string,
+  expiresAt: string,
+  authenticatedClientId: string | null = null
+): Promise<string> {
   const token = opaqueToken();
   await pool.query(
-    `INSERT INTO booking_checkout_sessions (booking_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
-    [bookingId, hashWebToken(token), expiresAt]
+    `INSERT INTO booking_checkout_sessions (booking_id, token_hash, expires_at, authenticated_client_id)
+     VALUES ($1, $2, $3, $4)`,
+    [bookingId, hashWebToken(token), expiresAt, authenticatedClientId]
   );
   return token;
 }
 
-export async function validateCheckoutToken(bookingId: string, token: string): Promise<boolean> {
-  const result = await pool.query(
-    `SELECT 1 FROM booking_checkout_sessions
+export async function validateCheckoutToken(
+  bookingId: string,
+  token: string
+): Promise<{ authenticatedClientId: string | null } | null> {
+  const result = await pool.query<{ authenticated_client_id: string | null }>(
+    `SELECT authenticated_client_id FROM booking_checkout_sessions
      WHERE booking_id = $1 AND token_hash = $2 AND expires_at > now() LIMIT 1`,
     [bookingId, hashWebToken(token)]
   );
-  return Boolean(result.rowCount);
+  return result.rowCount
+    ? { authenticatedClientId: result.rows[0].authenticated_client_id }
+    : null;
 }
 
 export async function createManagementToken(bookingId: string): Promise<string> {

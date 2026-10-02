@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { assertBookingTransition, canTransitionBooking } from '../../src/modules/bookings/booking-lifecycle.service.js';
+import {
+  assertBookingTransition,
+  canTransitionBooking,
+  getAllowedBookingTransitions,
+  normalizeLifecycleStatus
+} from '../../src/modules/bookings/booking-lifecycle.service.js';
 import { InvalidBookingTransitionError } from '../../src/modules/bookings/booking.errors.js';
 
 describe('booking lifecycle', () => {
@@ -7,6 +12,10 @@ describe('booking lifecycle', () => {
     expect(canTransitionBooking('payment_pending', 'confirmed')).toBe(true);
     expect(canTransitionBooking('confirmed', 'checked_in')).toBe(true);
     expect(canTransitionBooking('checked_in', 'completed')).toBe(true);
+    expect(canTransitionBooking('confirmed', 'no_show')).toBe(true);
+    expect(canTransitionBooking('checked_in', 'in_progress')).toBe(true);
+    expect(getAllowedBookingTransitions('confirmed')).toContain('cancelled');
+    expect(normalizeLifecycleStatus('no_show')).toBe('no_show');
   });
 
   it('rejects arbitrary state changes', () => {

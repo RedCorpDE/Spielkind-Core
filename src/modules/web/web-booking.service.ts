@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { pool } from '../../db/pool.js';
 import { getClientBooking } from '../../client-api/repository.js';
-import { getCancellationQuote, requestCancellation, type CancellationQuote } from '../cancellations/cancellation.service.js';
+import { getCancellationQuote, getNoShowQuote, requestCancellation, type CancellationQuote } from '../cancellations/cancellation.service.js';
 import { paymentProviderRegistry } from '../payments/payment-provider.registry.js';
 import { recordRefund } from '../payments/refund.service.js';
+import { transitionBooking } from '../bookings/booking-lifecycle.service.js';
+import { transitionPaymentState } from '../payments/payment-lifecycle.service.js';
 
 export interface WebBookingDto {
   id: string;
@@ -112,17 +114,32 @@ export async function cancelWebBooking(input: {
   actorClientId?: string;
   actorId?: string;
   reason?: string;
+  reasonCode?: 'customer_request' | 'location_closed' | 'technical_issue' | 'duplicate' | 'staff_override' | 'other';
+  refundAmountOverride?: number;
 }): Promise<WebBookingDto> {
   const quote = await getCancellationQuote(input.bookingId);
-  const result = await requestCancellation(input.bookingId);
+  if (!quote.canCancel) throw new Error(quote.reason);
+  if (input.refundAmountOverride !== undefined &&
+      (!Number.isSafeInteger(input.refundAmountOverride) || input.refundAmountOverride < 0 || input.refundAmountOverride > quote.refundableAmount)) {
+    throw new Error('Refund override must be within the remaining refundable paid amount.');
+  }
+  const providerResult = await pool.query<{ booking_provider: 'core' | 'regiondo' }>(
+    `SELECT booking_provider FROM bookings WHERE booking_id = $1`, [input.bookingId]
+  );
+  const isRegiondo = providerResult.rows[0]?.booking_provider === 'regiondo';
+  if (isRegiondo) await requestCancellation(input.bookingId);
+  const actualRefundAmount = input.refundAmountOverride ?? quote.refundAmount;
   await pool.query(
-    `UPDATE bookings SET cancelled_by_client_id = $2, cancellation_reason = $3,
+    `UPDATE bookings SET cancelled_by_client_id = $2, cancelled_by_admin_user_id = $3,
+       cancelled_by_type = $4, cancellation_reason_code = $5, cancellation_note = $6, cancellation_reason = $6,
        cancelled_at = CASE WHEN status IN ('cancelled', 'canceled') THEN COALESCE(cancelled_at, now()) ELSE cancelled_at END,
        updated_at = now() WHERE booking_id = $1`,
-    [input.bookingId, input.actorClientId ?? null, input.reason?.trim() || null]
+    [input.bookingId, input.actorClientId ?? null, input.actorId ?? null,
+      input.actorType === 'staff' ? 'admin' : 'customer', input.reasonCode ?? (input.actorType === 'staff' ? 'other' : 'customer_request'),
+      input.reason?.trim() || null]
   );
 
-  if (result.status === 'cancel_requested' && quote.refundableAmount > 0) {
+  if (!isRegiondo && actualRefundAmount > 0) {
     const paymentResult = await pool.query<{
       payment_id: string; provider_payment_id: string | null; amount_minor: string | number; currency: string;
     }>(
@@ -133,11 +150,15 @@ export async function cancelWebBooking(input: {
     );
     const payment = paymentResult.rows[0];
     if (payment?.provider_payment_id) {
-      await pool.query(`UPDATE bookings SET payment_status = 'refund_pending' WHERE booking_id = $1`, [input.bookingId]);
-      const idempotencyKey = `cancel:${input.bookingId}:${quote.refundableAmount}`;
+      await transitionPaymentState(input.bookingId, 'refund_pending', {
+        actorType: input.actorType === 'staff' ? 'admin' : 'client',
+        actorId: input.actorId ?? input.actorClientId,
+        source: 'booking_cancellation', reason: input.reason ?? 'cancellation_requested'
+      });
+      const idempotencyKey = `cancel:${input.bookingId}:${actualRefundAmount}`;
       const providerRefund = await paymentProviderRegistry.get('stripe').refund({
         externalPaymentId: payment.provider_payment_id,
-        amountMinor: quote.refundableAmount,
+        amountMinor: actualRefundAmount,
         currency: payment.currency,
         idempotencyKey,
         bookingId: input.bookingId
@@ -145,33 +166,105 @@ export async function cancelWebBooking(input: {
       const status = providerRefund.status === 'succeeded' ? 'succeeded' : 'processing';
       await recordRefund({
         paymentId: payment.payment_id, bookingId: input.bookingId, provider: 'stripe',
-        providerRefundId: providerRefund.externalRefundId, amountMinor: quote.refundableAmount,
+        providerRefundId: providerRefund.externalRefundId, amountMinor: actualRefundAmount,
         currency: payment.currency, reason: input.reason, status, idempotencyKey
       });
-      await pool.query(
-        `UPDATE bookings SET payment_status = $2,
-         status = 'cancelled', cancelled_at = COALESCE(cancelled_at, now()), updated_at = now()
-         WHERE booking_id = $1`,
-        [input.bookingId, status === 'succeeded' ? 'refunded' : 'refund_pending']
-      );
+      await transitionBooking(input.bookingId, 'cancelled', {
+        actorType: input.actorType === 'staff' ? 'admin' : 'client',
+        actorId: input.actorId ?? input.actorClientId,
+        source: 'booking_cancellation', reason: input.reason ?? 'cancellation_requested'
+      });
       await pool.query(`DELETE FROM consumptions WHERE booking_id = $1 AND dt_to > now()`, [input.bookingId]);
       await pool.query(
         `INSERT INTO web_audit_events (action, actor_type, actor_id, booking_id, details)
          VALUES ('stripe.refund.create', 'stripe', NULL, $1, $2::jsonb)`,
-        [input.bookingId, JSON.stringify({ refundId: providerRefund.externalRefundId, amountMinor: quote.refundableAmount })]
+        [input.bookingId, JSON.stringify({ refundId: providerRefund.externalRefundId, amountMinor: actualRefundAmount })]
       );
+    } else {
+      throw new Error('A refundable Stripe payment was not found.');
     }
+  }
+
+  if (!isRegiondo) {
+    await transitionBooking(input.bookingId, 'cancelled', {
+      actorType: input.actorType === 'staff' ? 'admin' : 'client',
+      actorId: input.actorId ?? input.actorClientId,
+      source: 'booking_cancellation', reason: input.reason ?? 'cancellation_requested'
+    });
+    await pool.query(`DELETE FROM consumptions WHERE booking_id = $1 AND dt_to > now()`, [input.bookingId]);
+    await pool.query(`UPDATE reservation_holds SET status = 'released', updated_at = now()
+      WHERE booking_id = $1 AND status = 'active'`, [input.bookingId]);
+    await pool.query(`UPDATE access_credentials SET status = 'revoked', revoked_at = COALESCE(revoked_at, now()), updated_at = now()
+      WHERE booking_id = $1 AND status IN ('pending', 'active')`, [input.bookingId]);
   }
 
   await pool.query(
     `INSERT INTO web_audit_events (action, actor_type, actor_id, booking_id, client_id, details)
-     VALUES ($1, $2, $3, $4, $3, $5::jsonb)`,
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
     [input.actorType === 'guest' ? 'guest.booking.cancel' : input.actorType === 'staff' ? 'staff.booking.cancel' : 'client.booking.cancel',
-      input.actorType, input.actorId ?? input.actorClientId ?? null, input.bookingId, JSON.stringify({ reason: input.reason ?? null })]
+      input.actorType, input.actorId ?? input.actorClientId ?? null, input.bookingId,
+      input.actorType === 'client' ? input.actorClientId ?? null : null,
+      JSON.stringify({ reason: input.reason ?? null, reasonCode: input.reasonCode ?? null,
+        policyRefundAmount: quote.refundAmount, actualRefundAmount,
+        override: input.refundAmountOverride !== undefined })]
   );
   const booking = await getWebBooking(input.bookingId);
   if (!booking) throw new Error('Booking disappeared after cancellation.');
   return booking;
+}
+
+export async function markNoShowBooking(input: {
+  bookingId: string;
+  actorId: string;
+  note?: string;
+}): Promise<{ booking: WebBookingDto; quote: Awaited<ReturnType<typeof getNoShowQuote>> }> {
+  const quote = await getNoShowQuote(input.bookingId);
+  if (!quote.canCancel) throw new Error(quote.reason);
+  if (quote.refundAmount > 0) {
+    const paymentResult = await pool.query<{
+      payment_id: string; provider_payment_id: string | null; currency: string;
+    }>(
+      `SELECT payment_id, provider_payment_id, currency FROM payments
+       WHERE booking_id = $1 AND provider = 'stripe' AND status IN ('succeeded', 'partially_refunded')
+       ORDER BY created_at DESC LIMIT 1`, [input.bookingId]
+    );
+    const payment = paymentResult.rows[0];
+    if (!payment?.provider_payment_id) throw new Error('A refundable Stripe payment was not found.');
+    await transitionPaymentState(input.bookingId, 'refund_pending', {
+      actorType: 'admin', actorId: input.actorId, source: 'booking_no_show',
+      reason: input.note?.trim() || 'no_show'
+    });
+    const idempotencyKey = `no-show:${input.bookingId}:${quote.refundAmount}`;
+    const providerRefund = await paymentProviderRegistry.get('stripe').refund({
+      externalPaymentId: payment.provider_payment_id, amountMinor: quote.refundAmount,
+      currency: payment.currency, idempotencyKey, bookingId: input.bookingId
+    });
+    await recordRefund({
+      paymentId: payment.payment_id, bookingId: input.bookingId, provider: 'stripe',
+      providerRefundId: providerRefund.externalRefundId, amountMinor: quote.refundAmount,
+      currency: payment.currency, reason: 'no_show',
+      status: providerRefund.status === 'succeeded' ? 'succeeded' : 'processing', idempotencyKey,
+      finalizeBooking: false
+    });
+  }
+  await pool.query(
+    `UPDATE bookings SET no_show_at = COALESCE(no_show_at, now()),
+       no_show_by_user_id = $2, cancellation_reason_code = 'no_show', cancellation_note = $3,
+       updated_at = now() WHERE booking_id = $1`,
+    [input.bookingId, input.actorId, input.note?.trim() || null]
+  );
+  await transitionBooking(input.bookingId, 'no_show', {
+    actorType: 'admin', actorId: input.actorId, source: 'dashboard',
+    reason: input.note?.trim() || 'no_show'
+  });
+  await pool.query(
+    `INSERT INTO web_audit_events (action, actor_type, actor_id, booking_id, details)
+     VALUES ('staff.booking.no_show', 'staff', $2, $1, $3::jsonb)`,
+    [input.bookingId, input.actorId, JSON.stringify({ policyRefundAmount: quote.refundAmount, resourcesReleased: false })]
+  );
+  const booking = await getWebBooking(input.bookingId);
+  if (!booking) throw new Error('Booking disappeared after no-show update.');
+  return { booking, quote };
 }
 
 export async function webBookingStatus(bookingId: string) {

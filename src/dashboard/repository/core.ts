@@ -336,7 +336,10 @@ function mapDbBookingStatus(status: string): DashboardBookingExternalStatus {
     case 'rejected':
       return 'Rejected';
     case 'canceled':
+    case 'cancelled':
       return 'Canceled';
+    case 'no_show':
+      return 'No-Show';
     case 'unknown':
       return 'Unknown';
     default:
@@ -356,6 +359,8 @@ export function mapDashboardExternalStatusToDb(status: DashboardBookingExternalS
       return 'rejected';
     case 'Canceled':
       return 'canceled';
+    case 'No-Show':
+      return 'no_show';
     case 'Unknown':
       return 'unknown';
     default:

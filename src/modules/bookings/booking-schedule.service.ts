@@ -1,6 +1,6 @@
 import { pool } from '../../db/pool.js';
 import type { BookingIntent, BookingOffering, OfferingBookingRules } from './booking-intent.js';
-import { BookingRuleValidationError, durationMinutes, validateBookingRules } from './booking-configuration.service.js';
+import { assertSalesWindowOpen, BookingRuleValidationError, durationMinutes, validateBookingRules } from './booking-configuration.service.js';
 import { getVariantEligibility } from './variant-eligibility.service.js';
 
 const CLOCK_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
@@ -59,6 +59,11 @@ function localDate(date: Date, timezone: string): string {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
+function addLocalDays(date: string, days: number): string {
+  const [year, month, day] = date.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
+}
+
 function clockMinutes(value: string): number {
   const [hour, minute] = value.slice(0, 5).split(':').map(Number);
   return hour * 60 + minute;
@@ -103,7 +108,10 @@ function withLocalClock(
 ): string {
   const parsed = new Date(value);
   if (!Number.isFinite(parsed.getTime())) throw new BookingRuleValidationError('Booking times are invalid.');
-  const clock = fixedTime?.slice(0, 5) ?? requestedTime;
+  const parsedLocal = requestedDate ? localParts(parsed, timezone) : null;
+  const clock = fixedTime?.slice(0, 5)
+    ?? requestedTime
+    ?? (parsedLocal ? `${parsedLocal.hour}:${parsedLocal.minute}` : undefined);
   return clock
     ? localDateTimeToInstant(requestedDate ?? localDate(parsed, timezone), clock, timezone)
     : parsed.toISOString();
@@ -119,6 +127,14 @@ export function resolveBookingSchedule(input: {
 }): ResolvedBookingSchedule {
   const { intent, rules } = input;
   assertTimezone(rules.timezone);
+  assertSalesWindowOpen(rules, input.now);
+  if (rules.dateSelection === 'fixed' && !rules.fixedDate) {
+    throw new BookingRuleValidationError('A fixed booking date is required for this offering.');
+  }
+  if (rules.dateSelection === 'fixed' && intent.startDate && intent.startDate !== rules.fixedDate) {
+    throw new BookingRuleValidationError(`Booking date must be ${rules.fixedDate}.`);
+  }
+  const resolvedStartDate = rules.dateSelection === 'fixed' ? rules.fixedDate ?? undefined : intent.startDate;
   const optionDelta = input.optionDurationDeltaMinutes ?? 0;
   const requestedDuration = intent.durationMinutes ?? null;
   const durationControlled = rules.timeSelectionMode === 'fixed_duration' || rules.timeSelectionMode === 'start_duration';
@@ -137,10 +153,14 @@ export function resolveBookingSchedule(input: {
   }
 
   let startsAt = withLocalClock(
-    intent.startAt, intent.startDate, intent.startTime, rules.fixedStartTime ?? null, rules.timezone
+    intent.startAt, resolvedStartDate, intent.startTime, rules.fixedStartTime ?? null, rules.timezone
   );
+  const resolvedStartLocalDate = localDate(new Date(startsAt), rules.timezone);
+  const requestedEndDate = rules.dateSelection === 'fixed'
+    ? rules.fixedDate ?? undefined
+    : intent.endDate;
   let endsAt = withLocalClock(
-    intent.endAt, intent.endDate, intent.endTime, durationControlled ? null : rules.fixedEndTime ?? null, rules.timezone
+    intent.endAt, requestedEndDate, intent.endTime, durationControlled ? null : rules.fixedEndTime ?? null, rules.timezone
   );
   if (rules.timeSelectionMode === 'fixed_duration' || rules.timeSelectionMode === 'start_duration') {
     if (effectiveDuration === null) {
@@ -162,6 +182,10 @@ export function resolveBookingSchedule(input: {
         throw new BookingRuleValidationError(`Start must use ${interval}-minute intervals.`);
       }
     }
+  } else if (rules.dateSelection === 'fixed' && new Date(endsAt) <= new Date(startsAt)) {
+    const endClock = rules.fixedEndTime ?? intent.endTime;
+    if (!endClock) throw new BookingRuleValidationError('endAt must be after startAt.');
+    endsAt = localDateTimeToInstant(addLocalDays(resolvedStartLocalDate, 1), endClock, rules.timezone);
   }
 
   const resolvedIntent: BookingIntent = { ...intent, startAt: startsAt, endAt: endsAt };

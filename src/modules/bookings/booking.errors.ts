@@ -23,6 +23,21 @@ export class InvalidBookingTransitionError extends DomainError {
   }
 }
 
+export class InvalidPaymentTransitionError extends DomainError {
+  constructor(from: string, to: string) {
+    super('INVALID_PAYMENT_TRANSITION', `Payment cannot transition from ${from} to ${to}.`);
+  }
+}
+
+export class InvalidBookingPaymentStateError extends DomainError {
+  constructor(bookingStatus: string, paymentStatus: string) {
+    super(
+      'INVALID_BOOKING_PAYMENT_STATE',
+      `Booking status ${bookingStatus} is incompatible with payment status ${paymentStatus}.`
+    );
+  }
+}
+
 export class HoldExpiredError extends DomainError {
   constructor(message = 'The reservation hold has expired.') {
     super('HOLD_EXPIRED', message);

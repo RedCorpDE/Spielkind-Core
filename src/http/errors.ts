@@ -18,6 +18,7 @@ import { RefundAmountExceededError } from '../modules/payments/refund.service.js
 import { PricingValidationError } from '../modules/pricing/pricing.service.js';
 import { BookingRuleValidationError } from '../modules/bookings/booking-configuration.service.js';
 import { VariantNotAvailableForScheduleError } from '../modules/bookings/variant-eligibility.service.js';
+import { BookingQuoteError } from '../modules/bookings/booking-quote.service.js';
 
 export class HttpError extends Error {
   constructor(
@@ -38,14 +39,14 @@ export class ValidationHttpError extends HttpError {
 }
 
 export class UnauthorizedHttpError extends HttpError {
-  constructor(message = 'Unauthorized', code = 'AUTH_REQUIRED') {
+  constructor(message = 'Unauthorized', code = 'AUTHENTICATION_REQUIRED') {
     super(401, message, code);
     this.name = 'UnauthorizedHttpError';
   }
 }
 
 export class ForbiddenHttpError extends HttpError {
-  constructor(message = 'Forbidden', code = 'AUTH_INSUFFICIENT_SCOPE') {
+  constructor(message = 'Forbidden', code = 'FORBIDDEN') {
     super(403, message, code);
     this.name = 'ForbiddenHttpError';
   }
@@ -78,11 +79,27 @@ function getRegiondoStatusCode(error: RegiondoApiError): number {
   return 502;
 }
 
+function compatibleErrorBody(
+  code: string,
+  message: string,
+  extra: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    ok: false,
+    error: message,
+    code,
+    message,
+    errorDetails: { code, message },
+    ...extra
+  };
+}
+
 function getStatusCode(error: Error): number {
   if (error instanceof HttpError) return error.statusCode;
   if (error instanceof DashboardNotFoundError) return 404;
   if (error instanceof DashboardConflictError || error instanceof OverbookingError || error instanceof MissingProductResourceMappingError) return 409;
   if (error instanceof VariantNotAvailableForScheduleError) return 409;
+  if (error instanceof BookingQuoteError) return error.code === 'OFFERING_NOT_FOUND' ? 404 : 409;
   if (error instanceof DashboardValidationError || error instanceof RegiondoSyncValidationError || error instanceof RegiondoWebhookValidationError || error instanceof PricingValidationError || error instanceof BookingRuleValidationError) return 400;
   if (error instanceof RegiondoPurchaseRecoveryRequiredError) return 502;
   if (error instanceof RegiondoApiError) return getRegiondoStatusCode(error);
@@ -163,24 +180,38 @@ export function registerErrorHandler() {
         });
         return;
       }
-      reply.status(error.statusCode).send({
-        ok: false,
-        error: error.message,
-        ...((request.url ?? '').startsWith('/api/client') ? { message: error.message } : {})
-      });
+      const code = error.code ?? (error.statusCode === 401 ? 'AUTHENTICATION_REQUIRED'
+        : error.statusCode === 403 ? 'FORBIDDEN'
+          : error.statusCode === 404 ? 'NOT_FOUND'
+            : error.statusCode === 409 ? 'CONFLICT'
+              : error.statusCode >= 500 ? 'INTERNAL_ERROR' : 'VALIDATION_ERROR');
+      reply.status(error.statusCode).send(compatibleErrorBody(code, error.message));
       return;
     }
 
     if ((request.url ?? '').startsWith('/api/web')) {
       const domainCode = error instanceof DomainError ? error.code : null;
       const code = error instanceof VariantNotAvailableForScheduleError
-        ? error.code
+        ? 'INVALID_VARIANT'
+        : error instanceof BookingQuoteError
+          ? error.code === 'OFFERING_NOT_FOUND' ? 'NOT_FOUND' : 'INVALID_VARIANT'
+        : error instanceof BookingRuleValidationError
+          ? error.message.toLowerCase().includes('booking is') ? 'SALES_CLOSED' : 'VALIDATION_ERROR'
+        : error instanceof PricingValidationError
+          ? error.message.toLowerCase().includes('option') ? 'INVALID_OPTION'
+            : error.message.toLowerCase().includes('variant') ? 'INVALID_VARIANT' : 'VALIDATION_ERROR'
         : domainCode === 'BOOKING_NOT_CANCELLABLE' || domainCode === 'INVALID_BOOKING_TRANSITION'
         ? 'BOOKING_CANCELLATION_NOT_ALLOWED'
+        : domainCode === 'INVALID_PAYMENT_TRANSITION' || domainCode === 'INVALID_BOOKING_PAYMENT_STATE'
+          ? domainCode
         : domainCode === 'HOLD_EXPIRED'
           ? 'CHECKOUT_EXPIRED'
           : domainCode === 'INSUFFICIENT_CAPACITY' || error instanceof OverbookingError || error instanceof MissingProductResourceMappingError
-            ? 'AVAILABILITY_UNAVAILABLE'
+            ? 'RESOURCE_UNAVAILABLE'
+            : domainCode === 'PAYMENT_REQUIRED'
+              ? 'PAYMENT_REQUIRES_ACTION'
+              : domainCode === 'PROVIDER_SYNC_CONFLICT'
+                ? 'CONFLICT'
             : error instanceof RefundAmountExceededError
               ? 'REFUND_FAILED'
               : error instanceof RegiondoRateLimitError
@@ -191,6 +222,8 @@ export function registerErrorHandler() {
       const status = code === 'RATE_LIMITED' ? 429
         : code === 'INTERNAL_ERROR' ? 500
           : code === 'PAYMENT_INITIALIZATION_FAILED' ? 502
+            : code === 'NOT_FOUND' ? 404
+              : code === 'VALIDATION_ERROR' || code === 'INVALID_OPTION' || code === 'INVALID_VARIANT' || code === 'SALES_CLOSED' ? 400
             : 409;
       if (status >= 500) request.log.error({ err: error }, 'Web API request failed');
       reply.status(status).send({ error: { code, message: status >= 500 ? 'The request could not be completed.' : error.message } });
@@ -199,22 +232,18 @@ export function registerErrorHandler() {
 
     if (error instanceof DomainError || error instanceof RefundAmountExceededError) {
       const code = error instanceof DomainError ? error.code : 'REFUND_AMOUNT_EXCEEDED';
-      reply.status(error instanceof ProviderUnavailableError ? 503 : 409).send({
-        ok: false,
-        code,
-        error: error.message,
-        ...((request.url ?? '').startsWith('/api/client') ? { message: error.message } : {})
-      });
+      reply.status(error instanceof ProviderUnavailableError ? 503 : 409)
+        .send(compatibleErrorBody(code, error.message));
       return;
     }
 
     if (error instanceof DashboardNotFoundError) {
-      reply.status(404).send({ ok: false, error: error.message });
+      reply.status(404).send(compatibleErrorBody('NOT_FOUND', error.message));
       return;
     }
 
     if (error instanceof DashboardConflictError) {
-      reply.status(409).send({ ok: false, error: error.message });
+      reply.status(409).send(compatibleErrorBody('CONFLICT', error.message));
       return;
     }
 
@@ -222,61 +251,60 @@ export function registerErrorHandler() {
       error instanceof DashboardValidationError ||
       error instanceof PricingValidationError ||
       error instanceof BookingRuleValidationError ||
+      error instanceof BookingQuoteError ||
       error instanceof RegiondoSyncValidationError ||
       error instanceof RegiondoWebhookValidationError
     ) {
-      reply.status(400).send({
-        ok: false,
-        ...(error instanceof BookingRuleValidationError ? { code: 'BOOKING_RULE_INVALID' } : {}),
-        error: error.message,
-        ...((request.url ?? '').startsWith('/api/client') && error instanceof BookingRuleValidationError
-          ? { message: error.message }
-          : {})
-      });
+      const code = error instanceof BookingQuoteError
+        ? error.code === 'OFFERING_NOT_FOUND' ? 'NOT_FOUND' : 'INVALID_VARIANT'
+        : error instanceof PricingValidationError && error.message.toLowerCase().includes('option')
+          ? 'INVALID_OPTION'
+          : error instanceof BookingRuleValidationError && error.message.toLowerCase().includes('booking is')
+            ? 'SALES_CLOSED'
+            : error instanceof BookingRuleValidationError ? 'VALIDATION_ERROR' : undefined;
+      reply.status(error instanceof BookingQuoteError && error.code === 'OFFERING_NOT_FOUND' ? 404 : 400)
+        .send(compatibleErrorBody(code ?? 'VALIDATION_ERROR', error.message));
       return;
     }
 
     if (error instanceof VariantNotAvailableForScheduleError) {
-      reply.status(409).send({ ok: false, code: error.code, error: error.message, message: error.message });
+      reply.status(409).send(compatibleErrorBody('INVALID_VARIANT', error.message));
       return;
     }
 
     if (error instanceof OverbookingError || error instanceof MissingProductResourceMappingError) {
-      reply.status(409).send({ ok: false, error: error.message });
+      reply.status(409).send(compatibleErrorBody('RESOURCE_UNAVAILABLE', error.message));
       return;
     }
 
     if (error instanceof RegiondoPurchaseRecoveryRequiredError) {
-      reply.status(502).send({
-        ok: false,
-        code: 'REGIONDO_PURCHASE_RECONCILIATION_REQUIRED',
+      reply.status(502).send(compatibleErrorBody(
+        'REGIONDO_PURCHASE_RECONCILIATION_REQUIRED',
+        error.message,
+        {
         retryable: false,
-        error: error.message,
         reason: error.reason,
         ...(error.subId ? { subId: error.subId } : {}),
         ...(error.orderNumber ? { orderNumber: error.orderNumber } : {}),
         ...(error.orderId ? { orderId: error.orderId } : {})
-      });
+        }
+      ));
       return;
     }
 
     if (error instanceof RegiondoLocationValidationError) {
-      reply.status(400).send({
-        ok: false,
-        code: 'REGIONDO_LOCATION_INVALID',
-        error: error.message
-      });
+      reply.status(400).send(compatibleErrorBody('REGIONDO_LOCATION_INVALID', error.message));
       return;
     }
 
     if (error instanceof RegiondoApiError) {
       const details = error.responseBody?.trim();
 
-      reply.status(getRegiondoStatusCode(error)).send({
-        ok: false,
-        error: error.message,
-        ...(details ? { details } : {})
-      });
+      reply.status(getRegiondoStatusCode(error)).send(compatibleErrorBody(
+        error instanceof RegiondoRateLimitError ? 'RATE_LIMITED' : 'REGIONDO_UNAVAILABLE',
+        error.message,
+        details ? { details } : {}
+      ));
       return;
     }
 
@@ -285,6 +313,6 @@ export function registerErrorHandler() {
       reply.status(500).send({ error: { code: 'INTERNAL_ERROR', message: 'Internal Server Error' } });
       return;
     }
-    reply.status(500).send({ ok: false, error: 'Internal Server Error' });
+    reply.status(500).send(compatibleErrorBody('INTERNAL_ERROR', 'Internal Server Error'));
   };
 }

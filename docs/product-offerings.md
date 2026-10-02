@@ -6,6 +6,29 @@ The table retains its existing `(location_id, product_id)` uniqueness for compat
 
 The offering is the booking migration boundary. It owns `booking_provider`, the time-selection mode, timezone, participant limits, duration rules, advance rules, and same-day policy. Changing an offering from Regiondo to Core affects only new intents; historical bookings retain their immutable `bookings.booking_provider` and provider references.
 
+## Fixed booking dates and sales windows
+
+Migration 534 extends the same Offering schedule with `date_selection` and
+`fixed_date`; it does not introduce a second schedule model. A fixed date is a
+Location-local calendar date. The central Core resolver combines it with the
+existing fixed or customer-selected clocks in the Offering IANA timezone, and
+authoritatively rewrites any client-supplied instant onto that date. Explicitly
+conflicting local dates are rejected. Availability, reservation holds,
+consumptions, Variant eligibility, pricing, and immutable Booking start/end
+snapshots therefore all use the resolved interval.
+
+`sales_open_at` and `sales_close_at` are optional instants controlling when a
+Core Offering may be purchased. They are evaluated independently from booking
+schedule availability and exposed as `upcoming`, `open`, or `closed` in the
+customer configuration DTO. Quote, hold, App booking creation, and WordPress
+checkout paths re-run the Core resolver, so frontend state is advisory only.
+Regiondo scheduling and checkout remain provider-driven and do not consume
+these fields.
+
+Variant-specific sales windows (for example Early Bird followed by Standard)
+are intentionally deferred. A future implementation should add a distinct
+Variant sales policy and must not reuse Variant booking-date/time eligibility.
+
 Admin relationship operations use the canonical location-first routes:
 
 - `GET /api/admin/locations/:locationId/products`
